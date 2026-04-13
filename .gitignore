@@ -1,1 +1,6 @@
 build/
+build-local/
+.DS_Store
+
+tests/2025_performance/
+tests/2025_function/
