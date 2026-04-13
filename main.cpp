@@ -22,11 +22,9 @@
 #include "Antlr4Executor.h"
 #include "CodeGenerator.h"
 #include "CodeGeneratorArm32.h"
-#include "FlexBisonExecutor.h"
 #include "FrontEndExecutor.h"
 #include "Graph.h"
 #include "IRGenerator.h"
-#include "RecursiveDescentExecutor.h"
 #include "Module.h"
 
 ///
@@ -111,8 +109,8 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -S, --symbol               Show symbol information\n";
 	std::cout << "  -T, --ast                  Output abstract syntax tree\n";
 	std::cout << "  -I, --ir                   Output intermediate representation\n";
-	std::cout << "  -A, --antlr4               Use Antlr4 for lexical and syntax analysis\n";
-	std::cout << "  -D, --recursive-descent    Use recursive descent parsing\n";
+	std::cout << "  -A, --antlr4               Duprecated, now always use Antlr4 for front-end analysis\n";
+	std::cout << "  -D, --recursive-descent    Duprecated, now always use Antlr4 for front-end analysis\n";
 	std::cout << "  -O, --optimize=LEVEL       Set optimization level\n";
 	std::cout << "  -t, --target=CPU           Specify target CPU architecture\n";
 	std::cout << "  -c, --asmir                Show IR instructions as comments in assembly output\n";
@@ -129,7 +127,7 @@ static int ArgsAnalysis(int argc, char * argv[])
 	// 指定参数解析的选项，可识别-h、-o、-S、-T、-I、-A、-D等选项
 	// -S必须项，输出中间IR、抽象语法树或汇编
 	// -T指定时输出AST，-I输出中间IR，不指定则默认输出汇编
-	// -A指定按照antlr4进行词法与语法分析，-D指定按照递归下降分析法执行，不指定时按flex+bison执行
+	// -A和-D已废弃，默认选用Antlr4进行词法语法分析，保留参数兼容性但不生效
 	// -o要求必须带有附加参数，指定输出的文件
 	// -O要求必须带有附加整数，指明优化的级别
 	// -t要求必须带有目标CPU，指明目标CPU的汇编
@@ -270,17 +268,7 @@ static int compile(std::string inputFile, std::string outputFile)
 		// 4) 把线性IR转换成汇编
 
 		// 创建词法语法分析器
-		FrontEndExecutor * frontEndExecutor;
-		if (gFrontEndAntlr4) {
-			// Antlr4
-			frontEndExecutor = new Antlr4Executor(inputFile);
-		} else if (gFrontEndRecursiveDescentParsing) {
-			// 递归下降分析法
-			frontEndExecutor = new RecursiveDescentExecutor(inputFile);
-		} else {
-			// 默认为Flex+Bison
-			frontEndExecutor = new FlexBisonExecutor(inputFile);
-		}
+		FrontEndExecutor * frontEndExecutor = new Antlr4Executor(inputFile);
 
 		// 前端执行：词法分析、语法分析后产生抽象语法树，其root为全局变量ast_root
 		subResult = frontEndExecutor->run();
@@ -419,6 +407,11 @@ int main(int argc, char * argv[])
 		showHelp(argv[0]);
 
 		return 0;
+	}
+
+	// 如果使用了过时的参数
+	if (gFrontEndAntlr4 || gFrontEndRecursiveDescentParsing) {
+		minic_log(LOG_INFO, "Warnning: 参数-A/--antlr4和-D/--recursive-descent已废弃，默认选用Antlr4进行前端分析，保留参数兼容性但不生效");
 	}
 
 	// 参数解析正确，进行编译处理，目前只支持一个文件的编译。
