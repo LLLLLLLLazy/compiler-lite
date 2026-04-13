@@ -51,18 +51,7 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Smoke test
+      - name: Run selected 2023 tests
         run: |
-          mkdir -p ci-out
-
-          ./build/minic -S -I -o ci-out/test1-1.ir ./tests/test1-1.c
-          test -s ci-out/test1-1.ir
-
-          ./build/minic -S -A -I -o ci-out/test1-1-antlr.ir ./tests/test1-1.c
-          test -s ci-out/test1-1-antlr.ir
-
-          ./build/minic -S -D -I -o ci-out/test1-1-rd.ir ./tests/test1-1.c
-          test -s ci-out/test1-1-rd.ir
-
-          ./build/minic -S -T -o ci-out/test1-1.png ./tests/test1-1.c
-          test -s ci-out/test1-1.png
+          bash ./tools/run-local-tests.sh 2023 2023_func_00_main
+          bash ./tools/run-local-tests.sh 2023 2023_func_01_var_defn2
