@@ -110,6 +110,9 @@ public:
 	void toDeclareString(std::string & str)
 	{
 		str = "declare " + getType()->toString() + " " + getIRName();
+		if (hasIntInitializer) {
+			str += " = " + std::to_string(initIntValue);
+		}
 	}
 
 private:
