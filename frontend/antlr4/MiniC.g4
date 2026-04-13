@@ -25,14 +25,14 @@ blockItemList: blockItem+;
 // 每个Item可以是一个语句，或者变量声明语句
 blockItem: statement | varDecl;
 
-// 变量声明，目前不支持变量含有初值
+// 变量声明，支持变量定义时初始化
 varDecl: basicType varDef (T_COMMA varDef)* T_SEMICOLON;
 
 // 基本类型
 basicType: T_INT;
 
 // 变量定义
-varDef: T_ID;
+varDef: T_ID | T_ID T_ASSIGN expr;
 
 // 目前语句支持return和赋值语句
 statement:
@@ -83,6 +83,9 @@ T_VOID: 'void';
 
 T_ID: [a-zA-Z_][a-zA-Z0-9_]*;
 T_DIGIT: '0' | [1-9][0-9]*;
+
+LINE_COMMENT: '//' ~[\r\n]* -> skip;
+BLOCK_COMMENT: '/*' .*? '*/' -> skip;
 
 /* 空白符丢弃 */
 WS: [ \r\n\t]+ -> skip;

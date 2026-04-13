@@ -516,11 +516,12 @@ bool IRGenerator::ir_declare_statment(ast_node * node)
 
 	for (auto & child: node->sons) {
 
-		// 遍历每个变量声明
 		result = ir_variable_declare(child);
 		if (!result) {
 			break;
 		}
+
+		node->blockInsts.addInst(child->blockInsts);
 	}
 
 	return result;
@@ -531,15 +532,40 @@ bool IRGenerator::ir_declare_statment(ast_node * node)
 /// @return 翻译是否成功，true：成功，false：失败
 bool IRGenerator::ir_variable_declare(ast_node * node)
 {
-	// 共有两个孩子，第一个类型，第二个变量名
+	Value * declaredValue = module->newVarValue(node->sons[0]->type, node->sons[1]->name);
+	if (!declaredValue) {
+		return false;
+	}
 
-	// TODO 这里可强化类型等检查
+	node->val = declaredValue;
 
-	node->val = module->newVarValue(node->sons[0]->type, node->sons[1]->name);
+	if (node->sons.size() < 3) {
+		return true;
+	}
+
+	ast_node * initNode = ir_visit_ast_node(node->sons[2]);
+	if (!initNode) {
+		return false;
+	}
+
+	if (module->getCurrentFunction()) {
+		MoveInstruction * movInst = new MoveInstruction(module->getCurrentFunction(), declaredValue, initNode->val);
+		node->blockInsts.addInst(initNode->blockInsts);
+		node->blockInsts.addInst(movInst);
+		return true;
+	}
+
+	auto * globalVar = dynamic_cast<GlobalVariable *>(declaredValue);
+	auto * initConst = dynamic_cast<ConstInt *>(initNode->val);
+	if (!globalVar || !initConst) {
+		minic_log(LOG_ERROR, "global variable(%s) only supports integer constant initializers", node->sons[1]->name.c_str());
+		return false;
+	}
+
+	globalVar->setInitIntValue(initConst->getVal());
 
 	return true;
 }
-
 /// @brief 函数调用AST节点翻译成线性中间IR
 /// @param node AST节点
 /// @return 翻译是否成功，true：成功，false：失败

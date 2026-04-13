@@ -186,9 +186,14 @@ VarDeclExpr: BasicType VarDef {
 
 		// 创建类型节点
 		ast_node * type_node = ast_node::create_type_node($1);
+		ast_node * decl_node = nullptr;
 
-		// 创建变量定义节点
-		ast_node * decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, $2);
+		if ($2->node_type == ast_operator_type::AST_OP_ASSIGN) {
+			decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, $2->sons[0], $2->sons[1]);
+			delete $2;
+		} else {
+			decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, $2);
+		}
 		decl_node->type = type_node->type;
 
 		// 创建变量声明语句，并加入第一个变量
@@ -198,16 +203,22 @@ VarDeclExpr: BasicType VarDef {
 
 		// 创建类型节点，这里从VarDeclExpr获取类型，前面已经设置
 		ast_node * type_node = ast_node::New($1->type);
+		ast_node * decl_node = nullptr;
 
-		// 创建变量定义节点
-		ast_node * decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, $3);
+		if ($3->node_type == ast_operator_type::AST_OP_ASSIGN) {
+			decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, $3->sons[0], $3->sons[1]);
+			delete $3;
+		} else {
+			decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, $3);
+		}
+		decl_node->type = type_node->type;
 
 		// 插入到变量声明语句
 		$$ = $1->insert_son_node(decl_node);
 	}
 	;
 
-// 变量定义包含变量名，实际上还有初值，这里没有实现。
+// 变量定义支持变量名以及可选的初始化表达式。
 VarDef : T_ID {
 		// 变量ID
 
@@ -215,6 +226,12 @@ VarDef : T_ID {
 
 		// 对于字符型字面量的字符串空间需要释放，因词法用到了strdup进行了字符串复制
 		free($1.id);
+	}
+	| T_ID T_ASSIGN Expr {
+		ast_node * id_node = ast_node::New(var_id_attr{$1.id, $1.lineno});
+		free($1.id);
+
+		$$ = ast_node::New(ast_operator_type::AST_OP_ASSIGN, id_node, $3);
 	}
 	;
 

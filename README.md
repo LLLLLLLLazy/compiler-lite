@@ -624,11 +624,11 @@ Ninja是一个专注于速度的小型构建系统，旨在通过并行构建来
 1. 安装 clang、cmake、ninja、flex、bison、Graphviz、Java 等依赖
 2. 安装 ANTLR4 C++ runtime 4.12.0
 3. 使用 CMake + Ninja 构建 minic
-4. 对 tests/test1-1.c 做 smoke test
-   - 默认前端输出 IR
-   - ANTLR4 前端输出 IR
-   - 递归下降前端输出 IR
-   - 输出 AST 图片
+4. 运行选定的 2023 功能测试
+   - tests/2023_function/2023_func_00_main
+   - tests/2023_function/2023_func_01_var_defn2
+   - 通过 tools/run-local-tests.sh 生成 ARM32 汇编、交叉编译并用 qemu 运行
+   - 将程序输出和退出码与对应的 .out 文件进行比对
 ```
 
 只要把本仓库上传到 GitHub，并确保仓库启用了 Actions，这个工作流就会自动运行。

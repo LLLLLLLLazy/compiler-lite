@@ -51,30 +51,27 @@ void CodeGeneratorArm32::genHeader()
 /// @brief 全局变量Section，主要包含初始化的和未初始化过的
 void CodeGeneratorArm32::genDataSection()
 {
-	// 生成代码段
 	fprintf(fp, ".text\n");
 
-	// 可直接操作文件指针fp进行写操作
+	bool emittedDataSection = false;
 
-	// 目前不支持全局变量和静态变量，以及字符串常量
-	// 全局变量分两种情况：初始化的全局变量和未初始化的全局变量
-	// TODO 这里先处理未初始化的全局变量
 	for (auto var: module->getGlobalVariables()) {
-
 		if (var->isInBSSSection()) {
-
-			// 在BSS段的全局变量，可以包含初值全是0的变量
 			fprintf(fp, ".comm %s, %d, %d\n", var->getName().c_str(), var->getType()->getSize(), var->getAlignment());
 		} else {
-
-			// 有初值的全局变量
 			fprintf(fp, ".global %s\n", var->getName().c_str());
 			fprintf(fp, ".data\n");
 			fprintf(fp, ".align %d\n", var->getAlignment());
 			fprintf(fp, ".type %s, %%object\n", var->getName().c_str());
-			fprintf(fp, "%s\n", var->getName().c_str());
-			// TODO 后面设置初始化的值，具体请参考ARM的汇编
+			fprintf(fp, ".size %s, %d\n", var->getName().c_str(), var->getType()->getSize());
+			fprintf(fp, "%s:\n", var->getName().c_str());
+			fprintf(fp, ".word %d\n", var->getInitIntValue());
+			emittedDataSection = true;
 		}
+	}
+
+	if (emittedDataSection) {
+		fprintf(fp, ".text\n");
 	}
 }
 

@@ -33,6 +33,8 @@
 /* 不进行命令行交互，只能分析文件 */
 %option never-interactive
 
+%x COMMENT
+
 /* 辅助定义式或者宏，后面使用时带上大括号 */
 
 /* 正规式定义 */
@@ -50,8 +52,32 @@
 "+"         { return T_ADD; }
 "-"         { return T_SUB; }
 
+"//"[^\r\n]* {
+                // 单行注释忽略
+                ;
+            }
 
-"0"|[1-9][0-9]*	{
+"/*"        {
+                // 多行注释开始
+                BEGIN(COMMENT);
+            }
+
+<COMMENT>"*/" {
+                // 多行注释结束
+                BEGIN(INITIAL);
+            }
+
+<COMMENT>\n  {
+                // yylineno会自动维护行号
+                ;
+            }
+
+<COMMENT>.   {
+                // 多行注释中的其他字符忽略
+                ;
+            }
+
+"0"|[1-9][0-9]* {
                 // 词法识别无符号整数，注意对于负数，则需要识别为负号和无符号数两个Token
                 yylval.integer_num.val = (uint32_t)strtol(yytext, (char **)NULL, 10);
                 yylval.integer_num.lineno = yylineno;
