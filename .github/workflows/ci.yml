@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            ninja-build \
+            flex \
+            bison \
+            graphviz \
+            graphviz-dev \
+            openjdk-17-jdk \
+            unzip \
+            curl
+
+      - name: Install ANTLR4 C++ runtime 4.12.0
+        run: |
+          curl -L -o /tmp/antlr4-cpp-runtime-4.12.0-source.zip \
+            https://www.antlr.org/download/antlr4-cpp-runtime-4.12.0-source.zip
+          rm -rf /tmp/antlr4-cpp-runtime-4.12.0-source
+          unzip -q /tmp/antlr4-cpp-runtime-4.12.0-source.zip -d /tmp/antlr4-cpp-runtime-4.12.0-source
+          cmake -B /tmp/antlr4-cpp-runtime-4.12.0-source/build \
+            -S /tmp/antlr4-cpp-runtime-4.12.0-source \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DANTLR_BUILD_CPP_TESTS=OFF
+          cmake --build /tmp/antlr4-cpp-runtime-4.12.0-source/build --parallel
+          sudo cmake --install /tmp/antlr4-cpp-runtime-4.12.0-source/build
+
+      - name: Configure
+        run: |
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Smoke test
+        run: |
+          mkdir -p ci-out
+
+          ./build/minic -S -I -o ci-out/test1-1.ir ./tests/test1-1.c
+          test -s ci-out/test1-1.ir
+
+          ./build/minic -S -A -I -o ci-out/test1-1-antlr.ir ./tests/test1-1.c
+          test -s ci-out/test1-1-antlr.ir
+
+          ./build/minic -S -D -I -o ci-out/test1-1-rd.ir ./tests/test1-1.c
+          test -s ci-out/test1-1-rd.ir
+
+          ./build/minic -S -T -o ci-out/test1-1.png ./tests/test1-1.c
+          test -s ci-out/test1-1.png
