@@ -56,6 +56,26 @@ public:
 		return this->inBSSSection;
 	}
 
+	/// @brief 当前是否有显式整型初值
+	[[nodiscard]] bool hasInitIntValue() const
+	{
+		return hasIntInitializer;
+	}
+
+	/// @brief 获取整型初值
+	[[nodiscard]] int32_t getInitIntValue() const
+	{
+		return initIntValue;
+	}
+
+	/// @brief 设置整型初值
+	void setInitIntValue(int32_t value)
+	{
+		initIntValue = value;
+		hasIntInitializer = true;
+		inBSSSection = (value == 0);
+	}
+
 	///
 	/// @brief 取得变量所在的作用域层级
 	/// @return int32_t 层级
@@ -102,4 +122,10 @@ private:
 	/// @brief 默认全局变量在BSS段，没有初始化，或者即使初始化过，但都值都为0
 	///
 	bool inBSSSection = true;
+
+	/// @brief 是否存在显式整型初值
+	bool hasIntInitializer = false;
+
+	/// @brief 整型初值
+	int32_t initIntValue = 0;
 };

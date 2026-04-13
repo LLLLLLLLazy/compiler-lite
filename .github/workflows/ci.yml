@@ -51,7 +51,17 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Run selected 2023 tests
+      - name: Run selected 2023 ASM smoke tests with ANTLR
         run: |
-          bash ./tools/run-local-tests.sh 2023 2023_func_00_main
-          bash ./tools/run-local-tests.sh 2023 2023_func_01_var_defn2
+          MINIC_FRONTEND=antlr MINIC_TEST_MODE=asm bash ./tools/run-local-tests.sh 2023 2023_func_00_main
+          MINIC_FRONTEND=antlr MINIC_TEST_MODE=asm bash ./tools/run-local-tests.sh 2023 2023_func_01_var_defn2
+
+      - name: Run selected 2023 IR smoke tests with ANTLR
+        run: |
+          MINIC_FRONTEND=antlr MINIC_TEST_MODE=ir bash ./tools/run-local-tests.sh 2023 2023_func_00_main
+          MINIC_FRONTEND=antlr MINIC_TEST_MODE=ir bash ./tools/run-local-tests.sh 2023 2023_func_01_var_defn2
+
+      - name: Run selected 2023 AST smoke tests with ANTLR
+        run: |
+          MINIC_FRONTEND=antlr MINIC_TEST_MODE=ast bash ./tools/run-local-tests.sh 2023 2023_func_00_main
+          MINIC_FRONTEND=antlr MINIC_TEST_MODE=ast bash ./tools/run-local-tests.sh 2023 2023_func_01_var_defn2

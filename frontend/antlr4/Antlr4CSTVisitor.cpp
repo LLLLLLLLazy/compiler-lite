@@ -346,14 +346,19 @@ std::any MiniCCSTVisitor::visitVarDecl(MiniCParser::VarDeclContext * ctx)
 	type_attr typeAttr = std::any_cast<type_attr>(visitBasicType(ctx->basicType()));
 
 	for (auto & varCtx: ctx->varDef()) {
-		// 变量名节点
-		ast_node * id_node = std::any_cast<ast_node *>(visitVarDef(varCtx));
+		ast_node * var_node = std::any_cast<ast_node *>(visitVarDef(varCtx));
 
 		// 创建类型节点
 		ast_node * type_node = ast_node::create_type_node(typeAttr);
+		ast_node * decl_node = nullptr;
 
-		// 创建变量定义节点
-		ast_node * decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, id_node);
+		if (var_node->node_type == ast_operator_type::AST_OP_ASSIGN) {
+			decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, var_node->sons[0], var_node->sons[1]);
+			delete var_node;
+		} else {
+			decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, var_node);
+		}
+		decl_node->type = type_node->type;
 
 		// 插入到变量声明语句
 		(void) stmt_node->insert_son_node(decl_node);
@@ -364,14 +369,20 @@ std::any MiniCCSTVisitor::visitVarDecl(MiniCParser::VarDeclContext * ctx)
 
 std::any MiniCCSTVisitor::visitVarDef(MiniCParser::VarDefContext * ctx)
 {
-	// varDef: T_ID;
+	// varDef: T_ID | T_ID T_ASSIGN expr;
 
 	auto varId = ctx->T_ID()->getText();
 
 	// 获取行号
 	int64_t lineNo = (int64_t) ctx->T_ID()->getSymbol()->getLine();
 
-	return ast_node::New(varId, lineNo);
+	ast_node * idNode = ast_node::New(varId, lineNo);
+	if (!ctx->expr()) {
+		return idNode;
+	}
+
+	auto exprNode = std::any_cast<ast_node *>(visitExpr(ctx->expr()));
+	return ast_node::New(ast_operator_type::AST_OP_ASSIGN, idNode, exprNode);
 }
 
 std::any MiniCCSTVisitor::visitBasicType(MiniCParser::BasicTypeContext * ctx)

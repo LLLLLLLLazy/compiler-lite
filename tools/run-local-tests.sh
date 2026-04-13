@@ -9,6 +9,8 @@ MINIC_BIN=${MINIC_BIN:-"${REPO_ROOT}/build/minic"}
 ARM_GCC_BIN=${ARM_GCC_BIN:-"arm-linux-gnueabihf-gcc"}
 QEMU_ARM_BIN=${QEMU_ARM_BIN:-"qemu-arm-static"}
 TEST_ROOT="${REPO_ROOT}/tests"
+FRONTEND=${MINIC_FRONTEND:-"antlr"}
+TEST_MODE=${MINIC_TEST_MODE:-"asm"}
 
 OK_NUM=0
 NG_NUM=0
@@ -31,11 +33,22 @@ Suites:
   2025_performance  -> tests/2025_performance
   all               -> all suites above
 
+Environment:
+  MINIC_FRONTEND=antlr      Use ANTLR frontend (default)
+  MINIC_FRONTEND=recursive  Use recursive-descent frontend
+  MINIC_FRONTEND=default    Use compiler default frontend
+
+  MINIC_TEST_MODE=asm       Verify generated assembly via cross-compile + qemu (default)
+  MINIC_TEST_MODE=ir        Verify generated DragonIR via IRCompiler
+  MINIC_TEST_MODE=ast       Verify AST image generation
+  MINIC_TEST_MODE=all       Run asm + ir + ast checks together
+
 Examples:
   ./tools/run-local-tests.sh
   ./tools/run-local-tests.sh 2023
   ./tools/run-local-tests.sh 2025 2025_func_009_BFS
-  ./tools/run-local-tests.sh 2025_perf_01_mm1
+  MINIC_TEST_MODE=ir ./tools/run-local-tests.sh 2023_func_00_main
+  MINIC_TEST_MODE=all ./tools/run-local-tests.sh 2023 2023_func_00_main
 USAGE
 }
 
@@ -44,6 +57,37 @@ fail_with_usage() {
     usage >&2
     exit 1
 }
+
+frontend_args=()
+case "${FRONTEND}" in
+    antlr)
+        frontend_args=(-A)
+        ;;
+    recursive)
+        frontend_args=(-D)
+        ;;
+    default)
+        frontend_args=()
+        ;;
+    *)
+        fail_with_usage "Unknown MINIC_FRONTEND: ${FRONTEND}"
+        ;;
+esac
+
+case "${TEST_MODE}" in
+    asm|ir|ast|all)
+        ;;
+    *)
+        fail_with_usage "Unknown MINIC_TEST_MODE: ${TEST_MODE}"
+        ;;
+esac
+
+OS_KIND=$(uname -s)
+OS_ARCH=$(uname -m)
+LINUX_DISTRO=$(lsb_release -i -s)
+LINUX_RELEASE=$(lsb_release -r -s)
+IR_RUNNER_DEFAULT="${REPO_ROOT}/tools/IRCompiler/${OS_KIND}-${OS_ARCH}/${LINUX_DISTRO}-${LINUX_RELEASE}/IRCompiler"
+IR_RUNNER_BIN=${IR_RUNNER_BIN:-"${IR_RUNNER_DEFAULT}"}
 
 suite_dir_from_key() {
     case "$1" in
@@ -96,47 +140,30 @@ write_result_file() {
     printf '%s\n' "${exit_code}" >> "${result_file}"
 }
 
-run_testcase() {
-    local suite_dir="$1"
-    local testcase="$2"
-    local case_root="${TEST_ROOT}/${suite_dir}"
-    local cfile="${case_root}/${testcase}.c"
-    local infile="${case_root}/${testcase}.in"
-    local outfile="${case_root}/${testcase}.out"
+run_asm_check() {
+    local cfile="$1"
+    local infile="$2"
+    local outfile="$3"
+    local testcase="$4"
     local asmfile="${TMP_DIR}/${testcase}.s"
     local exe_file="${TMP_DIR}/${testcase}"
-    local result_file="${TMP_DIR}/${testcase}.result"
+    local result_file="${TMP_DIR}/${testcase}.asm.result"
     local output=""
     local exit_code=0
 
-    if [[ ! -f "${cfile}" ]]; then
-        echo "${cfile} not found"
-        NG_NUM=$((NG_NUM + 1))
-        return
-    fi
-
-    if [[ ! -f "${outfile}" ]]; then
-        echo "${outfile} not found"
-        NG_NUM=$((NG_NUM + 1))
-        return
-    fi
-
-    if ! "${MINIC_BIN}" -S -O1 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
-        echo "${testcase}.c compile NG"
-        NG_NUM=$((NG_NUM + 1))
-        return
+    if ! "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
+        echo "${testcase}.c compile NG [asm]"
+        return 1
     fi
 
     if [[ ! -s "${asmfile}" ]]; then
-        echo "${asmfile} not generated"
-        NG_NUM=$((NG_NUM + 1))
-        return
+        echo "${asmfile} not generated [asm]"
+        return 1
     fi
 
     if ! "${ARM_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
-        echo "${testcase}.c link NG"
-        NG_NUM=$((NG_NUM + 1))
-        return
+        echo "${testcase}.c link NG [asm]"
+        return 1
     fi
 
     if [[ -f "${infile}" ]]; then
@@ -150,13 +177,123 @@ run_testcase() {
     write_result_file "${output}" "${exit_code}" "${result_file}"
 
     if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
-        echo "${testcase}.c NG"
+        echo "${testcase}.c NG [asm]"
+        return 1
+    fi
+
+    echo "${testcase}.c OK [asm]"
+    return 0
+}
+
+run_ir_check() {
+    local cfile="$1"
+    local outfile="$2"
+    local testcase="$3"
+    local irfile="${TMP_DIR}/${testcase}.ir"
+    local result_file="${TMP_DIR}/${testcase}.ir.result"
+    local output=""
+    local exit_code=0
+
+    if ! "${MINIC_BIN}" -S "${frontend_args[@]}" -I -O1 -o "${irfile}" "${cfile}" >/dev/null 2>&1; then
+        echo "${testcase}.c compile NG [ir]"
+        return 1
+    fi
+
+    if [[ ! -s "${irfile}" ]]; then
+        echo "${irfile} not generated [ir]"
+        return 1
+    fi
+
+    output="$(${IR_RUNNER_BIN} -R "${irfile}" 2>&1)"
+    exit_code=$?
+
+    write_result_file "${output}" "${exit_code}" "${result_file}"
+
+    if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
+        echo "${testcase}.c NG [ir]"
+        return 1
+    fi
+
+    echo "${testcase}.c OK [ir]"
+    return 0
+}
+
+run_ast_check() {
+    local cfile="$1"
+    local case_root="$2"
+    local testcase="$3"
+    local astfile="${TMP_DIR}/${testcase}.png"
+    local expected_png="${case_root}/${testcase}.png"
+    local expected_svg="${case_root}/${testcase}.svg"
+
+    if ! "${MINIC_BIN}" -S "${frontend_args[@]}" -T -o "${astfile}" "${cfile}" >/dev/null 2>&1; then
+        echo "${testcase}.c compile NG [ast]"
+        return 1
+    fi
+
+    if [[ ! -s "${astfile}" ]]; then
+        echo "${astfile} not generated [ast]"
+        return 1
+    fi
+
+    if [[ -f "${expected_png}" ]]; then
+        if ! cmp -s "${astfile}" "${expected_png}"; then
+            echo "${testcase}.c NG [ast-png]"
+            return 1
+        fi
+    elif [[ -f "${expected_svg}" ]]; then
+        echo "${testcase}.c NG [ast] expected SVG reference is not supported yet"
+        return 1
+    fi
+
+    echo "${testcase}.c OK [ast]"
+    return 0
+}
+
+run_testcase() {
+    local suite_dir="$1"
+    local testcase="$2"
+    local case_root="${TEST_ROOT}/${suite_dir}"
+    local cfile="${case_root}/${testcase}.c"
+    local infile="${case_root}/${testcase}.in"
+    local outfile="${case_root}/${testcase}.out"
+    local failed=0
+
+    if [[ ! -f "${cfile}" ]]; then
+        echo "${cfile} not found"
         NG_NUM=$((NG_NUM + 1))
         return
     fi
 
-    OK_NUM=$((OK_NUM + 1))
-    echo "${testcase}.c OK"
+    if [[ "${TEST_MODE}" != "ast" && ! -f "${outfile}" ]]; then
+        echo "${outfile} not found"
+        NG_NUM=$((NG_NUM + 1))
+        return
+    fi
+
+    if [[ "${TEST_MODE}" == "asm" || "${TEST_MODE}" == "all" ]]; then
+        if ! run_asm_check "${cfile}" "${infile}" "${outfile}" "${testcase}"; then
+            failed=1
+        fi
+    fi
+
+    if [[ "${TEST_MODE}" == "ir" || "${TEST_MODE}" == "all" ]]; then
+        if ! run_ir_check "${cfile}" "${outfile}" "${testcase}"; then
+            failed=1
+        fi
+    fi
+
+    if [[ "${TEST_MODE}" == "ast" || "${TEST_MODE}" == "all" ]]; then
+        if ! run_ast_check "${cfile}" "${case_root}" "${testcase}"; then
+            failed=1
+        fi
+    fi
+
+    if [[ ${failed} -ne 0 ]]; then
+        NG_NUM=$((NG_NUM + 1))
+    else
+        OK_NUM=$((OK_NUM + 1))
+    fi
 }
 
 run_suite() {
@@ -175,12 +312,20 @@ if [[ ! -x "${MINIC_BIN}" ]]; then
     fail_with_usage "Compiler not found: ${MINIC_BIN}. Please build the project first."
 fi
 
-if ! command -v "${ARM_GCC_BIN}" >/dev/null 2>&1; then
-    fail_with_usage "arm-linux-gnueabihf-gcc not found: ${ARM_GCC_BIN}"
+if [[ "${TEST_MODE}" == "asm" || "${TEST_MODE}" == "all" ]]; then
+    if ! command -v "${ARM_GCC_BIN}" >/dev/null 2>&1; then
+        fail_with_usage "arm-linux-gnueabihf-gcc not found: ${ARM_GCC_BIN}"
+    fi
+
+    if ! command -v "${QEMU_ARM_BIN}" >/dev/null 2>&1; then
+        fail_with_usage "qemu-arm-static not found: ${QEMU_ARM_BIN}"
+    fi
 fi
 
-if ! command -v "${QEMU_ARM_BIN}" >/dev/null 2>&1; then
-    fail_with_usage "qemu-arm-static not found: ${QEMU_ARM_BIN}"
+if [[ "${TEST_MODE}" == "ir" || "${TEST_MODE}" == "all" ]]; then
+    if [[ ! -x "${IR_RUNNER_BIN}" ]]; then
+        fail_with_usage "IR runner not found: ${IR_RUNNER_BIN}"
+    fi
 fi
 
 suite_key="all"
