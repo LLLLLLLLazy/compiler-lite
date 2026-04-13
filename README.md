@@ -614,6 +614,25 @@ cmake --build build --parallel
 
 Ninja是一个专注于速度的小型构建系统，旨在通过并行构建来提高构建效率。它通常用于替代传统的Makefile系统。
 
+### 1.5.2. GitHub Actions 持续集成
+
+仓库根目录下新增了 `.github/workflows/ci.yml` 后，把仓库推送到 GitHub 时可自动触发 CI。
+
+当前 CI 会在 `push` 和 `pull_request` 时自动执行如下检查：
+
+```text
+1. 安装 clang、cmake、ninja、flex、bison、Graphviz、Java 等依赖
+2. 安装 ANTLR4 C++ runtime 4.12.0
+3. 使用 CMake + Ninja 构建 minic
+4. 对 tests/test1-1.c 做 smoke test
+   - 默认前端输出 IR
+   - ANTLR4 前端输出 IR
+   - 递归下降前端输出 IR
+   - 输出 AST 图片
+```
+
+只要把本仓库上传到 GitHub，并确保仓库启用了 Actions，这个工作流就会自动运行。
+
 ## 1.6. 使用方法
 
 在Ubuntu 22.04平台上运行。支持的命令如下所示：
@@ -871,4 +890,3 @@ cpack --config CPackSourceConfig.cmake
 ## 1.15 VSCode中使用Antlr4
 
 具体可阅读[Antlr4使用](doc/Antlr4.md)。
-
