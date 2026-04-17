@@ -31,8 +31,17 @@ varDecl: basicType varDef (T_COMMA varDef)* T_SEMICOLON;
 // 基本类型
 basicType: T_INT;
 
+// 多维数组声明
+arrayDimensions: (T_L_BRACKET expr T_R_BRACKET)+;
+
+// 初始化列表(支持嵌套和空列表)
+initList: T_L_BRACE (initItem (T_COMMA initItem)*)? T_R_BRACE;
+
+// 初始化项:嵌套初始化列表或表达式
+initItem: initList | expr;
+
 // 变量定义
-varDef: T_ID | T_ID T_ASSIGN expr;
+varDef: T_ID arrayDimensions? (T_ASSIGN (initList | expr))?;
 
 // 目前语句支持return和赋值语句
 statement:
@@ -60,7 +69,7 @@ primaryExp: T_L_PAREN expr T_R_PAREN | T_DIGIT | lVal;
 realParamList: expr (T_COMMA expr)*;
 
 // 左值表达式
-lVal: T_ID;
+lVal: T_ID (T_L_BRACKET expr T_R_BRACKET)*;
 
 // 用正规式来进行词法规则的描述
 
@@ -69,6 +78,8 @@ T_R_PAREN: ')';
 T_SEMICOLON: ';';
 T_L_BRACE: '{';
 T_R_BRACE: '}';
+T_L_BRACKET: '[';
+T_R_BRACKET: ']';
 
 T_ASSIGN: '=';
 T_COMMA: ',';

@@ -33,6 +33,12 @@ public:
 
     virtual std::any visitBasicType(MiniCParser::BasicTypeContext *context) = 0;
 
+    virtual std::any visitArrayDimensions(MiniCParser::ArrayDimensionsContext *context) = 0;
+
+    virtual std::any visitInitList(MiniCParser::InitListContext *context) = 0;
+
+    virtual std::any visitInitItem(MiniCParser::InitItemContext *context) = 0;
+
     virtual std::any visitVarDef(MiniCParser::VarDefContext *context) = 0;
 
     virtual std::any visitReturnStatement(MiniCParser::ReturnStatementContext *context) = 0;
