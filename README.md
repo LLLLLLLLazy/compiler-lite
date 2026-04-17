@@ -107,7 +107,7 @@ T_INT: 'int';
 T_VOID: 'void';
 
 T_ID: [a-zA-Z_][a-zA-Z0-9_]*;
-T_DIGIT: '0' | [1-9][0-9]*;
+T_DIGIT: '0' [xX] [0-9a-fA-F]+ | '0' [0-7]* | [1-9][0-9]*;
 
 /* 空白符丢弃 */
 WS: [ \r\n\t]+ -> skip;
