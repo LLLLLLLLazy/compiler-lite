@@ -86,8 +86,26 @@ enum class ast_operator_type : int {
 	/// @brief 二元运算符+
 	AST_OP_ADD,
 
+	/// @brief 二元运算符-
+	AST_OP_SUB,
+
 	/// @brief 二元运算符*
-	AST_OP_SUB, //
+	AST_OP_MUL,
+
+	/// @brief 二元运算符/
+	AST_OP_DIV,
+
+	/// @brief 二元运算符%
+	AST_OP_MOD,
+
+	/// @brief 单元运算符-
+	AST_OP_NEG,
+
+	/// @brief 数组下标访问运算符，孩子为：数组变量名、下标表达式...
+	AST_OP_ARRAY_ACCESS,
+
+	/// @brief 初始化列表，孩子为各初始化项（表达式或嵌套初始化列表）
+	AST_OP_INIT_LIST,
 
 	// TODO 抽象语法树其它内部节点运算符追加
 

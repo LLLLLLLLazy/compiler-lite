@@ -20,6 +20,7 @@
 #include "Antlr4CSTVisitor.h"
 #include "AST.h"
 #include "AttrType.h"
+#include "MiniCParser.h"
 
 #define Instanceof(res, type, var) auto res = dynamic_cast<type>(var)
 
@@ -226,7 +227,7 @@ std::any MiniCCSTVisitor::visitAddExp(MiniCParser::AddExpContext * ctx)
 	if (ctx->addOp().empty()) {
 
 		// 没有addOp运算符，则说明闭包识别为0，只识别了第一个非终结符unaryExp
-		return visitUnaryExp(ctx->unaryExp()[0]);
+		return visitMulExp(ctx->mulExp()[0]);
 	}
 
 	ast_node *left, *right;
@@ -243,11 +244,11 @@ std::any MiniCCSTVisitor::visitAddExp(MiniCParser::AddExpContext * ctx)
 		if (k == 0) {
 
 			// 左操作数
-			left = std::any_cast<ast_node *>(visitUnaryExp(ctx->unaryExp()[k]));
+			left = std::any_cast<ast_node *>(visitMulExp(ctx->mulExp()[k]));
 		}
 
 		// 右操作数
-		right = std::any_cast<ast_node *>(visitUnaryExp(ctx->unaryExp()[k + 1]));
+		right = std::any_cast<ast_node *>(visitMulExp(ctx->mulExp()[k + 1]));
 
 		// 新建结点作为下一个运算符的右操作符
 		left = ast_node::New(op, left, right);
@@ -269,13 +270,80 @@ std::any MiniCCSTVisitor::visitAddOp(MiniCParser::AddOpContext * ctx)
 	}
 }
 
+std::any MiniCCSTVisitor::visitMulExp(MiniCParser::MulExpContext * ctx)
+{
+	// 识别的文法产生式：mulExp : unaryExp (mulOp unaryExp)*;
+
+	if (ctx->mulOp().empty()) {
+
+		// 没有mulOp运算符，则说明闭包识别为0，只识别了第一个非终结符unaryExp
+		return visitUnaryExp(ctx->unaryExp()[0]);
+	}
+
+	ast_node *left, *right;
+
+	// 存在mulOp运算符
+	auto opsCtxVec = ctx->mulOp();
+
+	// 有操作符，肯定会进循环，使得right设置正确的值
+	for (int k = 0; k < (int) opsCtxVec.size(); k++) {
+
+		// 获取运算符
+		ast_operator_type op = std::any_cast<ast_operator_type>(visitMulOp(opsCtxVec[k]));
+
+		if (k == 0) {
+
+			// 左操作数
+			left = std::any_cast<ast_node *>(visitUnaryExp(ctx->unaryExp()[k]));
+		}
+
+		// 右操作数
+		right = std::any_cast<ast_node *>(visitUnaryExp(ctx->unaryExp()[k + 1]));
+
+		// 新建结点作为下一个运算符的左操作符
+		left = ast_node::New(op, left, right);
+	}
+
+	return left;
+}
+
+/// @brief 非终结运算符mulOp的遍历
+/// @param ctx CST上下文
+std::any MiniCCSTVisitor::visitMulOp(MiniCParser::MulOpContext * ctx)
+{
+	// 识别的文法产生式：mulOp : T_MUL | T_DIV | T_MOD
+
+	if (ctx->T_MUL()) {
+		return ast_operator_type::AST_OP_MUL;
+	} else if (ctx->T_DIV()) {
+		return ast_operator_type::AST_OP_DIV;
+	} else {
+		return ast_operator_type::AST_OP_MOD;
+	}
+}
+
+std::any MiniCCSTVisitor::visitUnaryOp(MiniCParser::UnaryOpContext *ctx)
+{
+	if (ctx->T_SUB())
+		return ast_operator_type::AST_OP_NEG;
+	return nullptr;
+}
+
 std::any MiniCCSTVisitor::visitUnaryExp(MiniCParser::UnaryExpContext * ctx)
 {
-	// 识别文法产生式：unaryExp: primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN;
+	// 识别文法产生式：unaryExp: unaryOp* primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN;
 
 	if (ctx->primaryExp()) {
-		// 普通表达式
-		return visitPrimaryExp(ctx->primaryExp());
+		// 普通表达式，可能带有unaryOp*前缀
+		ast_node * node = std::any_cast<ast_node *>(visitPrimaryExp(ctx->primaryExp()));
+
+		// 逆序遍历unaryOp，从内到外包裹AST_OP_NEG节点
+		auto unaryOps = ctx->unaryOp();
+		for (int i = (int) unaryOps.size() - 1; i >= 0; i--) {
+			node = ast_node::New(ast_operator_type::AST_OP_NEG, node);
+		}
+
+		return node;
 	} else if (ctx->T_ID()) {
 
 		// 创建函数调用名终结符节点
