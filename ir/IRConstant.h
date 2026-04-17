@@ -25,3 +25,7 @@
 #define IR_KEYWORD_DEFINE "define"
 #define IR_KEYWORD_ADD_I "add"
 #define IR_KEYWORD_SUB_I "sub"
+#define IR_KEYWORD_MUL_I "mul"
+#define IR_KEYWORD_DIV_I "div"
+#define IR_KEYWORD_MOD_I "mod"
+#define IR_KEYWORD_NEG_I "neg"

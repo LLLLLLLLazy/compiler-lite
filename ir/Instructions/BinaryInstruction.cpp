@@ -20,13 +20,15 @@
 /// @param _op 操作符
 /// @param _result 结果操作数
 /// @param _srcVal1 源操作数1
-/// @param _srcVal2 源操作数2
+/// @param _srcVal2 源操作数2（单目运算时可为nullptr）
 BinaryInstruction::BinaryInstruction(
 	Function * _func, IRInstOperator _op, Value * _srcVal1, Value * _srcVal2, Type * _type)
 	: Instruction(_func, _op, _type)
 {
 	addOperand(_srcVal1);
-	addOperand(_srcVal2);
+	if (_srcVal2 != nullptr) {
+		addOperand(_srcVal2);
+	}
 }
 
 /// @brief 转换成字符串
@@ -34,18 +36,38 @@ BinaryInstruction::BinaryInstruction(
 void BinaryInstruction::toString(std::string & str)
 {
 
-	Value *src1 = getOperand(0), *src2 = getOperand(1);
+	Value * src1 = getOperand(0);
 
 	switch (op) {
 		case IRInstOperator::IRINST_OP_ADD_I:
 
 			// 加法指令，二元运算
-			str = getIRName() + " = add " + src1->getIRName() + "," + src2->getIRName();
+			str = getIRName() + " = add " + src1->getIRName() + "," + getOperand(1)->getIRName();
 			break;
 		case IRInstOperator::IRINST_OP_SUB_I:
 
 			// 减法指令，二元运算
-			str = getIRName() + " = sub " + src1->getIRName() + "," + src2->getIRName();
+			str = getIRName() + " = sub " + src1->getIRName() + "," + getOperand(1)->getIRName();
+			break;
+		case IRInstOperator::IRINST_OP_MUL_I:
+
+			// 乘法指令，二元运算
+			str = getIRName() + " = mul " + src1->getIRName() + "," + getOperand(1)->getIRName();
+			break;
+		case IRInstOperator::IRINST_OP_DIV_I:
+
+			// 除法指令，二元运算
+			str = getIRName() + " = div " + src1->getIRName() + "," + getOperand(1)->getIRName();
+			break;
+		case IRInstOperator::IRINST_OP_MOD_I:
+
+			// 求余指令，二元运算
+			str = getIRName() + " = mod " + src1->getIRName() + "," + getOperand(1)->getIRName();
+			break;
+		case IRInstOperator::IRINST_OP_NEG_I:
+
+			// 求负指令，单目运算
+			str = getIRName() + " = neg " + src1->getIRName();
 			break;
 
 		default:
