@@ -54,13 +54,22 @@ statement:
 expr: addExp;
 
 // 加减表达式
-addExp: unaryExp (addOp unaryExp)*;
+addExp: mulExp (addOp mulExp)*;
 
 // 加减运算符
 addOp: T_ADD | T_SUB;
 
+// 乘除模运算
+mulOp: T_MUL | T_DIV | T_MOD;
+
+// 乘法表达式
+mulExp: unaryExp (mulOp unaryExp)*;
+
+// 一元运算符(-)
+unaryOp: T_SUB;
+
 // 一元表达式
-unaryExp: primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN;
+unaryExp: unaryOp* primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN;
 
 // 基本表达式：括号表达式、整数、左值表达式
 primaryExp: T_L_PAREN expr T_R_PAREN | T_DIGIT | lVal;
@@ -86,6 +95,9 @@ T_COMMA: ',';
 
 T_ADD: '+';
 T_SUB: '-';
+T_MUL: '*';
+T_DIV: '/';
+T_MOD: '%';
 
 // 要注意关键字同样也属于T_ID，因此必须放在T_ID的前面，否则会识别成T_ID
 T_RETURN: 'return';
@@ -93,7 +105,7 @@ T_INT: 'int';
 T_VOID: 'void';
 
 T_ID: [a-zA-Z_][a-zA-Z0-9_]*;
-T_DIGIT: '0' | [1-9][0-9]*;
+T_DIGIT: '0' | [1-9][0-9]* | '0' [1-9][0-9]+ | '0' [xX][0-9a-fA-F]+;
 
 LINE_COMMENT: '//' ~[\r\n]* -> skip;
 BLOCK_COMMENT: '/*' .*? '*/' -> skip;
