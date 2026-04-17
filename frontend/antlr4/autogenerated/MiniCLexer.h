@@ -14,8 +14,9 @@ public:
   enum {
     T_L_PAREN = 1, T_R_PAREN = 2, T_SEMICOLON = 3, T_L_BRACE = 4, T_R_BRACE = 5, 
     T_L_BRACKET = 6, T_R_BRACKET = 7, T_ASSIGN = 8, T_COMMA = 9, T_ADD = 10, 
-    T_SUB = 11, T_RETURN = 12, T_INT = 13, T_VOID = 14, T_ID = 15, T_DIGIT = 16, 
-    LINE_COMMENT = 17, BLOCK_COMMENT = 18, WS = 19
+    T_SUB = 11, T_MUL = 12, T_DIV = 13, T_MOD = 14, T_RETURN = 15, T_INT = 16, 
+    T_VOID = 17, T_ID = 18, T_DIGIT = 19, LINE_COMMENT = 20, BLOCK_COMMENT = 21, 
+    WS = 22
   };
 
   explicit MiniCLexer(antlr4::CharStream *input);
