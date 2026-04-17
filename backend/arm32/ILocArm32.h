@@ -166,6 +166,14 @@ public:
 	/// @param arg2 源操作数
 	void inst(std::string op, std::string rs, std::string arg1, std::string arg2);
 
+	/// @brief 四操作数指令（如 mls Rd, Rm, Rs, Rn）
+	/// @param op 操作码
+	/// @param rs 目标
+	/// @param arg1 源操作数1
+	/// @param arg2 源操作数2
+	/// @param arg3 源操作数3
+	void inst(std::string op, std::string rs, std::string arg1, std::string arg2, std::string arg3);
+
 	/// @brief 加载变量到寄存器
 	/// @param rs_reg_no 结果寄存器
 	/// @param var 变量

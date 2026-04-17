@@ -244,6 +244,12 @@ void ILocArm32::inst(std::string op, std::string rs, std::string arg1, std::stri
 	emit(op, rs, arg1, arg2);
 }
 
+/// @brief 四操作数指令（如 mls Rd, Rm, Rs, Rn）
+void ILocArm32::inst(std::string op, std::string rs, std::string arg1, std::string arg2, std::string arg3)
+{
+	emit(op, rs, arg1, arg2, "", arg3);
+}
+
 ///
 /// @brief 注释指令，不包含分号
 ///
