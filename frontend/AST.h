@@ -22,8 +22,6 @@
 #include <vector>
 
 #include "AttrType.h"
-#include "IRCode.h"
-#include "Value.h"
 #include "VoidType.h"
 
 ///
@@ -303,12 +301,6 @@ public:
 
 	/// @brief 孩子节点
 	std::vector<ast_node *> sons;
-
-	/// @brief 线性IR指令块，可包含多条IR指令，用于线性IR指令产生用
-	InterCode blockInsts;
-
-	/// @brief 线性IR指令或者运行产生的Value，用于线性IR指令产生用
-	Value * val = nullptr;
 
 	///
 	/// @brief 在进入block等节点时是否要进行作用域管理。默认要做。
