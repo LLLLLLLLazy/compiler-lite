@@ -22,8 +22,6 @@
 #include <vector>
 
 #include "AttrType.h"
-#include "IRCode.h"
-#include "Value.h"
 #include "VoidType.h"
 
 ///
@@ -98,14 +96,8 @@ enum class ast_operator_type : int {
 	/// @brief 二元运算符%
 	AST_OP_MOD,
 
-	/// @brief 单元运算符-
+	/// @brief 单目运算符- (求负)
 	AST_OP_NEG,
-
-	/// @brief 数组下标访问运算符，孩子为：数组变量名、下标表达式...
-	AST_OP_ARRAY_ACCESS,
-
-	/// @brief 初始化列表，孩子为各初始化项（表达式或嵌套初始化列表）
-	AST_OP_INIT_LIST,
 
 	// TODO 抽象语法树其它内部节点运算符追加
 
@@ -309,12 +301,6 @@ public:
 
 	/// @brief 孩子节点
 	std::vector<ast_node *> sons;
-
-	/// @brief 线性IR指令块，可包含多条IR指令，用于线性IR指令产生用
-	InterCode blockInsts;
-
-	/// @brief 线性IR指令或者运行产生的Value，用于线性IR指令产生用
-	Value * val = nullptr;
 
 	///
 	/// @brief 在进入block等节点时是否要进行作用域管理。默认要做。

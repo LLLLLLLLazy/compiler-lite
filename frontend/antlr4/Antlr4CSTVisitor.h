@@ -132,7 +132,7 @@ protected:
 	/// @param ctx CST上下文
 	/// @return std::any 类型
 	///
-	std::any visitUnaryOp(MiniCParser::UnaryOpContext *ctx) override;
+	std::any visitUnaryOp(MiniCParser::UnaryOpContext * ctx) override;
 
 	///
 	/// @brief 非终结符PrimaryExp的分析
