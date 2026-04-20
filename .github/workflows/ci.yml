@@ -19,15 +19,11 @@ jobs:
             clang \
             cmake \
             ninja-build \
-            flex \
-            bison \
             graphviz \
             graphviz-dev \
             openjdk-17-jdk \
             unzip \
-            curl \
-            gcc-arm-linux-gnueabihf \
-            qemu-user-static
+            curl
 
       - name: Install ANTLR4 C++ runtime 4.12.0
         run: |
@@ -53,11 +49,14 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Run selected 2023 ASM smoke tests with ANTLR
+      - name: Run 2023 LLVM IR smoke tests
         run: |
           TESTS=(
             2023_func_00_main
             2023_func_01_var_defn2
+            2023_func_02_var_defn3
+            2023_func_06_const_var_defn2
+            2023_func_10_var_defn_func
             2023_func_11_add2
             2023_func_12_addc
             2023_func_13_sub2
@@ -71,14 +70,16 @@ jobs:
             2023_func_35_op_priority1
             2023_func_36_op_priority2
             2023_func_37_op_priority3
+            2023_func_45_comment1
             2023_func_46_hex_defn
             2023_func_47_hex_oct_add
+            2023_func_48_assign_complex_expr
           )
           for test_case in "${TESTS[@]}"; do
-            MINIC_FRONTEND=antlr MINIC_TEST_MODE=asm bash ./tools/run-local-tests.sh 2023 "${test_case}"
+            MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2023 "${test_case}"
           done
 
-      - name: Run selected 2023 IR smoke tests with ANTLR
+      - name: Run 2023 AST smoke tests
         run: |
           TESTS=(
             2023_func_00_main
@@ -100,30 +101,5 @@ jobs:
             2023_func_47_hex_oct_add
           )
           for test_case in "${TESTS[@]}"; do
-            MINIC_FRONTEND=antlr MINIC_TEST_MODE=ir bash ./tools/run-local-tests.sh 2023 "${test_case}"
-          done
-
-      - name: Run selected 2023 AST smoke tests with ANTLR
-        run: |
-          TESTS=(
-            2023_func_00_main
-            2023_func_01_var_defn2
-            2023_func_11_add2
-            2023_func_12_addc
-            2023_func_13_sub2
-            2023_func_14_subc
-            2023_func_15_mul
-            2023_func_16_mulc
-            2023_func_17_div
-            2023_func_18_divc
-            2023_func_19_mod
-            2023_func_20_rem
-            2023_func_35_op_priority1
-            2023_func_36_op_priority2
-            2023_func_37_op_priority3
-            2023_func_46_hex_defn
-            2023_func_47_hex_oct_add
-          )
-          for test_case in "${TESTS[@]}"; do
-            MINIC_FRONTEND=antlr MINIC_TEST_MODE=ast bash ./tools/run-local-tests.sh 2023 "${test_case}"
+            MINIC_TEST_MODE=ast bash ./tools/run-local-tests.sh 2023 "${test_case}"
           done

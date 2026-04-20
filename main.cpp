@@ -20,12 +20,9 @@
 #include "Common.h"
 #include "AST.h"
 #include "Antlr4Executor.h"
-#include "CodeGenerator.h"
-#include "CodeGeneratorArm32.h"
 #include "FrontEndExecutor.h"
 #include "Graph.h"
-#include "IRGenerator.h"
-#include "Module.h"
+#include "IREmitter.h"
 
 ///
 /// @brief 是否显示帮助信息
@@ -38,14 +35,9 @@ static bool gShowHelp = false;
 static bool gShowAST = false;
 
 ///
-/// @brief 产生线性IR，线性IR，默认输出
+/// @brief 产生线性IR（LLVM IR），默认输出
 ///
 static bool gShowLineIR = false;
-
-///
-/// @brief 显示汇编
-///
-static bool gShowASM = false;
 
 ///
 /// @brief 输出中间IR，含汇编或者自定义IR等，默认输出线性IR
@@ -75,8 +67,8 @@ static bool gAsmAlsoShowIR = false;
 /// @brief 优化的级别，即-O后面的数字，默认为0
 static int gOptLevel = 0;
 
-/// @brief 指定CPU目标架构，这里默认为ARM32
-static std::string gCPUTarget = "ARM32";
+/// @brief 指定CPU目标架构
+static std::string gCPUTarget;
 
 /// @brief 输入源文件
 static std::string gInputFile;
@@ -90,6 +82,7 @@ static struct option long_options[] = {
 	{"symbol", no_argument, nullptr, 'S'},
 	{"ast", no_argument, nullptr, 'T'},
 	{"ir", no_argument, nullptr, 'I'},
+	{"llvmir", no_argument, nullptr, 'L'},
 	{"antlr4", no_argument, nullptr, 'A'},
 	{"recursive-descent", no_argument, nullptr, 'D'},
 	{"optimize", required_argument, nullptr, 'O'},
@@ -101,16 +94,16 @@ static struct option long_options[] = {
 /// @param exeName
 static void showHelp(const std::string & exeName)
 {
-	std::cout << exeName + " -S [--symbol] [-A | --antlr4 | -D | --recursive-descent] [-T | --ast | -I | --ir] [-o "
-						   "output | --output=output] source\n";
+	std::cout << exeName + " -S [-T | --ast | -I | --ir | -L | --llvmir] [-o output | --output=output] source\n";
 	std::cout << "Options:\n";
 	std::cout << "  -h, --help                 Show this help message\n";
 	std::cout << "  -o, --output=FILE          Specify output file\n";
 	std::cout << "  -S, --symbol               Show symbol information\n";
 	std::cout << "  -T, --ast                  Output abstract syntax tree\n";
-	std::cout << "  -I, --ir                   Output intermediate representation\n";
-	std::cout << "  -A, --antlr4               Duprecated, now always use Antlr4 for front-end analysis\n";
-	std::cout << "  -D, --recursive-descent    Duprecated, now always use Antlr4 for front-end analysis\n";
+	std::cout << "  -I, --ir                   Output LLVM IR (same as -L)\n";
+	std::cout << "  -L, --llvmir               Output LLVM IR (.ll)\n";
+	std::cout << "  -A, --antlr4               Deprecated, now always use Antlr4\n";
+	std::cout << "  -D, --recursive-descent    Deprecated, now always use Antlr4\n";
 	std::cout << "  -O, --optimize=LEVEL       Set optimization level\n";
 	std::cout << "  -t, --target=CPU           Specify target CPU architecture\n";
 	std::cout << "  -c, --asmir                Show IR instructions as comments in assembly output\n";
@@ -132,7 +125,7 @@ static int ArgsAnalysis(int argc, char * argv[])
 	// -O要求必须带有附加整数，指明优化的级别
 	// -t要求必须带有目标CPU，指明目标CPU的汇编
 	// -c选项在输出汇编时有效，附带输出IR指令内容
-	const char options[] = "ho:STIADO:t:c";
+	const char options[] = "ho:STIADLO:t:c";
 	int option_index = 0;
 
 	opterr = 1;
@@ -153,9 +146,12 @@ lb_check:
 				gShowAST = true;
 				break;
 			case 'I':
-				// 产生中间IR
+				// 产生LLVM IR
 				gShowLineIR = true;
 				break;
+			case 'L':
+				// 产生LLVM IR
+				gShowLineIR = true;
 				break;
 			case 'A':
 				// 选用antlr4
@@ -211,7 +207,7 @@ lb_check:
 		return -1;
 	}
 
-	// 显示符号信息，必须指定，可选抽象语法树、中间IR(DragonIR)等显示
+	// 显示符号信息，必须指定，可选抽象语法树、LLVM IR等显示
 	if (!gShowSymbol) {
 		return -1;
 	}
@@ -219,10 +215,10 @@ lb_check:
 	int flag = (int) gShowLineIR + (int) gShowAST;
 
 	if (0 == flag) {
-		// 没有指定，则输出汇编指令
-		gShowASM = true;
+		// 没有指定，则默认输出LLVM IR
+		gShowLineIR = true;
 	} else if (flag != 1) {
-		// 线性中间IR、抽象语法树只能同时选择一个
+		// LLVM IR、抽象语法树只能同时选择一个
 		return -1;
 	}
 
@@ -232,10 +228,8 @@ lb_check:
 		// 默认文件名
 		if (gShowAST) {
 			gOutputFile = "output.png";
-		} else if (gShowLineIR) {
-			gOutputFile = "output.ir";
 		} else {
-			gOutputFile = "output.s";
+			gOutputFile = "output.ll";
 		}
 	}
 
@@ -255,27 +249,23 @@ static int compile(std::string inputFile, std::string outputFile)
 	// 内部函数调用返回值保存变量
 	int subResult;
 
-	Module * module = nullptr;
-
-	// 这里采用do {} while(0)架构的目的是如果处理出错可通过break退出循环，出口唯一
-	// 在编译器编译优化时会自动去除，因为while恒假的缘故
 	do {
 
 		// 编译过程主要包括：
 		// 1）词法语法分析生成AST
-		// 2) 遍历AST生成线性IR
-		// 3) 对线性IR进行优化：目前不支持
-		// 4) 把线性IR转换成汇编
+		// 2) 遍历AST生成LLVM IR
+		// 3) 输出LLVM IR或汇编
+		//
+		// TODO：实现 RISCV64 后端支持
 
 		// 创建词法语法分析器
 		FrontEndExecutor * frontEndExecutor = new Antlr4Executor(inputFile);
 
-		// 前端执行：词法分析、语法分析后产生抽象语法树，其root为全局变量ast_root
+		// 前端执行：词法分析、语法分析后产生抽象语法树
 		subResult = frontEndExecutor->run();
 		if (!subResult) {
 
 			minic_log(LOG_ERROR, "前端分析错误");
-			// 退出循环
 			break;
 		}
 
@@ -284,8 +274,6 @@ static int compile(std::string inputFile, std::string outputFile)
 
 		// 清理前端资源
 		delete frontEndExecutor;
-
-		// 这里可进行非线性AST的优化
 
 		if (gShowAST) {
 
@@ -301,78 +289,31 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
-		// 输出线性中间IR、计算器模拟解释执行、输出汇编指令
-		// 都需要遍历AST转换成线性IR指令
-
-		// 符号表，保存所有的变量以及函数等信息
-		Module * module = new Module(inputFile);
-
-		// 遍历抽象语法树产生线性IR，相关信息保存到符号表中
-		IRGenerator ast2IR(astRoot, module);
-		subResult = ast2IR.run();
+		// 遍历AST产生LLVM IR文本
+		IREmitter irEmitter(astRoot, inputFile);
+		subResult = irEmitter.run();
 		if (!subResult) {
 
-			// 输出错误信息
-			minic_log(LOG_ERROR, "中间IR生成错误");
+			minic_log(LOG_ERROR, "LLVM IR生成错误");
 
+			// 清理抽象语法树
+			ast_node::Delete(astRoot);
 			break;
 		}
 
 		// 清理抽象语法树
 		ast_node::Delete(astRoot);
 
-		if (gShowLineIR) {
-
-			// 对IR的名字重命名
-			module->renameIR();
-
-			// 输出IR
-			module->outputIR(outputFile);
-
-			// 设置返回结果：正常
-			result = 0;
-
+		// 输出LLVM IR文本
+		if (!irEmitter.writeToFile(outputFile)) {
+			minic_log(LOG_ERROR, "LLVM IR输出错误");
 			break;
 		}
-
-		// 要使得汇编能输出IR指令作为注释，必须对IR的名字进行命名，否则为空值
-		if (gAsmAlsoShowIR) {
-			// 对IR的名字重命名
-			module->renameIR();
-		}
-
-		// 这里可追加中间代码优化，体系结果无关的优化等
-
-		// 后端处理，体系结果相关的操作
-		// 这里提供一种面向ARM32的汇编产生器CodeGeneratorArm32作为参考
-		// 需要时可根据需要修改或追加新的目标体系架构
-		if (gShowASM) {
-
-			CodeGenerator * generator = nullptr;
-
-			if (gCPUTarget == "ARM32") {
-				// 输出面向ARM32的汇编指令
-				generator = new CodeGeneratorArm32(module);
-				generator->setShowLinearIR(gAsmAlsoShowIR);
-				generator->run(outputFile);
-			} else {
-				// 不支持指定的CPU架构
-				minic_log(LOG_ERROR, "指定的目标CPU架构(%s)不支持", gCPUTarget.c_str());
-				break;
-			}
-
-			delete generator;
-		}
-
-		// 清理符号表
-		module->Delete();
 
 		// 成功执行
 		result = 0;
 
 	} while (false);
-
-	delete module;
 
 	return result;
 }
