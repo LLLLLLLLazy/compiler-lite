@@ -30,11 +30,24 @@ IREmitter::IREmitter(ast_node * _root, const std::string & _moduleName)
     handlers[ast_operator_type::AST_OP_MUL] = &IREmitter::visitMul;
     handlers[ast_operator_type::AST_OP_DIV] = &IREmitter::visitDiv;
     handlers[ast_operator_type::AST_OP_MOD] = &IREmitter::visitMod;
+    handlers[ast_operator_type::AST_OP_LT] = &IREmitter::visitLt;
+    handlers[ast_operator_type::AST_OP_GT] = &IREmitter::visitGt;
+    handlers[ast_operator_type::AST_OP_LE] = &IREmitter::visitLe;
+    handlers[ast_operator_type::AST_OP_GE] = &IREmitter::visitGe;
+    handlers[ast_operator_type::AST_OP_EQ] = &IREmitter::visitEq;
+    handlers[ast_operator_type::AST_OP_NE] = &IREmitter::visitNe;
+    handlers[ast_operator_type::AST_OP_LAND] = &IREmitter::visitLogicalAnd;
+    handlers[ast_operator_type::AST_OP_LOR] = &IREmitter::visitLogicalOr;
     handlers[ast_operator_type::AST_OP_NEG] = &IREmitter::visitNeg;
+    handlers[ast_operator_type::AST_OP_NOT] = &IREmitter::visitNot;
 
     // 语句
     handlers[ast_operator_type::AST_OP_ASSIGN] = &IREmitter::visitAssign;
     handlers[ast_operator_type::AST_OP_RETURN] = &IREmitter::visitReturn;
+    handlers[ast_operator_type::AST_OP_IF] = &IREmitter::visitIf;
+    handlers[ast_operator_type::AST_OP_WHILE] = &IREmitter::visitWhile;
+    handlers[ast_operator_type::AST_OP_BREAK] = &IREmitter::visitBreak;
+    handlers[ast_operator_type::AST_OP_CONTINUE] = &IREmitter::visitContinue;
 
     // 函数调用
     handlers[ast_operator_type::AST_OP_FUNC_CALL] = &IREmitter::visitFuncCall;
@@ -162,6 +175,20 @@ std::string IREmitter::typeStr(Type * ty)
     return "i32";
 }
 
+std::string IREmitter::emitCondValue(const IRValue & value)
+{
+    std::string reg = nextReg();
+    emit(reg + " = icmp ne i32 " + value.text + ", 0");
+    return reg;
+}
+
+std::string IREmitter::emitBoolToInt(const std::string & boolReg)
+{
+    std::string reg = nextReg();
+    emit(reg + " = zext i1 " + boolReg + " to i32");
+    return reg;
+}
+
 void IREmitter::emit(const std::string & inst)
 {
     funcBody << "  " << inst << "\n";
@@ -170,6 +197,12 @@ void IREmitter::emit(const std::string & inst)
 void IREmitter::emitGlobal(const std::string & line)
 {
     globalSection << line << "\n";
+}
+
+void IREmitter::startBlock(const std::string & label)
+{
+    funcBody << label << ":\n";
+    hasTerminator = false;
 }
 
 // ==================== 节点分发 ====================
@@ -240,6 +273,8 @@ IREmitter::IRValue IREmitter::visitFuncDef(ast_node * node)
     hasTerminator = false;
     inFunction = true;
     currentRetType = retType;
+    breakLabels.clear();
+    continueLabels.clear();
 
     // 为每个参数预分配寄存器编号（LLVM IR 中函数参数从 %0 开始）
     // 先跳过参数的寄存器编号
@@ -376,6 +411,145 @@ IREmitter::IRValue IREmitter::visitReturn(ast_node * node)
     emit("br label %" + exitLabel);
     hasTerminator = true;
 
+    return {"__ok", false};
+}
+
+IREmitter::IRValue IREmitter::visitIf(ast_node * node)
+{
+    ast_node * condNode = node->sons[0];
+    ast_node * thenNode = node->sons[1];
+    ast_node * elseNode = node->sons.size() >= 3 ? node->sons[2] : nullptr;
+
+    IRValue condVal = visitNode(condNode);
+    if (condVal.text.empty() && !condVal.isVoid) {
+        return {};
+    }
+
+    std::string condReg = emitCondValue(condVal);
+    std::string thenLabel = nextLabel();
+    std::string endLabel = nextLabel();
+
+    if (!elseNode) {
+        emit("br i1 " + condReg + ", label %" + thenLabel + ", label %" + endLabel);
+        hasTerminator = true;
+
+        startBlock(thenLabel);
+        IRValue thenResult = visitNode(thenNode);
+        if (thenResult.text.empty() && !thenResult.isVoid) {
+            return {};
+        }
+        if (!hasTerminator) {
+            emit("br label %" + endLabel);
+            hasTerminator = true;
+        }
+
+        startBlock(endLabel);
+        return {"__ok", false};
+    }
+
+    std::string elseLabel = nextLabel();
+    emit("br i1 " + condReg + ", label %" + thenLabel + ", label %" + elseLabel);
+    hasTerminator = true;
+
+    startBlock(thenLabel);
+    IRValue thenResult = visitNode(thenNode);
+    if (thenResult.text.empty() && !thenResult.isVoid) {
+        return {};
+    }
+    bool thenTerminated = hasTerminator;
+    if (!thenTerminated) {
+        emit("br label %" + endLabel);
+        hasTerminator = true;
+    }
+
+    startBlock(elseLabel);
+    IRValue elseResult = visitNode(elseNode);
+    if (elseResult.text.empty() && !elseResult.isVoid) {
+        return {};
+    }
+    bool elseTerminated = hasTerminator;
+    if (!elseTerminated) {
+        emit("br label %" + endLabel);
+        hasTerminator = true;
+    }
+
+    if (thenTerminated && elseTerminated) {
+        hasTerminator = true;
+        return {"__ok", false};
+    }
+
+    startBlock(endLabel);
+    return {"__ok", false};
+}
+
+IREmitter::IRValue IREmitter::visitWhile(ast_node * node)
+{
+    ast_node * condNode = node->sons[0];
+    ast_node * bodyNode = node->sons[1];
+
+    std::string condLabel = nextLabel();
+    std::string bodyLabel = nextLabel();
+    std::string endLabel = nextLabel();
+
+    emit("br label %" + condLabel);
+    hasTerminator = true;
+
+    startBlock(condLabel);
+    IRValue condVal = visitNode(condNode);
+    if (condVal.text.empty() && !condVal.isVoid) {
+        return {};
+    }
+    std::string condReg = emitCondValue(condVal);
+    emit("br i1 " + condReg + ", label %" + bodyLabel + ", label %" + endLabel);
+    hasTerminator = true;
+
+    breakLabels.push_back(endLabel);
+    continueLabels.push_back(condLabel);
+
+    startBlock(bodyLabel);
+    IRValue bodyResult = visitNode(bodyNode);
+    if (bodyResult.text.empty() && !bodyResult.isVoid) {
+        breakLabels.pop_back();
+        continueLabels.pop_back();
+        return {};
+    }
+    if (!hasTerminator) {
+        emit("br label %" + condLabel);
+        hasTerminator = true;
+    }
+
+    breakLabels.pop_back();
+    continueLabels.pop_back();
+
+    startBlock(endLabel);
+    return {"__ok", false};
+}
+
+IREmitter::IRValue IREmitter::visitBreak(ast_node * node)
+{
+    (void) node;
+
+    if (breakLabels.empty()) {
+        minic_log(LOG_ERROR, "break 语句不在循环内");
+        return {};
+    }
+
+    emit("br label %" + breakLabels.back());
+    hasTerminator = true;
+    return {"__ok", false};
+}
+
+IREmitter::IRValue IREmitter::visitContinue(ast_node * node)
+{
+    (void) node;
+
+    if (continueLabels.empty()) {
+        minic_log(LOG_ERROR, "continue 语句不在循环内");
+        return {};
+    }
+
+    emit("br label %" + continueLabels.back());
+    hasTerminator = true;
     return {"__ok", false};
 }
 
@@ -531,6 +705,140 @@ IREmitter::IRValue IREmitter::visitMod(ast_node * node)
     return {reg, false};
 }
 
+IREmitter::IRValue IREmitter::visitLt(ast_node * node)
+{
+    IRValue lhs = visitNode(node->sons[0]);
+    if (lhs.text.empty()) return {};
+    IRValue rhs = visitNode(node->sons[1]);
+    if (rhs.text.empty()) return {};
+
+    std::string boolReg = nextReg();
+    emit(boolReg + " = icmp slt i32 " + lhs.text + ", " + rhs.text);
+    return {emitBoolToInt(boolReg), false};
+}
+
+IREmitter::IRValue IREmitter::visitGt(ast_node * node)
+{
+    IRValue lhs = visitNode(node->sons[0]);
+    if (lhs.text.empty()) return {};
+    IRValue rhs = visitNode(node->sons[1]);
+    if (rhs.text.empty()) return {};
+
+    std::string boolReg = nextReg();
+    emit(boolReg + " = icmp sgt i32 " + lhs.text + ", " + rhs.text);
+    return {emitBoolToInt(boolReg), false};
+}
+
+IREmitter::IRValue IREmitter::visitLe(ast_node * node)
+{
+    IRValue lhs = visitNode(node->sons[0]);
+    if (lhs.text.empty()) return {};
+    IRValue rhs = visitNode(node->sons[1]);
+    if (rhs.text.empty()) return {};
+
+    std::string boolReg = nextReg();
+    emit(boolReg + " = icmp sle i32 " + lhs.text + ", " + rhs.text);
+    return {emitBoolToInt(boolReg), false};
+}
+
+IREmitter::IRValue IREmitter::visitGe(ast_node * node)
+{
+    IRValue lhs = visitNode(node->sons[0]);
+    if (lhs.text.empty()) return {};
+    IRValue rhs = visitNode(node->sons[1]);
+    if (rhs.text.empty()) return {};
+
+    std::string boolReg = nextReg();
+    emit(boolReg + " = icmp sge i32 " + lhs.text + ", " + rhs.text);
+    return {emitBoolToInt(boolReg), false};
+}
+
+IREmitter::IRValue IREmitter::visitEq(ast_node * node)
+{
+    IRValue lhs = visitNode(node->sons[0]);
+    if (lhs.text.empty()) return {};
+    IRValue rhs = visitNode(node->sons[1]);
+    if (rhs.text.empty()) return {};
+
+    std::string boolReg = nextReg();
+    emit(boolReg + " = icmp eq i32 " + lhs.text + ", " + rhs.text);
+    return {emitBoolToInt(boolReg), false};
+}
+
+IREmitter::IRValue IREmitter::visitNe(ast_node * node)
+{
+    IRValue lhs = visitNode(node->sons[0]);
+    if (lhs.text.empty()) return {};
+    IRValue rhs = visitNode(node->sons[1]);
+    if (rhs.text.empty()) return {};
+
+    std::string boolReg = nextReg();
+    emit(boolReg + " = icmp ne i32 " + lhs.text + ", " + rhs.text);
+    return {emitBoolToInt(boolReg), false};
+}
+
+IREmitter::IRValue IREmitter::visitLogicalAnd(ast_node * node)
+{
+    IRValue lhs = visitNode(node->sons[0]);
+    if (lhs.text.empty()) return {};
+
+    std::string resultPtr = nextReg();
+    emit(resultPtr + " = alloca i32");
+    emit("store i32 0, i32* " + resultPtr);
+
+    std::string rhsLabel = nextLabel();
+    std::string endLabel = nextLabel();
+
+    std::string lhsCond = emitCondValue(lhs);
+    emit("br i1 " + lhsCond + ", label %" + rhsLabel + ", label %" + endLabel);
+    hasTerminator = true;
+
+    startBlock(rhsLabel);
+    IRValue rhs = visitNode(node->sons[1]);
+    if (rhs.text.empty()) return {};
+    std::string rhsCond = emitCondValue(rhs);
+    std::string rhsInt = emitBoolToInt(rhsCond);
+    emit("store i32 " + rhsInt + ", i32* " + resultPtr);
+    emit("br label %" + endLabel);
+    hasTerminator = true;
+
+    startBlock(endLabel);
+    std::string reg = nextReg();
+    emit(reg + " = load i32, i32* " + resultPtr);
+    return {reg, false};
+}
+
+IREmitter::IRValue IREmitter::visitLogicalOr(ast_node * node)
+{
+    IRValue lhs = visitNode(node->sons[0]);
+    if (lhs.text.empty()) return {};
+
+    std::string resultPtr = nextReg();
+    emit(resultPtr + " = alloca i32");
+    emit("store i32 1, i32* " + resultPtr);
+
+    std::string rhsLabel = nextLabel();
+    std::string endLabel = nextLabel();
+
+    std::string lhsCond = emitCondValue(lhs);
+    emit("br i1 " + lhsCond + ", label %" + endLabel + ", label %" + rhsLabel);
+    hasTerminator = true;
+
+    startBlock(rhsLabel);
+    IRValue rhs = visitNode(node->sons[1]);
+    if (rhs.text.empty()) return {};
+    std::string rhsCond = emitCondValue(rhs);
+    std::string rhsInt = emitBoolToInt(rhsCond);
+    emit("store i32 " + rhsInt + ", i32* " + resultPtr);
+    emit("br label %" + endLabel);
+    hasTerminator = true;
+
+    startBlock(endLabel);
+    std::string reg = nextReg();
+    emit(reg + " = load i32, i32* " + resultPtr);
+    return {reg, false};
+}
+
 IREmitter::IRValue IREmitter::visitNeg(ast_node * node)
 {
     IRValue operand = visitNode(node->sons[0]);
@@ -539,6 +847,16 @@ IREmitter::IRValue IREmitter::visitNeg(ast_node * node)
     std::string reg = nextReg();
     emit(reg + " = sub i32 0, " + operand.text);
     return {reg, false};
+}
+
+IREmitter::IRValue IREmitter::visitNot(ast_node * node)
+{
+    IRValue operand = visitNode(node->sons[0]);
+    if (operand.text.empty()) return {};
+
+    std::string boolReg = nextReg();
+    emit(boolReg + " = icmp eq i32 " + operand.text + ", 0");
+    return {emitBoolToInt(boolReg), false};
 }
 
 // ==================== 叶子节点 ====================
