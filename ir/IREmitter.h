@@ -49,6 +49,10 @@ private:
     IRValue visitFuncCall(ast_node * node);
     IRValue visitBlock(ast_node * node);
     IRValue visitReturn(ast_node * node);
+    IRValue visitIf(ast_node * node);
+    IRValue visitWhile(ast_node * node);
+    IRValue visitBreak(ast_node * node);
+    IRValue visitContinue(ast_node * node);
     IRValue visitAssign(ast_node * node);
     IRValue visitDeclStmt(ast_node * node);
     IRValue visitVarDecl(ast_node * node);
@@ -57,7 +61,16 @@ private:
     IRValue visitMul(ast_node * node);
     IRValue visitDiv(ast_node * node);
     IRValue visitMod(ast_node * node);
+    IRValue visitLt(ast_node * node);
+    IRValue visitGt(ast_node * node);
+    IRValue visitLe(ast_node * node);
+    IRValue visitGe(ast_node * node);
+    IRValue visitEq(ast_node * node);
+    IRValue visitNe(ast_node * node);
+    IRValue visitLogicalAnd(ast_node * node);
+    IRValue visitLogicalOr(ast_node * node);
     IRValue visitNeg(ast_node * node);
+    IRValue visitNot(ast_node * node);
     IRValue visitLeafUint(ast_node * node);
     IRValue visitLeafVarId(ast_node * node);
     IRValue visitLeafType(ast_node * node);
@@ -84,11 +97,20 @@ private:
     /// @brief 类型转 IR 文本
     std::string typeStr(Type * ty);
 
+    /// @brief 将 i32 表达式值转换为 i1 条件值
+    std::string emitCondValue(const IRValue & value);
+
+    /// @brief 将 i1 条件值扩展成 i32 0/1
+    std::string emitBoolToInt(const std::string & boolReg);
+
     /// @brief 向当前函数体追加一条指令
     void emit(const std::string & inst);
 
     /// @brief 向模块顶层追加声明/定义
     void emitGlobal(const std::string & line);
+
+    /// @brief 开启一个新的基本块
+    void startBlock(const std::string & label);
 
     // ============ 函数信息 ============
 
@@ -140,6 +162,12 @@ private:
 
     /// @brief 作用域栈：变量名 → alloca 寄存器
     std::vector<std::unordered_map<std::string, std::string>> scopeStack;
+
+    /// @brief break 目标标签栈
+    std::vector<std::string> breakLabels;
+
+    /// @brief continue 目标标签栈
+    std::vector<std::string> continueLabels;
 
     /// @brief AST 节点类型到访问函数的映射
     using VisitorFunc = IRValue (IREmitter::*)(ast_node *);
