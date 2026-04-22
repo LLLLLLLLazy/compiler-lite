@@ -1,20 +1,20 @@
 ///
 /// @file LLVMIREmitter.h
-/// @brief 基于结构化IR的LLVM IR文本发射器
+/// @brief LLVM IR 文本发射器（Phase 4 纯打印器）
+///
+/// 职责：遍历 Module / Function / BasicBlock / Instruction 结构化 IR，
+/// 将每条指令的 toString() 输出序列化为标准 LLVM IR 文本。
+/// 不承担任何 lowering / 语义补全工作。
 ///
 
 #pragma once
 
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 class Function;
-class Instruction;
-class LabelInstruction;
 class Module;
 class Type;
-class Value;
 
 class LLVMIREmitter {
 
@@ -31,59 +31,16 @@ public:
     }
 
 private:
-    struct MaterializedValue {
-        std::string type;
-        std::string value;
-    };
-
-    struct FunctionContext {
-        Function * function = nullptr;
-        int nextValueId = 1;
-        int nextLabelId = 0;
-        int nextSlotId = 0;
-        bool blockOpen = true;
-        bool blockTerminated = false;
-        std::vector<Value *> pendingArgs;
-        std::unordered_map<const Value *, std::string> slotMap;
-        std::unordered_map<const LabelInstruction *, std::string> labelMap;
-    };
-
     Module * module = nullptr;
     std::string moduleName;
     std::string llvmIR;
 
+    /// Emit a single function as a LLVM IR define block
     void emitFunction(Function * function, std::vector<std::string> & lines);
-
-    /// Block-structured IR emission path (Phase 3+)
-    void emitFunctionBlocks(Function * function, std::vector<std::string> & lines);
-
-    void emitInstruction(Instruction * inst, std::vector<std::string> & lines, FunctionContext & context);
-
-    void declareSlot(Value * value, std::vector<std::string> & lines, FunctionContext & context);
-
-    void storeValue(
-        Value * destination, const MaterializedValue & source, std::vector<std::string> & lines,
-        FunctionContext & context);
-
-    MaterializedValue materializeValue(Value * value, std::vector<std::string> & lines, FunctionContext & context);
-
-    MaterializedValue castValue(
-        const MaterializedValue & value, Type * targetType, std::vector<std::string> & lines,
-        FunctionContext & context);
 
     std::string formatFunctionSignature(Function * function, bool withNames) const;
 
     std::string llvmType(Type * type) const;
 
     std::string escapeString(const std::string & text) const;
-
-    std::string nextValueName(FunctionContext & context);
-
-    std::string nextSlotName(FunctionContext & context);
-
-    std::string makeSlotName(const Value * value, FunctionContext & context);
-
-    std::string getOrCreateSlot(const Value * value, FunctionContext & context);
-
-    std::string getOrCreateLabel(const LabelInstruction * label, FunctionContext & context);
 };
