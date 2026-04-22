@@ -10,6 +10,7 @@
  */
 
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <getopt.h>
 
@@ -22,7 +23,12 @@
 #include "Antlr4Executor.h"
 #include "FrontEndExecutor.h"
 #include "Graph.h"
-#include "IREmitter.h"
+#include "IRGenerator.h"
+#include "LLVMIREmitter.h"
+#include "Module.h"
+#include "DominatorTree.h"
+#include "DominanceFrontier.h"
+#include "Mem2Reg.h"
 
 ///
 /// @brief 是否显示帮助信息
@@ -30,17 +36,27 @@
 static bool gShowHelp = false;
 
 ///
-/// @brief 显示抽象语法树，非线性IR
+/// @brief 显示抽象语法树
 ///
 static bool gShowAST = false;
 
 ///
-/// @brief 产生线性IR（LLVM IR），默认输出
+/// @brief 输出结构化 IR，供调试使用
 ///
-static bool gShowLineIR = false;
+static bool gShowStructIR = false;
 
 ///
-/// @brief 输出中间IR，含汇编或者自定义IR等，默认输出线性IR
+/// @brief 产生LLVM IR文本，默认输出
+///
+static bool gShowLLVMIR = false;
+
+///
+/// @brief 输出支配树与支配边界分析结果
+///
+static bool gShowDomInfo = false;
+
+///
+/// @brief 输出中间结果，含结构化IR、LLVM IR等
 ///
 static bool gShowSymbol = false;
 
@@ -60,7 +76,7 @@ static bool gFrontEndAntlr4 = false;
 static bool gFrontEndRecursiveDescentParsing = false;
 
 ///
-/// @brief 在输出汇编时是否输出中间IR作为注释
+/// @brief 预留给后端汇编输出时作为注释显示IR
 ///
 static bool gAsmAlsoShowIR = false;
 
@@ -88,6 +104,7 @@ static struct option long_options[] = {
 	{"optimize", required_argument, nullptr, 'O'},
 	{"target", required_argument, nullptr, 't'},
 	{"asmir", no_argument, nullptr, 'c'},
+	{"dom", no_argument, nullptr, 'm'},
 	{nullptr, 0, nullptr, 0}};
 
 /// @brief 显示帮助
@@ -100,13 +117,14 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -o, --output=FILE          Specify output file\n";
 	std::cout << "  -S, --symbol               Show symbol information\n";
 	std::cout << "  -T, --ast                  Output abstract syntax tree\n";
-	std::cout << "  -I, --ir                   Output LLVM IR (same as -L)\n";
+	std::cout << "  -I, --ir                   Output structured IR\n";
 	std::cout << "  -L, --llvmir               Output LLVM IR (.ll)\n";
 	std::cout << "  -A, --antlr4               Deprecated, now always use Antlr4\n";
 	std::cout << "  -D, --recursive-descent    Deprecated, now always use Antlr4\n";
 	std::cout << "  -O, --optimize=LEVEL       Set optimization level\n";
 	std::cout << "  -t, --target=CPU           Specify target CPU architecture\n";
 	std::cout << "  -c, --asmir                Show IR instructions as comments in assembly output\n";
+	std::cout << "  --dom                      Output dominator tree and dominance frontier\n";
 }
 
 /// @brief 参数解析与有效性检查
@@ -125,7 +143,7 @@ static int ArgsAnalysis(int argc, char * argv[])
 	// -O要求必须带有附加整数，指明优化的级别
 	// -t要求必须带有目标CPU，指明目标CPU的汇编
 	// -c选项在输出汇编时有效，附带输出IR指令内容
-	const char options[] = "ho:STIADLO:t:c";
+	const char options[] = "ho:STIADLO:t:cm";
 	int option_index = 0;
 
 	opterr = 1;
@@ -146,12 +164,12 @@ lb_check:
 				gShowAST = true;
 				break;
 			case 'I':
-				// 产生LLVM IR
-				gShowLineIR = true;
+				// 输出结构化 IR
+				gShowStructIR = true;
 				break;
 			case 'L':
 				// 产生LLVM IR
-				gShowLineIR = true;
+				gShowLLVMIR = true;
 				break;
 			case 'A':
 				// 选用antlr4
@@ -174,6 +192,9 @@ lb_check:
 				break;
 			case 'c':
 				gAsmAlsoShowIR = true;
+				break;
+			case 'm':
+				gShowDomInfo = true;
 				break;
 			default:
 				return -1;
@@ -212,13 +233,13 @@ lb_check:
 		return -1;
 	}
 
-	int flag = (int) gShowLineIR + (int) gShowAST;
+	int flag = (int) gShowStructIR + (int) gShowLLVMIR + (int) gShowAST + (int) gShowDomInfo;
 
 	if (0 == flag) {
 		// 没有指定，则默认输出LLVM IR
-		gShowLineIR = true;
+		gShowLLVMIR = true;
 	} else if (flag != 1) {
-		// LLVM IR、抽象语法树只能同时选择一个
+		// 结构化IR、LLVM IR、抽象语法树、支配树信息只能同时选择一个
 		return -1;
 	}
 
@@ -228,6 +249,10 @@ lb_check:
 		// 默认文件名
 		if (gShowAST) {
 			gOutputFile = "output.png";
+		} else if (gShowStructIR) {
+			gOutputFile = "output.ir";
+		} else if (gShowDomInfo) {
+			gOutputFile = "output.dom";
 		} else {
 			gOutputFile = "output.ll";
 		}
@@ -248,13 +273,14 @@ static int compile(std::string inputFile, std::string outputFile)
 
 	// 内部函数调用返回值保存变量
 	int subResult;
+	Module * module = nullptr;
 
 	do {
 
 		// 编译过程主要包括：
-		// 1）词法语法分析生成AST
-		// 2) 遍历AST生成LLVM IR
-		// 3) 输出LLVM IR或汇编
+		// 1）词法语法分析生成 AST
+		// 2) 遍历 AST 生成结构化 IR
+		// 3) 基于结构化 IR 输出调试 IR 或 LLVM IR
 		//
 		// TODO：实现 RISCV64 后端支持
 
@@ -289,20 +315,72 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
-		// 遍历AST产生LLVM IR文本
-		IREmitter irEmitter(astRoot, inputFile);
-		subResult = irEmitter.run();
+		module = new Module(inputFile);
+		IRGenerator irGenerator(astRoot, module);
+		subResult = irGenerator.run();
 		if (!subResult) {
 
-			minic_log(LOG_ERROR, "LLVM IR生成错误");
+			minic_log(LOG_ERROR, "结构化IR生成错误");
 
 			// 清理抽象语法树
 			ast_node::Delete(astRoot);
 			break;
 		}
 
-		// 清理抽象语法树
+		module->renameIR();
+
+		// 结构化IR已经生成完成，后续输出不再依赖AST
 		ast_node::Delete(astRoot);
+
+		if (gShowStructIR) {
+			module->outputIR(outputFile);
+
+			result = 0;
+			break;
+		}
+
+		if (gShowDomInfo) {
+			// 对每个函数计算支配树与支配边界，并输出到文件
+			std::string domOutput;
+			for (auto * func : module->getFunctionList()) {
+				if (func->isBuiltin() || func->getBlocks().empty()) {
+					continue;
+				}
+				domOutput += "Function: " + func->getName() + "\n";
+				DominatorTree dt(func);
+				dt.print(domOutput);
+				DominanceFrontier df(func, dt);
+				df.print(domOutput);
+				domOutput += "\n";
+			}
+
+			std::ofstream domFile(outputFile, std::ios::out | std::ios::trunc);
+			if (!domFile.is_open()) {
+				minic_log(LOG_ERROR, "支配树输出文件打开失败");
+				break;
+			}
+			domFile << domOutput;
+			result = domFile.good() ? 0 : -1;
+			break;
+		}
+
+		// 运行 mem2reg，将可提升的 alloca/load/store 转为 SSA 形式
+		for (auto * func : module->getFunctionList()) {
+			if (!func->isBuiltin() && !func->getBlocks().empty()) {
+				Mem2Reg mem2reg(func, module);
+				mem2reg.run();
+			}
+		}
+		// Re-number IR names after mem2reg inserted phi nodes
+		module->renameIR();
+
+		LLVMIREmitter irEmitter(module, inputFile);
+		subResult = irEmitter.run();
+		if (!subResult) {
+
+			minic_log(LOG_ERROR, "LLVM IR生成错误");
+			break;
+		}
 
 		// 输出LLVM IR文本
 		if (!irEmitter.writeToFile(outputFile)) {
@@ -314,6 +392,11 @@ static int compile(std::string inputFile, std::string outputFile)
 		result = 0;
 
 	} while (false);
+
+	if (module) {
+		module->Delete();
+		delete module;
+	}
 
 	return result;
 }
