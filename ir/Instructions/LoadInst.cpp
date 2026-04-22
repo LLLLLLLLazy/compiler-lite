@@ -20,6 +20,8 @@ Value * LoadInst::getPointerOperand()
 
 void LoadInst::toString(std::string & str)
 {
-    str = getIRName() + " = load " + getType()->toString() + ", " + getPointerOperand()->getType()->toString() + " " +
+    Type * ptrType = getPointerOperand()->getType();
+    std::string ptrTypeStr = ptrType->isPointerType() ? ptrType->toString() : ptrType->toString() + "*";
+    str = getIRName() + " = load " + getType()->toString() + ", " + ptrTypeStr + " " +
           getPointerOperand()->getIRName();
 }

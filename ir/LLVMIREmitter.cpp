@@ -166,6 +166,12 @@ bool LLVMIREmitter::writeToFile(const std::string & filename) const
 
 void LLVMIREmitter::emitFunction(Function * function, std::vector<std::string> & lines)
 {
+    // Phase 3+: use block-based emission when the function was built with block IR
+    if (!function->getBlocks().empty()) {
+        emitFunctionBlocks(function, lines);
+        return;
+    }
+
     FunctionContext context;
     context.function = function;
 
@@ -204,8 +210,51 @@ void LLVMIREmitter::emitFunction(Function * function, std::vector<std::string> &
     lines.emplace_back("}");
 }
 
-void LLVMIREmitter::emitInstruction(Instruction * inst, std::vector<std::string> & lines, FunctionContext & context)
+void LLVMIREmitter::emitFunctionBlocks(Function * function, std::vector<std::string> & lines)
 {
+    lines.emplace_back("define " + formatFunctionSignature(function, true) + " {");
+
+    bool firstBlock = true;
+    for (auto * bb : function->getBlocks()) {
+        // Skip completely empty blocks (unreachable dead-code sinks)
+        if (bb->getInstructions().empty()) {
+            continue;
+        }
+
+        // Print block label for all blocks except the entry (first) block
+        if (!firstBlock) {
+            std::string label = bb->getIRName();
+            if (!label.empty() && label.front() == '%') {
+                label = label.substr(1);
+            }
+            if (!label.empty()) {
+                lines.emplace_back(label + ":");
+            }
+        }
+        firstBlock = false;
+
+        for (auto * inst : bb->getInstructions()) {
+            std::string instStr;
+            inst->toString(instStr);
+            if (!instStr.empty()) {
+                lines.emplace_back("  " + instStr);
+            }
+        }
+
+        // Safety: add a default terminator if the block is somehow unterminated
+        if (!bb->isTerminated()) {
+            if (function->getReturnType()->isVoidType()) {
+                lines.emplace_back("  ret void");
+            } else {
+                lines.emplace_back("  ret " + llvmType(function->getReturnType()) + " 0");
+            }
+        }
+    }
+
+    lines.emplace_back("}");
+}
+
+void LLVMIREmitter::emitInstruction(Instruction * inst, std::vector<std::string> & lines, FunctionContext & context){
     if (dynamic_cast<EntryInstruction *>(inst) != nullptr) {
         return;
     }

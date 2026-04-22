@@ -46,6 +46,7 @@ enum class IRInstOperator : std::int8_t {
     IRINST_OP_RET,       ///< ret [<val>] – function return
     IRINST_OP_PHI,       ///< phi node for SSA (Phase 6)
     IRINST_OP_CALL,      ///< call <func>(<args...>) – block-based call
+    IRINST_OP_ZEXT,      ///< zext <src> to <dstType> – zero-extend (e.g. i1 -> i32)
 
     IRINST_OP_MAX
 };
