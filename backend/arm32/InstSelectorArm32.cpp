@@ -308,30 +308,90 @@ void InstSelectorArm32::translate_sub_int32(Instruction * inst)
 
 /// @brief 整数乘法指令翻译成ARM32汇编
 /// @param inst IR指令
-void InstSelectorArm32::translate_mul_int32(Instruction *inst)
+void InstSelectorArm32::translate_mul_int32(Instruction * inst)
 {
 	translate_two_operator(inst, "mul");
 }
 
-/// @brief 整数除法指令翻译成ARM32汇编
+/// @brief 整数除法指令翻译成ARM32汇编（使用 sdiv，armv7ve 支持）
 /// @param inst IR指令
-void InstSelectorArm32::translate_div_int32(Instruction *inst)
+void InstSelectorArm32::translate_div_int32(Instruction * inst)
 {
 	translate_two_operator(inst, "sdiv");
 }
 
-/// @brief 整数取模指令翻译成ARM32汇编
+/// @brief 整数求余指令翻译成ARM32汇编
+/// @brief 利用 sdiv + mls 实现：mod = a - (a/b)*b
 /// @param inst IR指令
-void InstSelectorArm32::translate_mod_int32(Instruction *inst)
+void InstSelectorArm32::translate_mod_int32(Instruction * inst)
 {
-	translate_two_operator(inst, "smod");
+	Value * result = inst;
+	Value * arg1 = inst->getOperand(0);
+	Value * arg2 = inst->getOperand(1);
+
+	int32_t load_arg1_reg_no = simpleRegisterAllocator.Allocate(arg1);
+	iloc.load_var(load_arg1_reg_no, arg1);
+
+	int32_t load_arg2_reg_no = simpleRegisterAllocator.Allocate(arg2);
+	iloc.load_var(load_arg2_reg_no, arg2);
+
+	int32_t load_result_reg_no = simpleRegisterAllocator.Allocate(result);
+
+	// r_result = a / b
+	iloc.inst("sdiv",
+		PlatformArm32::regName[load_result_reg_no],
+		PlatformArm32::regName[load_arg1_reg_no],
+		PlatformArm32::regName[load_arg2_reg_no]);
+
+	// r_result = a - r_result * b  (mls Rd, Rm, Rs, Rn  =>  Rd = Rn - Rm*Rs)
+	iloc.inst("mls",
+		PlatformArm32::regName[load_result_reg_no],
+		PlatformArm32::regName[load_result_reg_no],
+		PlatformArm32::regName[load_arg2_reg_no],
+		PlatformArm32::regName[load_arg1_reg_no]);
+
+	if (result->getRegId() == -1) {
+		iloc.store_var(load_result_reg_no, result, ARM32_TMP_REG_NO);
+	}
+
+	simpleRegisterAllocator.free(arg1);
+	simpleRegisterAllocator.free(arg2);
+	simpleRegisterAllocator.free(result);
 }
 
-/// @brief 整数取负指令翻译成ARM32汇编
+/// @brief 整数单目求负指令翻译成ARM32汇编（rsb rd, rn, #0）
 /// @param inst IR指令
-void InstSelectorArm32::translate_neg_int32(Instruction *inst)
+void InstSelectorArm32::translate_neg_int32(Instruction * inst)
 {
-	translate_two_operator(inst, "neg");
+	Value * result = inst;
+	Value * arg1 = inst->getOperand(0);
+
+	int32_t arg1_reg_no = arg1->getRegId();
+	int32_t result_reg_no = inst->getRegId();
+	int32_t load_arg1_reg_no, load_result_reg_no;
+
+	if (arg1_reg_no == -1) {
+		load_arg1_reg_no = simpleRegisterAllocator.Allocate(arg1);
+		iloc.load_var(load_arg1_reg_no, arg1);
+	} else {
+		load_arg1_reg_no = arg1_reg_no;
+	}
+
+	if (result_reg_no == -1) {
+		load_result_reg_no = simpleRegisterAllocator.Allocate(result);
+	} else {
+		load_result_reg_no = result_reg_no;
+	}
+
+	// rsb rd, rn, #0  =>  rd = 0 - rn = -rn
+	iloc.inst("rsb", PlatformArm32::regName[load_result_reg_no], PlatformArm32::regName[load_arg1_reg_no], "#0");
+
+	if (result_reg_no == -1) {
+		iloc.store_var(load_result_reg_no, result, ARM32_TMP_REG_NO);
+	}
+
+	simpleRegisterAllocator.free(arg1);
+	simpleRegisterAllocator.free(result);
 }
 
 /// @brief 函数调用指令翻译成ARM32汇编

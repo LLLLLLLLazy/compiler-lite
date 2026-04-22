@@ -50,7 +50,7 @@ statement:
 	| block								# blockStatement
 	| expr? T_SEMICOLON					# expressionStatement;
 
-// 表达式文法 expr : AddExp 表达式目前只支持加法与减法运算
+// 表达式文法 expr : AddExp 表达式支持加减乘除求余及单目求负运算
 expr: addExp;
 
 // 加减表达式
@@ -59,17 +59,17 @@ addExp: mulExp (addOp mulExp)*;
 // 加减运算符
 addOp: T_ADD | T_SUB;
 
-// 乘除模运算
-mulOp: T_MUL | T_DIV | T_MOD;
-
-// 乘法表达式
+// 乘除求余表达式
 mulExp: unaryExp (mulOp unaryExp)*;
 
-// 一元运算符(-)
-unaryOp: T_SUB;
+// 乘除求余运算符
+mulOp: T_MUL | T_DIV | T_MOD;
 
 // 一元表达式
-unaryExp: unaryOp* primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN;
+unaryExp: primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN | unaryOp unaryExp;
+
+// 单目运算符
+unaryOp: T_SUB;
 
 // 基本表达式：括号表达式、整数、左值表达式
 primaryExp: T_L_PAREN expr T_R_PAREN | T_DIGIT | lVal;
@@ -105,7 +105,7 @@ T_INT: 'int';
 T_VOID: 'void';
 
 T_ID: [a-zA-Z_][a-zA-Z0-9_]*;
-T_DIGIT: '0' | [1-9][0-9]* | '0' [1-9][0-9]+ | '0' [xX][0-9a-fA-F]+;
+T_DIGIT: '0' [xX] [0-9a-fA-F]+ | '0' [0-7]* | [1-9][0-9]*;
 
 LINE_COMMENT: '//' ~[\r\n]* -> skip;
 BLOCK_COMMENT: '/*' .*? '*/' -> skip;
