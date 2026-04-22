@@ -211,7 +211,7 @@ add_custom_command(TARGET ${PROJECT_NAME}
 )
 
 # 源代码打包
-set(CPACK_SOURCE_GENERATOR "TGZ")
+set(CPACK_SOURCE_GENERATOR "ZIP")
 set(CPACK_SOURCE_PACKAGE_FILE_NAME "${PROJECT_NAME}-${PROJECT_VERSION}-src")
 
 # 忽略不需要源代码目录或文件
@@ -224,10 +224,11 @@ set(CPACK_SOURCE_IGNORE_FILES
 	"/frontend/antlr4/.antlr/;" # antlr自动产生的目录
 	"/.history/;" # 本地历史文件
 	"/tests/;" # 测试文件夹
+	"/常用命令[.]md$;" # 避免 CPack 处理根目录中文文件名时失败
 )
 
 # 二进制打包
-set(CPACK_GENERATOR "TGZ")
+set(CPACK_GENERATOR "ZIP")
 
 # 安装可执行程序，不要bin文件夹下
 install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION .)
