@@ -73,10 +73,40 @@ protected:
 	/// @return AST的节点
 	std::any visitReturnStatement(MiniCParser::ReturnStatementContext * ctx) override;
 
+	/// @brief if/if-else 语句的遍历
+	std::any visitIfStatement(MiniCParser::IfStatementContext * ctx) override;
+
+	/// @brief while 语句的遍历
+	std::any visitWhileStatement(MiniCParser::WhileStatementContext * ctx) override;
+
+	/// @brief break 语句的遍历
+	std::any visitBreakStatement(MiniCParser::BreakStatementContext * ctx) override;
+
+	/// @brief continue 语句的遍历
+	std::any visitContinueStatement(MiniCParser::ContinueStatementContext * ctx) override;
+
 	/// @brief 非终结运算符expr的遍历
 	/// @param ctx CST上下文
 	/// @return AST的节点
 	std::any visitExpr(MiniCParser::ExprContext * ctx) override;
+
+	/// @brief 非终结符LOrExp的分析
+	std::any visitLOrExp(MiniCParser::LOrExpContext * ctx) override;
+
+	/// @brief 非终结符LAndExp的分析
+	std::any visitLAndExp(MiniCParser::LAndExpContext * ctx) override;
+
+	/// @brief 非终结符EqExp的分析
+	std::any visitEqExp(MiniCParser::EqExpContext * ctx) override;
+
+	/// @brief 非终结符EqOp的分析
+	std::any visitEqOp(MiniCParser::EqOpContext * ctx) override;
+
+	/// @brief 非终结符RelExp的分析
+	std::any visitRelExp(MiniCParser::RelExpContext * ctx) override;
+
+	/// @brief 非终结符RelOp的分析
+	std::any visitRelOp(MiniCParser::RelOpContext * ctx) override;
 
 	///
 	/// @brief 内部产生的非终结符assignStatement的分析

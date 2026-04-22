@@ -1,0 +1,7 @@
+{
+  "C_Cpp.default.compileCommands": "/workspace/build/compile_commands.json",
+  "clangd.arguments": [
+    "--compile-commands-dir=/workspace/build"
+  ],
+  "diffEditor.renderSideBySide": true
+}

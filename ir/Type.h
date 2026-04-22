@@ -31,7 +31,6 @@ public:
 		// PrimitiveTypes
 		FloatTyID, ///< 32-bit floating point type
 		VoidTyID,  ///< type with no size
-		LabelTyID, ///< Labels
 		TokenTyID, ///< Tokens
 
 		// Derived types
@@ -69,16 +68,6 @@ public:
 	[[nodiscard]] bool isVoidType() const
 	{
 		return ID == VoidTyID;
-	}
-
-	///
-	/// @brief 检查是否是Label类型
-	/// @return true 是
-	/// @return false  不是
-	///
-	[[nodiscard]] bool isLabelType() const
-	{
-		return ID == LabelTyID;
 	}
 
 	///
