@@ -49,12 +49,4 @@ public:
     void replaceAllUseWith(Value * new_val);
 
     virtual int32_t getScopeLevel();
-
-    virtual int32_t getRegId();
-
-    virtual bool getMemoryAddr(int32_t * regId = nullptr, int64_t * offset = nullptr);
-
-    virtual int32_t getLoadRegId();
-
-    virtual void setLoadRegId(int32_t regId);
 };

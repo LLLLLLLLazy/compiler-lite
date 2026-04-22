@@ -67,28 +67,6 @@ int32_t Value::getScopeLevel()
     return -1;
 }
 
-int32_t Value::getRegId()
-{
-    return -1;
-}
-
-bool Value::getMemoryAddr(int32_t * regId, int64_t * offset)
-{
-    (void) regId;
-    (void) offset;
-    return false;
-}
-
-int32_t Value::getLoadRegId()
-{
-    return -1;
-}
-
-void Value::setLoadRegId(int32_t regId)
-{
-    (void) regId;
-}
-
 void Value::replaceAllUseWith(Value * new_val)
 {
     std::vector<Use *> usesCopy = uses;

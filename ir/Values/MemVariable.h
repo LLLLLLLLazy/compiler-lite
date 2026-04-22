@@ -16,7 +16,7 @@ private:
     {}
 
 public:
-    bool getMemoryAddr(int32_t * _regId = nullptr, int64_t * _offset = nullptr) override
+    bool getMemoryAddr(int32_t * _regId = nullptr, int64_t * _offset = nullptr)
     {
         if (_regId) {
             *_regId = this->baseRegNo;
@@ -28,12 +28,12 @@ public:
         return true;
     }
 
-    int32_t getLoadRegId() override
+    int32_t getLoadRegId()
     {
         return this->loadRegNo;
     }
 
-    void setLoadRegId(int32_t regId) override
+    void setLoadRegId(int32_t regId)
     {
         this->loadRegNo = regId;
     }

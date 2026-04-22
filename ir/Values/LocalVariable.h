@@ -25,12 +25,12 @@ public:
         return scope_level;
     }
 
-    int32_t getRegId() override
+    int32_t getRegId()
     {
         return regId;
     }
 
-    bool getMemoryAddr(int32_t * _regId = nullptr, int64_t * _offset = nullptr) override
+    bool getMemoryAddr(int32_t * _regId = nullptr, int64_t * _offset = nullptr)
     {
         if (this->baseRegNo == -1) {
             return false;
@@ -52,12 +52,12 @@ public:
         offset = _offset;
     }
 
-    int32_t getLoadRegId() override
+    int32_t getLoadRegId()
     {
         return this->loadRegNo;
     }
 
-    void setLoadRegId(int32_t regId) override
+    void setLoadRegId(int32_t regId)
     {
         this->loadRegNo = regId;
     }

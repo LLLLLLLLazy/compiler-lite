@@ -47,6 +47,7 @@ enum class IRInstOperator : std::int8_t {
     IRINST_OP_PHI,       ///< phi node for SSA (Phase 6)
     IRINST_OP_CALL,      ///< call <func>(<args...>) – block-based call
     IRINST_OP_ZEXT,      ///< zext <src> to <dstType> – zero-extend (e.g. i1 -> i32)
+    IRINST_OP_COPY,      ///< copy <src> – value copy; used by PhiLoweringPass to lower phi nodes
 
     IRINST_OP_MAX
 };
@@ -84,12 +85,12 @@ public:
         parentBlock = bb;
     }
 
-    int32_t getRegId() override
+    int32_t getRegId()
     {
         return regId;
     }
 
-    bool getMemoryAddr(int32_t * _regId = nullptr, int64_t * _offset = nullptr) override
+    bool getMemoryAddr(int32_t * _regId = nullptr, int64_t * _offset = nullptr)
     {
         if (this->baseRegNo == -1) {
             return false;
@@ -112,12 +113,12 @@ public:
         offset = _offset;
     }
 
-    int32_t getLoadRegId() override
+    int32_t getLoadRegId()
     {
         return this->loadRegNo;
     }
 
-    void setLoadRegId(int32_t regId) override
+    void setLoadRegId(int32_t regId)
     {
         this->loadRegNo = regId;
     }

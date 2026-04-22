@@ -32,12 +32,12 @@ public:
         return 0;
     }
 
-    int32_t getLoadRegId() override
+    int32_t getLoadRegId()
     {
         return this->loadRegNo;
     }
 
-    void setLoadRegId(int32_t regId) override
+    void setLoadRegId(int32_t regId)
     {
         this->loadRegNo = regId;
     }

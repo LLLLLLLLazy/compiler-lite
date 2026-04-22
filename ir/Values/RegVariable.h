@@ -16,7 +16,7 @@ public:
         regId = _reg_no;
     }
 
-    int32_t getRegId() override
+    int32_t getRegId()
     {
         return regId;
     }
