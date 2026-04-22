@@ -9,9 +9,11 @@
 
 #include "User.h"
 
+class BasicBlock;
 class Function;
 
 enum class IRInstOperator : std::int8_t {
+    // --- Linear IR opcodes (legacy) ---
     IRINST_OP_ENTRY,
     IRINST_OP_EXIT,
     IRINST_OP_LABEL,
@@ -33,6 +35,18 @@ enum class IRInstOperator : std::int8_t {
     IRINST_OP_ASSIGN,
     IRINST_OP_FUNC_CALL,
     IRINST_OP_ARG,
+
+    // --- Block-structured IR opcodes (Phase 2+) ---
+    IRINST_OP_ALLOCA,    ///< alloca <type> – stack allocation, result is ptr
+    IRINST_OP_LOAD,      ///< load <type>, <ptr> – load from memory
+    IRINST_OP_STORE,     ///< store <val>, <ptr> – store to memory (void)
+    IRINST_OP_ICMP,      ///< icmp <pred> <lhs>, <rhs> – integer comparison
+    IRINST_OP_BR,        ///< br <dest:BasicBlock> – unconditional branch
+    IRINST_OP_COND_BR,   ///< br <cond>, <trueD>, <falseD> – conditional branch
+    IRINST_OP_RET,       ///< ret [<val>] – function return
+    IRINST_OP_PHI,       ///< phi node for SSA (Phase 6)
+    IRINST_OP_CALL,      ///< call <func>(<args...>) – block-based call
+
     IRINST_OP_MAX
 };
 
@@ -54,6 +68,20 @@ public:
     Function * getFunction();
 
     bool hasResultValue();
+
+    /// Returns true if this instruction is a block terminator
+    /// (IRINST_OP_BR, IRINST_OP_COND_BR, IRINST_OP_RET).
+    bool isTerminator() const;
+
+    BasicBlock * getParentBlock() const
+    {
+        return parentBlock;
+    }
+
+    void setParentBlock(BasicBlock * bb)
+    {
+        parentBlock = bb;
+    }
 
     int32_t getRegId() override
     {
@@ -97,6 +125,7 @@ protected:
     enum IRInstOperator op = IRInstOperator::IRINST_OP_MAX;
     bool dead = false;
     Function * func = nullptr;
+    BasicBlock * parentBlock = nullptr;
     int32_t regId = -1;
     int32_t offset = 0;
     int32_t baseRegNo = -1;

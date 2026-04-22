@@ -177,6 +177,16 @@ MemVariable * Function::newMemVariable(Type * type)
     return memValue;
 }
 
+BasicBlock * Function::newBasicBlock()
+{
+    auto * bb = new BasicBlock(this);
+    if (blocks.empty()) {
+        entryBlock = bb;
+    }
+    blocks.push_back(bb);
+    return bb;
+}
+
 void Function::Delete()
 {
     code.Delete();
@@ -195,6 +205,12 @@ void Function::Delete()
         delete mem;
     }
     memVector.clear();
+
+    for (auto * bb: blocks) {
+        delete bb;
+    }
+    blocks.clear();
+    entryBlock = nullptr;
 }
 
 void Function::renameIR()
