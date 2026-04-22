@@ -83,8 +83,8 @@ set(FRONTEND_SRCS
 
 )
 
-# 是否编译后端代码（当前后端仍在适配新的结构化 IR，默认关闭）
-set(BUILD_BACKEND OFF CACHE BOOL "Enable/Disable backend (ARM32/RiscV64) compilation")
+# 是否编译后端代码
+set(BUILD_BACKEND ON CACHE BOOL "Enable/Disable backend (ARM32/RiscV64) compilation")
 
 # 后端源代码集合
 if(BUILD_BACKEND)
@@ -94,18 +94,19 @@ set(BACKEND_SRCS
 	backend/CodeGenerator.h
 	backend/CodeGeneratorAsm.cpp
 	backend/CodeGeneratorAsm.h
+	backend/RegVariable.h
 
 	# 后端产生ARM32汇编指令
-	backend/arm32/ILocArm32.cpp
-	backend/arm32/ILocArm32.h
-	backend/arm32/InstSelectorArm32.cpp
-	backend/arm32/InstSelectorArm32.h
-	backend/arm32/PlatformArm32.cpp
-	backend/arm32/PlatformArm32.h
-	backend/arm32/CodeGeneratorArm32.cpp
-	backend/arm32/CodeGeneratorArm32.h
-	backend/arm32/SimpleRegisterAllocator.cpp
-	backend/arm32/SimpleRegisterAllocator.h
+	# backend/arm32/ILocArm32.cpp
+	# backend/arm32/ILocArm32.h
+	# backend/arm32/InstSelectorArm32.cpp
+	# backend/arm32/InstSelectorArm32.h
+	# backend/arm32/PlatformArm32.cpp
+	# backend/arm32/PlatformArm32.h
+	# backend/arm32/CodeGeneratorArm32.cpp
+	# backend/arm32/CodeGeneratorArm32.h
+	# backend/arm32/SimpleRegisterAllocator.cpp
+	# backend/arm32/SimpleRegisterAllocator.h
 
 	# 后端产生RISCV64汇编指令
 	backend/riscv64/PlatformRiscV64.cpp

@@ -1,87 +1,120 @@
 ///
 /// @file LiveInterval.cpp
-/// @brief 活跃区间数据结构实现
+/// @brief 活跃区间数据结构的实现
 ///
-
-#include "LiveInterval.h"
+/// vreg关联Value*，区间由Segment组成
+///
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+
+#include "LiveInterval.h"
+#include "Value.h"
 
 /// @brief 构造函数
-/// @param _vreg 对应的IR虚拟寄存器
-LiveInterval::LiveInterval(Value * _vreg)
-	: vreg(_vreg), start(INT32_MAX), end(INT32_MIN), physReg(-1), spillWeight(0.0f)
-{
-}
+/// @param vreg 关联的虚拟寄存器（SSA IR中的Value*）
+LiveInterval::LiveInterval(Value * vreg)
+	: vreg(vreg), start(std::numeric_limits<int>::max()), end(std::numeric_limits<int>::min()),
+	  physReg(-1), spillWeight(0.0f), spilled(false), spillSlot(0)
+{}
 
-/// @brief 添加存活子段，并更新区间范围
-/// @param segStart 子段起始指令编号
-/// @param segEnd 子段结束指令编号
+/// @brief 添加一个存活子段 [start, end)
+/// 自动与相邻/重叠的子段合并，并更新整体区间范围
 void LiveInterval::addSegment(int segStart, int segEnd)
 {
-	segments.push_back({segStart, segEnd});
+	if (segStart >= segEnd) {
+		return;
+	}
 
-	// 更新区间范围
+	// 更新整体区间范围
 	if (segStart < start) {
 		start = segStart;
 	}
 	if (segEnd > end) {
 		end = segEnd;
 	}
+
+	// 尝试与已有子段合并
+	bool merged = false;
+	for (auto it = segments.begin(); it != segments.end(); ++it) {
+		// 检查是否与当前子段重叠或相邻
+		if (segStart <= it->end && it->start <= segEnd) {
+			// 合并：扩展当前子段范围
+			if (segStart < it->start) {
+				it->start = segStart;
+			}
+			if (segEnd > it->end) {
+				it->end = segEnd;
+			}
+			merged = true;
+
+			// 继续检查是否可以与后续子段合并（合并后可能跨越了原本不连续的子段）
+			auto nextIt = std::next(it);
+			while (nextIt != segments.end()) {
+				if (it->end >= nextIt->start) {
+					// 可以合并
+					if (nextIt->end > it->end) {
+						it->end = nextIt->end;
+					}
+					nextIt = segments.erase(nextIt);
+				} else {
+					break;
+				}
+			}
+			break;
+		}
+	}
+
+	if (!merged) {
+		// 找到合适的插入位置（保持按start排序）
+		auto insertPos = segments.begin();
+		while (insertPos != segments.end() && insertPos->start < segStart) {
+			++insertPos;
+		}
+		segments.insert(insertPos, Segment(segStart, segEnd));
+	}
 }
 
-/// @brief 判断与另一个活跃区间是否干涉（区间重叠检查）
-/// 通过比较两个区间的子段列表，检查是否存在重叠的子段
-/// @param other 另一个活跃区间
-/// @return true表示存在干涉（有重叠），false表示无干涉
-bool LiveInterval::overlaps(LiveInterval & other)
+/// @brief 添加一个使用点
+void LiveInterval::addUsePosition(int pos)
 {
-	// 快速检查：如果整体区间不重叠，则子段一定不重叠
-	if (this->end <= other.start || other.end <= this->start) {
+	usePositions.push_back(pos);
+}
+
+/// @brief 判断两个活跃区间是否干涉（任意子段重叠）
+bool LiveInterval::overlaps(const LiveInterval & other) const
+{
+	// 快速检查：整体区间不重叠则肯定不干涉
+	if (start >= other.end || other.start >= end) {
 		return false;
 	}
 
-	// 逐对比较子段，检查是否存在重叠
-	for (auto & seg1 : this->segments) {
-		for (auto & seg2 : other.segments) {
-			// 两个子段重叠条件：seg1.start < seg2.end && seg2.start < seg1.end
-			if (seg1.start < seg2.end && seg2.start < seg1.end) {
+	// 逐对检查子段重叠
+	for (const auto & seg : segments) {
+		for (const auto & otherSeg : other.segments) {
+			if (seg.overlaps(otherSeg)) {
 				return true;
 			}
 		}
 	}
-
 	return false;
 }
 
-/// @brief 根据使用密度和循环深度计算溢出权重
-/// 计算公式：spillWeight = (useCount / intervalLength) * pow(10, loopDepth)
-/// useCount: 使用次数（usePositions的大小）
-/// intervalLength: 区间长度（end - start）
-/// loopDepth: 最深循环嵌套深度
-/// @param loopDepth 最深循环嵌套深度
+/// @brief 计算溢出权重
+/// spillWeight = (useCount / intervalLength) * pow(10, loopDepth)
 void LiveInterval::calcSpillWeight(int loopDepth)
 {
-	int useCount = static_cast<int>(usePositions.size());
-	int intervalLength = end - start;
-
-	if (intervalLength <= 0) {
-		// 区间长度为0或负数，使用默认权重
-		spillWeight = static_cast<float>(useCount);
+	if (segments.empty()) {
+		spillWeight = 0.0f;
 		return;
 	}
 
-	// 基础权重 = 使用次数 / 区间长度（使用密度）
-	float baseWeight = static_cast<float>(useCount) / static_cast<float>(intervalLength);
+	const int intervalLength = std::max(1, end - start);
+	const int useCount = static_cast<int>(usePositions.size());
 
-	// 循环加权 = 基础权重 * 10^循环深度
-	spillWeight = baseWeight * static_cast<float>(std::pow(10, loopDepth));
-}
-
-/// @brief 添加一个使用位置
-/// @param pos 指令编号
-void LiveInterval::addUsePosition(int pos)
-{
-	usePositions.push_back(pos);
+	// spillWeight = (useCount / length) * 10^loopDepth
+	float density = static_cast<float>(useCount) / static_cast<float>(intervalLength);
+	float loopFactor = std::pow(10.0f, static_cast<float>(loopDepth));
+	spillWeight = density * loopFactor;
 }

@@ -3,6 +3,8 @@
 /// @brief RISC-V64指令序列管理的实现
 ///
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
@@ -11,6 +13,56 @@
 #include "Function.h"
 #include "PlatformRiscV64.h"
 #include "Module.h"
+#include "ConstInt.h"
+#include "GlobalVariable.h"
+
+namespace {
+
+constexpr int kSavedFrameBytes = 16;
+
+bool isInternalLabelInst(const RiscV64Inst * inst)
+{
+	return inst != nullptr && !inst->dead && inst->result == ":" && !inst->opcode.empty() &&
+		   inst->opcode.rfind(".L", 0) == 0;
+}
+
+bool isLabelReferenceInst(const RiscV64Inst * inst)
+{
+	return inst != nullptr && !inst->dead &&
+		   (inst->opcode == "j" || inst->opcode == "jal" || inst->opcode == "beq" || inst->opcode == "bne" ||
+			inst->opcode == "blt" || inst->opcode == "bge" || inst->opcode == "bltu" || inst->opcode == "bgeu");
+}
+
+int alignTo(int value, int align)
+{
+	if (align <= 0) {
+		return value;
+	}
+	return ((value + align - 1) / align) * align;
+}
+
+int computeFrameSize(const std::unordered_map<Value *, RegAllocInfo> & regAllocMap)
+{
+	int requiredBytes = kSavedFrameBytes;
+	for (const auto & [_, info] : regAllocMap) {
+		if (!info.hasStackSlot) {
+			continue;
+		}
+
+		int slotReach = 0;
+		if (info.baseRegId == RISCV64_FP_REG_NO) {
+			slotReach = info.offset < 0 ? static_cast<int>(-info.offset) : static_cast<int>(info.offset);
+			requiredBytes = std::max(requiredBytes, kSavedFrameBytes + slotReach);
+		} else if (info.baseRegId == RISCV64_SP_REG_NO) {
+			slotReach = static_cast<int>(info.offset);
+			requiredBytes = std::max(requiredBytes, kSavedFrameBytes + slotReach);
+		}
+	}
+
+	return alignTo(requiredBytes, 16);
+}
+
+} // namespace
 
 RiscV64Inst::RiscV64Inst(
 	std::string _opcode,
@@ -116,12 +168,27 @@ ILocRiscV64::~ILocRiscV64()
 	}
 }
 
+/// @brief 设置寄存器分配信息映射表
+/// @param allocMap 寄存器分配信息（由GreedyRegAllocator产生）
+void ILocRiscV64::setRegAllocMap(const std::unordered_map<Value *, RegAllocInfo> & allocMap)
+{
+	this->regAllocMap = allocMap;
+}
+
+/// @brief 获取某个Value的寄存器分配信息
+/// @param val IR值
+/// @return 寄存器分配信息引用
+RegAllocInfo & ILocRiscV64::getRegAllocInfo(Value * val)
+{
+	return regAllocMap[val];
+}
+
 /// @brief 删除无用的Label指令
 void ILocRiscV64::deleteUnusedLabel()
 {
 	std::list<RiscV64Inst *> labelInsts;
 	for (RiscV64Inst * inst: code) {
-		if ((!inst->dead) && (inst->opcode[0] == '.') && (inst->result == ":")) {
+		if (isInternalLabelInst(inst)) {
 			labelInsts.push_back(inst);
 		}
 	}
@@ -132,15 +199,9 @@ void ILocRiscV64::deleteUnusedLabel()
 		bool labelUsed = false;
 
 		for (RiscV64Inst * inst: code) {
-			// RISCV64跳转指令：j(无条件跳转)、beq/bne/blt/bge/bltu/bgeu(条件跳转)、call、jal、jalr
-			if ((!inst->dead) && (inst->result == labelInst->opcode)) {
-				// 检查是否是跳转/分支指令引用了该标签
-				if (inst->opcode == "j" || inst->opcode == "jal" || inst->opcode == "beq" ||
-					inst->opcode == "bne" || inst->opcode == "blt" || inst->opcode == "bge" ||
-					inst->opcode == "bltu" || inst->opcode == "bgeu" || inst->opcode == "call") {
-					labelUsed = true;
-					break;
-				}
+			if (isLabelReferenceInst(inst) && inst->result == labelInst->opcode) {
+				labelUsed = true;
+				break;
 			}
 		}
 
@@ -191,7 +252,7 @@ std::string ILocRiscV64::toStr(int num, bool flag)
 }
 
 /*
-	产生标签
+	产生标签（用于BasicBlock标签输出）
 */
 void ILocRiscV64::label(std::string name)
 {
@@ -249,9 +310,8 @@ void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 	} else {
 		// 超出12位范围，使用lui+addi
 		// lui加载高20位，addi加载低12位
-		uint32_t val = (uint32_t)constant;
-		uint32_t upper = (val + 0x800) >> 12; // 考虑低12位符号扩展的修正, 立即数低12位大于0x7FF时addi会识别成负数, 将高20位加1再加上addi识别的负数得到正确解
-		int32_t lower = val - (upper << 12);
+		int32_t upper = static_cast<int32_t>((static_cast<int64_t>(constant) + 0x800) >> 12);
+		int32_t lower = constant - (upper << 12);
 
 		emit("lui", PlatformRiscV64::regName[rs_reg_no], std::to_string(upper));
 		emit("addi", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[rs_reg_no],
@@ -265,7 +325,6 @@ void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 void ILocRiscV64::load_symbol(int rs_reg_no, std::string name)
 {
 	// la rd, symbol (伪指令，汇编器展开为auipc+addi)
-	// symbol 为全局变量或函数名，标签名，汇编器会处理符号地址的计算
 	emit("la", PlatformRiscV64::regName[rs_reg_no], name);
 }
 
@@ -285,13 +344,8 @@ void ILocRiscV64::load_base(int rs_reg_no, int base_reg_no, int offset)
 		emit("lw", rsReg, mem);
 	} else {
 		// 偏移超出12位范围，先加载偏移到寄存器，再用add计算地址
-		// li rs, offset
 		load_imm(rs_reg_no, offset);
-
-		// add rs, base, rs
 		emit("add", rsReg, base, rsReg);
-
-		// lw rs, 0(rs)
 		emit("lw", rsReg, "0(" + rsReg + ")");
 	}
 }
@@ -313,13 +367,8 @@ void ILocRiscV64::store_base(int src_reg_no, int base_reg_no, int disp, int tmp_
 		emit("sw", src, mem);
 	} else {
 		// 偏移超出12位范围，先加载偏移到临时寄存器，再用add计算地址
-		// li tmp, disp
 		load_imm(tmp_reg_no, disp);
-
-		// add tmp, base, tmp
 		emit("add", PlatformRiscV64::regName[tmp_reg_no], base, PlatformRiscV64::regName[tmp_reg_no]);
-
-		// sw src, 0(tmp)
 		emit("sw", src, "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
 	}
 }
@@ -337,46 +386,33 @@ void ILocRiscV64::mov_reg(int rs_reg_no, int src_reg_no)
 /// @param src_var 源操作数
 void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 {
-
 	if (Instanceof(constVal, ConstInt *, src_var)) {
 		// 若src_var是常量，则直接加载常量值
-
 		load_imm(rs_reg_no, constVal->getVal());
-	} else if (src_var->getRegId() != -1) { 
-		// 若src_var是寄存器变量，则直接mov到目标寄存器
 
-		int32_t src_regId = src_var->getRegId();
-
-		if (src_regId != rs_reg_no) { 
-			// 寄存器不一样才需要mov操作
-			// mv rd, rs | 这里有优化空间——消除冗余mv
-			emit("mv", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[src_regId]);
-		}
 	} else if (Instanceof(globalVar, GlobalVariable *, src_var)) {
-		// 全局变量
-
-		// 加载全局变量的地址
-		// la t0, global_var
+		// 全局变量：la加载地址 + lw加载值
 		load_symbol(rs_reg_no, globalVar->getName());
-
-		// lw t0, 0(t0) - 加载全局变量的值
 		emit("lw", PlatformRiscV64::regName[rs_reg_no], "0(" + PlatformRiscV64::regName[rs_reg_no] + ")");
 
 	} else {
-
-		// 栈+偏移的寻址方式
-
-		// 栈帧偏移
-		int32_t var_baseRegId = -1;
-		int64_t var_offset = -1;
-
-		bool result = src_var->getMemoryAddr(&var_baseRegId, &var_offset);
-		if (!result) {
-			minic_log(LOG_ERROR, "BUG");
+		// 局部变量/临时变量/形参：通过regAllocMap查找分配信息
+		auto it = regAllocMap.find(src_var);
+		if (it != regAllocMap.end() && it->second.hasReg()) {
+			// 分配了寄存器，直接mov
+			int32_t src_regId = it->second.regId;
+			if (src_regId != rs_reg_no) {
+				// 寄存器不一样才需要mv操作
+				emit("mv", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[src_regId]);
+			}
+		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
+			// 在栈上分配了空间，从栈加载
+			load_base(rs_reg_no, it->second.baseRegId, it->second.offset);
+		} else {
+			// 未找到分配信息，可能是AllocaInst的结果（指针值）
+			// 指针值需要通过栈地址加载
+			minic_log(LOG_ERROR, "ILocRiscV64::load_var: 未找到变量分配信息");
 		}
-
-		// lw rs, offset(base)
-		load_base(rs_reg_no, var_baseRegId, var_offset);
 	}
 }
 
@@ -385,71 +421,45 @@ void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 /// @param var 变量
 void ILocRiscV64::lea_var(int rs_reg_no, Value * var)
 {
-	// 被加载的变量肯定不是常量！
-	// 被加载的变量肯定不是寄存器变量！
-
-	// 目前只考虑局部变量
-
-	// 栈帧偏移
-	int32_t var_baseRegId = -1;
-	int64_t var_offset = -1;
-
-	bool result = var->getMemoryAddr(&var_baseRegId, &var_offset);
-	if (!result) {
-		minic_log(LOG_ERROR, "BUG");
+	// 通过regAllocMap查找栈位置信息
+	auto it = regAllocMap.find(var);
+	if (it != regAllocMap.end() && it->second.hasStackSlot) {
+		leaStack(rs_reg_no, it->second.baseRegId, it->second.offset);
+	} else if (Instanceof(globalVar, GlobalVariable *, var)) {
+		// 全局变量地址
+		load_symbol(rs_reg_no, globalVar->getName());
+	} else {
+		minic_log(LOG_ERROR, "ILocRiscV64::lea_var: 未找到变量栈位置信息");
 	}
-
-	// addi rs, base, offset
-	leaStack(rs_reg_no, var_baseRegId, var_offset);
 }
 
 /// @brief 保存寄存器到变量，保证将计算结果保存到变量
+/// 适配SSA IR：通过regAllocMap获取寄存器/栈位置信息
 /// @param src_reg_no 源寄存器
-/// @param dest_var  变量
+/// @param dest_var  目标变量
 /// @param tmp_reg_no 第三方寄存器
 void ILocRiscV64::store_var(int src_reg_no, Value * dest_var, int tmp_reg_no)
 {
-	// 被保存目标变量肯定不是常量
-
-	if (dest_var->getRegId() != -1) {
-
-		// 寄存器变量
-
-		// -1表示非寄存器，其他表示寄存器的索引值
-		int dest_reg_id = dest_var->getRegId();
-
-		// 寄存器不一样才需要mv操作
-		if (src_reg_no != dest_reg_id) {
-
-			// mv rd, rs | 这里有优化空间——消除冗余mv
-			emit("mv", PlatformRiscV64::regName[dest_reg_id], PlatformRiscV64::regName[src_reg_no]);
-		}
-
-	} else if (Instanceof(globalVar, GlobalVariable *, dest_var)) {
-		// 全局变量
-
-		// 加载符号的地址到临时寄存器
-		// la tmp, global_var
+	if (Instanceof(globalVar, GlobalVariable *, dest_var)) {
+		// 全局变量：la加载地址 + sw存储值
 		load_symbol(tmp_reg_no, globalVar->getName());
-
-		// sw src, 0(tmp)
 		emit("sw", PlatformRiscV64::regName[src_reg_no], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
 
 	} else {
-
-		// 对于局部变量，则直接从栈基址+偏移寻址
-
-		// 栈帧偏移
-		int32_t dest_baseRegId = -1;
-		int64_t dest_offset = -1;
-
-		bool result = dest_var->getMemoryAddr(&dest_baseRegId, &dest_offset);
-		if (!result) {
-			minic_log(LOG_ERROR, "BUG");
+		// 局部变量/临时变量/形参：通过regAllocMap查找分配信息
+		auto it = regAllocMap.find(dest_var);
+		if (it != regAllocMap.end() && it->second.hasReg()) {
+			// 分配了寄存器，直接mov
+			int dest_reg_id = it->second.regId;
+			if (src_reg_no != dest_reg_id) {
+				emit("mv", PlatformRiscV64::regName[dest_reg_id], PlatformRiscV64::regName[src_reg_no]);
+			}
+		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
+			// 在栈上分配了空间，存储到栈
+			store_base(src_reg_no, it->second.baseRegId, it->second.offset, tmp_reg_no);
+		} else {
+			minic_log(LOG_ERROR, "ILocRiscV64::store_var: 未找到变量分配信息");
 		}
-
-		// sw src, offset(base)
-		store_base(src_reg_no, dest_baseRegId, dest_offset, tmp_reg_no);
 	}
 }
 
@@ -480,27 +490,21 @@ void ILocRiscV64::leaStack(int rs_reg_no, int base_reg_no, int off)
 /// @param tmp_reg_no 临时寄存器编号
 void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 {
-	// 计算栈帧大小
-	int off = func->getMaxDep();
-
-	// 不需要在栈内额外分配空间，则什么都不做
-	if (0 == off) {
-		return;
-	}
+	(void) func;
+	const int frameSize = computeFrameSize(regAllocMap);
 
 	// RISCV64 prologue:
 	// addi sp, sp, -framesize
-	// 取负值作为偏移量，让栈指针向下增长(低地址)framesize字节
-	if (PlatformRiscV64::constExpr(-off)) {
-		emit("addi", "sp", "sp", std::to_string(-off));
+	if (PlatformRiscV64::constExpr(-frameSize)) {
+		emit("addi", "sp", "sp", std::to_string(-frameSize));
 	} else {
 		// 偏移超出12位范围
-		load_imm(tmp_reg_no, -off);
+		load_imm(tmp_reg_no, -frameSize);
 		emit("add", "sp", "sp", PlatformRiscV64::regName[tmp_reg_no]);
 	}
 
 	// sd ra, framesize-8(sp) - 保存返回地址
-	int ra_offset = off - 8;
+	int ra_offset = frameSize - 8;
 	if (PlatformRiscV64::isDisp(ra_offset)) {
 		emit("sd", "ra", std::to_string(ra_offset) + "(sp)");
 	} else {
@@ -510,7 +514,7 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 	}
 
 	// sd s0, framesize-16(sp) - 保存帧指针
-	int fp_offset = off - 16;
+	int fp_offset = frameSize - 16;
 	if (PlatformRiscV64::isDisp(fp_offset)) {
 		emit("sd", "s0", std::to_string(fp_offset) + "(sp)");
 	} else {
@@ -520,10 +524,10 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 	}
 
 	// addi s0, sp, framesize - 设置帧指针
-	if (PlatformRiscV64::constExpr(off)) {
-		emit("addi", "s0", "sp", std::to_string(off));
+	if (PlatformRiscV64::constExpr(frameSize)) {
+		emit("addi", "s0", "sp", std::to_string(frameSize));
 	} else {
-		load_imm(tmp_reg_no, off);
+		load_imm(tmp_reg_no, frameSize);
 		emit("add", "s0", "sp", PlatformRiscV64::regName[tmp_reg_no]);
 	}
 }
@@ -539,7 +543,7 @@ void ILocRiscV64::call_fun(std::string name)
 /// @brief NOP操作
 void ILocRiscV64::nop()
 {
-	emit("");
+	emit("nop");
 }
 
 ///
@@ -557,6 +561,4 @@ void ILocRiscV64::jump(std::string label)
 void ILocRiscV64::ldr_args(Function * fun)
 {
 	// RISCV64的参数加载由CodeGeneratorRiscV64::adjustFormalParamInsts处理
-	// 此处为空实现，与ARM32的ldr_args对称
-	// ARM32的ldr_args也是空实现，参数加载在CodeGeneratorArm32中处理
 }
