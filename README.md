@@ -862,7 +862,7 @@ c
 
 在执行前，请务必通过cmake进行build成功，这样会在build目录下生成CPackSourceConfig.cmake文件。
 
-进入build目录下执行如下的命令可产生源代码压缩包，用于实验源代码的提交
+进入 `build/` 目录后执行如下命令，可产生源代码压缩包，用于实验源代码的提交：
 
 ```shell
 cd build
