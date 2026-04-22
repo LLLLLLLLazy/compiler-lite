@@ -10,6 +10,7 @@
  */
 
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <getopt.h>
 
@@ -25,6 +26,8 @@
 #include "IRGenerator.h"
 #include "LLVMIREmitter.h"
 #include "Module.h"
+#include "DominatorTree.h"
+#include "DominanceFrontier.h"
 
 ///
 /// @brief 是否显示帮助信息
@@ -45,6 +48,11 @@ static bool gShowStructIR = false;
 /// @brief 产生LLVM IR文本，默认输出
 ///
 static bool gShowLLVMIR = false;
+
+///
+/// @brief 输出支配树与支配边界分析结果（Phase 5 调试输出）
+///
+static bool gShowDomInfo = false;
 
 ///
 /// @brief 输出中间结果，含结构化IR、LLVM IR等
@@ -95,6 +103,7 @@ static struct option long_options[] = {
 	{"optimize", required_argument, nullptr, 'O'},
 	{"target", required_argument, nullptr, 't'},
 	{"asmir", no_argument, nullptr, 'c'},
+	{"dom", no_argument, nullptr, 'm'},
 	{nullptr, 0, nullptr, 0}};
 
 /// @brief 显示帮助
@@ -114,6 +123,7 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -O, --optimize=LEVEL       Set optimization level\n";
 	std::cout << "  -t, --target=CPU           Specify target CPU architecture\n";
 	std::cout << "  -c, --asmir                Show IR instructions as comments in assembly output\n";
+	std::cout << "  --dom                      Output dominator tree and dominance frontier (Phase 5 debug)\n";
 }
 
 /// @brief 参数解析与有效性检查
@@ -132,7 +142,7 @@ static int ArgsAnalysis(int argc, char * argv[])
 	// -O要求必须带有附加整数，指明优化的级别
 	// -t要求必须带有目标CPU，指明目标CPU的汇编
 	// -c选项在输出汇编时有效，附带输出IR指令内容
-	const char options[] = "ho:STIADLO:t:c";
+	const char options[] = "ho:STIADLO:t:cm";
 	int option_index = 0;
 
 	opterr = 1;
@@ -182,6 +192,9 @@ lb_check:
 			case 'c':
 				gAsmAlsoShowIR = true;
 				break;
+			case 'm':
+				gShowDomInfo = true;
+				break;
 			default:
 				return -1;
 				break; /* no break */
@@ -219,13 +232,13 @@ lb_check:
 		return -1;
 	}
 
-	int flag = (int) gShowStructIR + (int) gShowLLVMIR + (int) gShowAST;
+	int flag = (int) gShowStructIR + (int) gShowLLVMIR + (int) gShowAST + (int) gShowDomInfo;
 
 	if (0 == flag) {
 		// 没有指定，则默认输出LLVM IR
 		gShowLLVMIR = true;
 	} else if (flag != 1) {
-		// 结构化IR、LLVM IR、抽象语法树只能同时选择一个
+		// 结构化IR、LLVM IR、抽象语法树、支配树信息只能同时选择一个
 		return -1;
 	}
 
@@ -237,6 +250,8 @@ lb_check:
 			gOutputFile = "output.png";
 		} else if (gShowStructIR) {
 			gOutputFile = "output.ir";
+		} else if (gShowDomInfo) {
+			gOutputFile = "output.dom";
 		} else {
 			gOutputFile = "output.ll";
 		}
@@ -320,6 +335,31 @@ static int compile(std::string inputFile, std::string outputFile)
 			module->outputIR(outputFile);
 
 			result = 0;
+			break;
+		}
+
+		if (gShowDomInfo) {
+			// Phase 5: 对每个函数计算支配树与支配边界，并输出到文件
+			std::string domOutput;
+			for (auto * func : module->getFunctionList()) {
+				if (func->isBuiltin() || func->getBlocks().empty()) {
+					continue;
+				}
+				domOutput += "Function: " + func->getName() + "\n";
+				DominatorTree dt(func);
+				dt.print(domOutput);
+				DominanceFrontier df(func, dt);
+				df.print(domOutput);
+				domOutput += "\n";
+			}
+
+			std::ofstream domFile(outputFile, std::ios::out | std::ios::trunc);
+			if (!domFile.is_open()) {
+				minic_log(LOG_ERROR, "支配树输出文件打开失败");
+				break;
+			}
+			domFile << domOutput;
+			result = domFile.good() ? 0 : -1;
 			break;
 		}
 
