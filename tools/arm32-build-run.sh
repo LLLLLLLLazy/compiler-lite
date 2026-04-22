@@ -30,7 +30,7 @@ printf "\n%d\n" $?
 
 echo "IRCompiler run"
 
-# 生成DragonIR
+# 生成结构化线性IR
 if ! "${rundir}/build/minic" -S -I -o "${rundir}/tests/${casename}.ir" "${rundir}/tests/${casename}.c"
 then
 	exit 1
