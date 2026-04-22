@@ -204,6 +204,8 @@ set(IR_SRCS
 	ir/Instructions/ReturnInst.cpp
 	ir/Instructions/PhiInst.h
 	ir/Instructions/PhiInst.cpp
+	ir/Instructions/ZExtInst.h
+	ir/Instructions/ZExtInst.cpp
 	ir/Type.h
 )
 

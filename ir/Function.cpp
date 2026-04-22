@@ -61,31 +61,41 @@ void Function::toString(std::string & str)
 
     str += ")\n{\n";
 
-    for (auto & var: this->varsVector) {
-        str += "\tdeclare " + var->getType()->toString() + " " + var->getIRName();
-        std::string realName = var->getName();
-        if (!realName.empty()) {
-            str += " ; " + std::to_string(var->getScopeLevel()) + ":" + realName;
+    if (!blocks.empty()) {
+        // Block-structured IR (Phase 3+)
+        for (auto * bb : blocks) {
+            std::string bbStr;
+            bb->toString(bbStr);
+            str += bbStr;
         }
-        str += "\n";
-    }
+    } else {
+        // Legacy linear IR
+        for (auto & var: this->varsVector) {
+            str += "\tdeclare " + var->getType()->toString() + " " + var->getIRName();
+            std::string realName = var->getName();
+            if (!realName.empty()) {
+                str += " ; " + std::to_string(var->getScopeLevel()) + ":" + realName;
+            }
+            str += "\n";
+        }
 
-    for (auto & inst: code.getInsts()) {
-        if (inst->hasResultValue()) {
-            str += "\tdeclare " + inst->getType()->toString() + " " + inst->getIRName() + "\n";
+        for (auto & inst: code.getInsts()) {
+            if (inst->hasResultValue()) {
+                str += "\tdeclare " + inst->getType()->toString() + " " + inst->getIRName() + "\n";
+            }
         }
-    }
 
-    for (auto & inst: code.getInsts()) {
-        std::string instStr;
-        inst->toString(instStr);
-        if (instStr.empty()) {
-            continue;
-        }
-        if (inst->getOp() == IRInstOperator::IRINST_OP_LABEL) {
-            str += instStr + "\n";
-        } else {
-            str += "\t" + instStr + "\n";
+        for (auto & inst: code.getInsts()) {
+            std::string instStr;
+            inst->toString(instStr);
+            if (instStr.empty()) {
+                continue;
+            }
+            if (inst->getOp() == IRInstOperator::IRINST_OP_LABEL) {
+                str += instStr + "\n";
+            } else {
+                str += "\t" + instStr + "\n";
+            }
         }
     }
 
@@ -225,6 +235,28 @@ void Function::renameIR()
         param->setIRName(IR_TEMP_VARNAME_PREFIX + std::to_string(nameIndex++));
     }
 
+    if (!blocks.empty()) {
+        // Block-structured IR (Phase 3+): rename blocks and their instructions.
+        // LocalVariable objects in varsVector are lookup keys only – skip them.
+        bool firstBlock = true;
+        for (auto * bb : blocks) {
+            if (firstBlock) {
+                bb->setIRName("%entry");
+                firstBlock = false;
+            } else {
+                bb->setIRName("%bb" + std::to_string(nameIndex++));
+            }
+
+            for (auto * inst : bb->getInstructions()) {
+                if (inst->hasResultValue()) {
+                    inst->setIRName(IR_TEMP_VARNAME_PREFIX + std::to_string(nameIndex++));
+                }
+            }
+        }
+        return;
+    }
+
+    // Legacy linear IR renaming
     for (auto & var: this->varsVector) {
         var->setIRName(IR_LOCAL_VARNAME_PREFIX + std::to_string(nameIndex++));
     }

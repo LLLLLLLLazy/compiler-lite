@@ -27,6 +27,8 @@ Value * StoreInst::getPointerOperand()
 
 void StoreInst::toString(std::string & str)
 {
+    Type * ptrType = getPointerOperand()->getType();
+    std::string ptrTypeStr = ptrType->isPointerType() ? ptrType->toString() : ptrType->toString() + "*";
     str = "store " + getValueOperand()->getType()->toString() + " " + getValueOperand()->getIRName() + ", " +
-          getPointerOperand()->getType()->toString() + " " + getPointerOperand()->getIRName();
+          ptrTypeStr + " " + getPointerOperand()->getIRName();
 }

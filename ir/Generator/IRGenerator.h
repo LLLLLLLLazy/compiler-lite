@@ -1,16 +1,19 @@
 ///
 /// @file IRGenerator.h
-/// @brief AST遍历产生结构化线性IR的头文件
+/// @brief AST遍历产生块结构化 IR（Phase 3）的头文件
 ///
 
 #pragma once
 
+#include <list>
+#include <unordered_map>
 #include <vector>
 
 #include "AST.h"
 #include "Module.h"
 
-class LabelInstruction;
+class AllocaInst;
+class BasicBlock;
 class Value;
 
 class IRGenerator {
@@ -57,19 +60,51 @@ private:
 
     Value * emitBinary(ast_node * node, IRInstOperator op);
 
-    Value * emitUnary(ast_node * node, IRInstOperator op);
+    Value * emitICmp(ast_node * node, IRInstOperator op);
+
+    Value * emitNeg(ast_node * node);
+
+    Value * emitNot(ast_node * node);
 
     Value * emitBoolize(Value * value);
 
-    LabelInstruction * createLabel();
-
-    void emitInst(Instruction * inst);
+    Value * ensureI32(Value * value);
 
     Function * currentFunction() const;
+
+    // ---- Block IR infrastructure ----
+
+    /// Create a new BasicBlock in the current function
+    BasicBlock * newBlock();
+
+    /// Set the current insertion block
+    void switchToBlock(BasicBlock * bb);
+
+    /// True if currentBlock's last instruction is a terminator
+    bool isTerminated() const;
+
+    /// Append inst to currentBlock
+    void emitToBlock(Instruction * inst);
+
+    /// Insert an alloca at the entry-block alloca point (Phase 3 canonical position)
+    AllocaInst * emitAlloca(Type * type);
+
+    /// Return (or lazily create) the alloca slot for a local variable/param
+    AllocaInst * getOrCreateVarSlot(Value * var);
 
 private:
     ast_node * root;
     Module * module;
-    std::vector<LabelInstruction *> breakTargets;
-    std::vector<LabelInstruction *> continueTargets;
+
+    // Current block-building context – reset per function
+    BasicBlock * currentBlock = nullptr;
+    BasicBlock * entryBlock = nullptr;
+
+
+    // Maps LocalVariable / FormalParam (as lookup keys) -> AllocaInst slot
+    std::unordered_map<Value *, AllocaInst *> varAllocaMap;
+
+    std::vector<BasicBlock *> breakTargets;
+    std::vector<BasicBlock *> continueTargets;
 };
+

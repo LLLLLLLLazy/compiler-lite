@@ -54,6 +54,9 @@ private:
 
     void emitFunction(Function * function, std::vector<std::string> & lines);
 
+    /// Block-structured IR emission path (Phase 3+)
+    void emitFunctionBlocks(Function * function, std::vector<std::string> & lines);
+
     void emitInstruction(Instruction * inst, std::vector<std::string> & lines, FunctionContext & context);
 
     void declareSlot(Value * value, std::vector<std::string> & lines, FunctionContext & context);

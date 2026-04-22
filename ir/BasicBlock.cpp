@@ -77,7 +77,11 @@ void BasicBlock::linkSuccessor(BasicBlock * succ)
 
 void BasicBlock::toString(std::string & str)
 {
-    std::string label = getIRName().empty() ? getIRName() : getIRName();
+    // Strip leading '%' from IR name to get the plain label text (e.g. "%entry" -> "entry")
+    std::string label = getIRName();
+    if (!label.empty() && label.front() == '%') {
+        label = label.substr(1);
+    }
     if (!label.empty()) {
         str += label + ":\n";
     }

@@ -1,26 +1,33 @@
 ///
 /// @file IRGenerator.cpp
-/// @brief AST遍历产生结构化线性IR的源文件
+/// @brief AST遍历产生块结构化 IR（Phase 3）的源文件
+///
+/// 局部变量通过 alloca/load/store 建模；
+/// 控制流（if/else、while、break/continue）通过 BasicBlock + 终结指令建模；
+/// 短路逻辑（&&、||）通过显式 CFG 建模。
 ///
 
 #include "IRGenerator.h"
 
-#include <cstdint>
 #include <string>
 #include <vector>
 
-#include "ArgInstruction.h"
-#include "BinaryInstruction.h"
+#include "AllocaInst.h"
+#include "BasicBlock.h"
+#include "BinaryInst.h"
+#include "BranchInst.h"
+#include "CallInst.h"
 #include "Common.h"
-#include "CondGotoInstruction.h"
-#include "EntryInstruction.h"
-#include "ExitInstruction.h"
-#include "FuncCallInstruction.h"
-#include "GotoInstruction.h"
+#include "CondBranchInst.h"
+#include "ConstInt.h"
+#include "FormalParam.h"
+#include "GlobalVariable.h"
+#include "ICmpInst.h"
 #include "IntegerType.h"
-#include "LabelInstruction.h"
-#include "MoveInstruction.h"
-#include "UnaryInstruction.h"
+#include "LoadInst.h"
+#include "ReturnInst.h"
+#include "StoreInst.h"
+#include "ZExtInst.h"
 
 IRGenerator::IRGenerator(ast_node * _root, Module * _module) : root(_root), module(_module)
 {}
@@ -45,7 +52,7 @@ bool IRGenerator::run()
 
 bool IRGenerator::declareCompileUnit(ast_node * node)
 {
-    for (auto son: node->sons) {
+    for (auto son : node->sons) {
         if (!son || son->node_type != ast_operator_type::AST_OP_FUNC_DEF) {
             continue;
         }
@@ -55,7 +62,7 @@ bool IRGenerator::declareCompileUnit(ast_node * node)
         ast_node * paramsNode = son->sons[2];
 
         std::vector<FormalParam *> params;
-        for (auto paramNode: paramsNode->sons) {
+        for (auto paramNode : paramsNode->sons) {
             if (paramNode->sons.size() < 2) {
                 continue;
             }
@@ -75,7 +82,7 @@ bool IRGenerator::visitCompileUnit(ast_node * node)
 {
     module->setCurrentFunction(nullptr);
 
-    for (auto son: node->sons) {
+    for (auto son : node->sons) {
         if (!son) {
             continue;
         }
@@ -124,13 +131,14 @@ bool IRGenerator::visitStatement(ast_node * node)
         case ast_operator_type::AST_OP_DECL_STMT:
             return visitDeclStmt(node);
         default:
+            // Expression statement: evaluate and discard result
             return visitExpr(node) != nullptr;
     }
 }
 
 bool IRGenerator::visitFuncDef(ast_node * node)
 {
-    ast_node * typeNode = node->sons[0];
+    (void) node->sons[0]; // typeNode – only used in declareCompileUnit
     ast_node * nameNode = node->sons[1];
     ast_node * blockNode = node->sons[3];
 
@@ -143,18 +151,37 @@ bool IRGenerator::visitFuncDef(ast_node * node)
     module->setCurrentFunction(func);
     module->enterScope();
 
-    emitInst(new EntryInstruction(func));
+    // Reset per-function block IR state
+    varAllocaMap.clear();
+    breakTargets.clear();
+    continueTargets.clear();
 
-    auto * exitLabel = createLabel();
-    func->setExitLabel(exitLabel);
+    // Create entry block – all allocas will be inserted here
+    entryBlock = func->newBasicBlock();
+    currentBlock = entryBlock;
 
-    LocalVariable * retValue = nullptr;
-    if (!typeNode->type->isVoidType()) {
-        retValue = static_cast<LocalVariable *>(module->newVarValue(typeNode->type));
-        emitInst(new MoveInstruction(func, retValue, module->newConstInt(0)));
+    // Create alloca slots for function parameters and store their values
+    for (auto * param : func->getParams()) {
+        if (param->getName().empty()) {
+            continue;
+        }
+
+        // Create a LocalVariable entry in the scope stack for this param name
+        Value * paramLocal = module->newVarValue(param->getType(), param->getName());
+        if (!paramLocal) {
+            module->leaveScope();
+            module->setCurrentFunction(nullptr);
+            return false;
+        }
+
+        AllocaInst * slot = emitAlloca(param->getType());
+        varAllocaMap[paramLocal] = slot;
+
+        // Store the actual param value into the alloca slot
+        emitToBlock(new StoreInst(func, param, slot));
     }
-    func->setReturnValue(retValue);
 
+    // Visit function body
     blockNode->needScope = false;
     if (!visitBlock(blockNode)) {
         module->leaveScope();
@@ -162,14 +189,17 @@ bool IRGenerator::visitFuncDef(ast_node * node)
         return false;
     }
 
-    emitInst(exitLabel);
-    emitInst(new ExitInstruction(func, retValue));
+    // Ensure the current block is properly terminated
+    if (!isTerminated()) {
+        if (func->getReturnType()->isVoidType()) {
+            emitToBlock(new ReturnInst(func, nullptr));
+        } else {
+            emitToBlock(new ReturnInst(func, module->newConstInt(0)));
+        }
+    }
 
     module->leaveScope();
     module->setCurrentFunction(nullptr);
-    breakTargets.clear();
-    continueTargets.clear();
-
     return true;
 }
 
@@ -179,7 +209,7 @@ bool IRGenerator::visitBlock(ast_node * node)
         module->enterScope();
     }
 
-    for (auto son: node->sons) {
+    for (auto son : node->sons) {
         if (!visitStatement(son)) {
             if (node->needScope) {
                 module->leaveScope();
@@ -202,93 +232,132 @@ bool IRGenerator::visitReturn(ast_node * node)
         return false;
     }
 
+    ReturnInst * retInst;
     if (!node->sons.empty()) {
         Value * retVal = visitExpr(node->sons[0]);
         if (!retVal) {
             return false;
         }
-
-        if (func->getReturnValue()) {
-            emitInst(new MoveInstruction(func, func->getReturnValue(), retVal));
+        if (func->getReturnType()->isInt32Type() && retVal->getType()->isInt1Byte()) {
+            retVal = ensureI32(retVal);
         }
+        retInst = new ReturnInst(func, retVal);
+    } else {
+        retInst = new ReturnInst(func, nullptr);
     }
 
-    emitInst(new GotoInstruction(func, func->getExitLabel()));
+    emitToBlock(retInst);
+
+    // Switch to a fresh unreachable block so visitBlock can continue
+    switchToBlock(newBlock());
     return true;
 }
 
 bool IRGenerator::visitIf(ast_node * node)
 {
     Function * func = currentFunction();
+
     Value * condValue = visitExpr(node->sons[0]);
     if (!condValue) {
         return false;
     }
+    Value * condBool = emitBoolize(condValue);
 
-    auto * thenLabel = createLabel();
-    auto * endLabel = createLabel();
-    auto * condValueBool = emitBoolize(condValue);
+    bool hasElse = (node->sons.size() >= 3 && node->sons[2] != nullptr);
 
-    if (node->sons.size() < 3 || node->sons[2] == nullptr) {
-        emitInst(new CondGotoInstruction(func, condValueBool, thenLabel, endLabel));
-        emitInst(thenLabel);
+    BasicBlock * thenBB = newBlock();
+    BasicBlock * mergeBB = newBlock();
+    BasicBlock * condFromBB = currentBlock;
+
+    if (!hasElse) {
+        emitToBlock(new CondBranchInst(func, condBool, thenBB, mergeBB));
+        condFromBB->linkSuccessor(thenBB);
+        condFromBB->linkSuccessor(mergeBB);
+
+        switchToBlock(thenBB);
         if (!visitStatement(node->sons[1])) {
             return false;
         }
-        emitInst(new GotoInstruction(func, endLabel));
-        emitInst(endLabel);
-        return true;
+        if (!isTerminated()) {
+            BasicBlock * thenEnd = currentBlock;
+            emitToBlock(new BranchInst(func, mergeBB));
+            thenEnd->linkSuccessor(mergeBB);
+        }
+    } else {
+        BasicBlock * elseBB = newBlock();
+        emitToBlock(new CondBranchInst(func, condBool, thenBB, elseBB));
+        condFromBB->linkSuccessor(thenBB);
+        condFromBB->linkSuccessor(elseBB);
+
+        switchToBlock(thenBB);
+        if (!visitStatement(node->sons[1])) {
+            return false;
+        }
+        if (!isTerminated()) {
+            BasicBlock * thenEnd = currentBlock;
+            emitToBlock(new BranchInst(func, mergeBB));
+            thenEnd->linkSuccessor(mergeBB);
+        }
+
+        switchToBlock(elseBB);
+        if (!visitStatement(node->sons[2])) {
+            return false;
+        }
+        if (!isTerminated()) {
+            BasicBlock * elseEnd = currentBlock;
+            emitToBlock(new BranchInst(func, mergeBB));
+            elseEnd->linkSuccessor(mergeBB);
+        }
     }
 
-    auto * elseLabel = createLabel();
-    emitInst(new CondGotoInstruction(func, condValueBool, thenLabel, elseLabel));
-
-    emitInst(thenLabel);
-    if (!visitStatement(node->sons[1])) {
-        return false;
-    }
-    emitInst(new GotoInstruction(func, endLabel));
-
-    emitInst(elseLabel);
-    if (!visitStatement(node->sons[2])) {
-        return false;
-    }
-    emitInst(new GotoInstruction(func, endLabel));
-
-    emitInst(endLabel);
+    switchToBlock(mergeBB);
     return true;
 }
 
 bool IRGenerator::visitWhile(ast_node * node)
 {
     Function * func = currentFunction();
-    auto * condLabel = createLabel();
-    auto * bodyLabel = createLabel();
-    auto * endLabel = createLabel();
 
-    emitInst(condLabel);
+    BasicBlock * condBB = newBlock();
+    BasicBlock * bodyBB = newBlock();
+    BasicBlock * exitBB = newBlock();
 
+    // Jump from current block to the condition check
+    BasicBlock * fromBB = currentBlock;
+    emitToBlock(new BranchInst(func, condBB));
+    fromBB->linkSuccessor(condBB);
+
+    // Build condition block
+    switchToBlock(condBB);
     Value * condValue = visitExpr(node->sons[0]);
     if (!condValue) {
         return false;
     }
-    emitInst(new CondGotoInstruction(func, emitBoolize(condValue), bodyLabel, endLabel));
+    Value * condBool = emitBoolize(condValue);
+    emitToBlock(new CondBranchInst(func, condBool, bodyBB, exitBB));
+    condBB->linkSuccessor(bodyBB);
+    condBB->linkSuccessor(exitBB);
 
-    breakTargets.push_back(endLabel);
-    continueTargets.push_back(condLabel);
+    // Build body block
+    breakTargets.push_back(exitBB);
+    continueTargets.push_back(condBB);
 
-    emitInst(bodyLabel);
+    switchToBlock(bodyBB);
     if (!visitStatement(node->sons[1])) {
         breakTargets.pop_back();
         continueTargets.pop_back();
         return false;
     }
-    emitInst(new GotoInstruction(func, condLabel));
+    if (!isTerminated()) {
+        BasicBlock * bodyEnd = currentBlock;
+        emitToBlock(new BranchInst(func, condBB));
+        bodyEnd->linkSuccessor(condBB);
+    }
 
     breakTargets.pop_back();
     continueTargets.pop_back();
 
-    emitInst(endLabel);
+    switchToBlock(exitBB);
     return true;
 }
 
@@ -301,7 +370,11 @@ bool IRGenerator::visitBreak(ast_node * node)
         return false;
     }
 
-    emitInst(new GotoInstruction(currentFunction(), breakTargets.back()));
+    BasicBlock * fromBB = currentBlock;
+    emitToBlock(new BranchInst(currentFunction(), breakTargets.back()));
+    fromBB->linkSuccessor(breakTargets.back());
+
+    switchToBlock(newBlock());
     return true;
 }
 
@@ -314,14 +387,18 @@ bool IRGenerator::visitContinue(ast_node * node)
         return false;
     }
 
-    emitInst(new GotoInstruction(currentFunction(), continueTargets.back()));
+    BasicBlock * fromBB = currentBlock;
+    emitToBlock(new BranchInst(currentFunction(), continueTargets.back()));
+    fromBB->linkSuccessor(continueTargets.back());
+
+    switchToBlock(newBlock());
     return true;
 }
 
 bool IRGenerator::visitAssign(ast_node * node)
 {
-    Value * lhs = module->findVarValue(node->sons[0]->name);
-    if (!lhs) {
+    Value * var = module->findVarValue(node->sons[0]->name);
+    if (!var) {
         minic_log(LOG_ERROR, "变量(%s)未定义", node->sons[0]->name.c_str());
         return false;
     }
@@ -331,13 +408,27 @@ bool IRGenerator::visitAssign(ast_node * node)
         return false;
     }
 
-    emitInst(new MoveInstruction(currentFunction(), lhs, rhs));
+    if (var->getType()->isInt32Type() && rhs->getType()->isInt1Byte()) {
+        rhs = ensureI32(rhs);
+    }
+
+    auto * globalVar = dynamic_cast<GlobalVariable *>(var);
+    if (globalVar) {
+        emitToBlock(new StoreInst(currentFunction(), rhs, globalVar));
+    } else {
+        AllocaInst * slot = getOrCreateVarSlot(var);
+        if (!slot) {
+            return false;
+        }
+        emitToBlock(new StoreInst(currentFunction(), rhs, slot));
+    }
+
     return true;
 }
 
 bool IRGenerator::visitDeclStmt(ast_node * node)
 {
-    for (auto child: node->sons) {
+    for (auto child : node->sons) {
         if (!visitVarDecl(child)) {
             return false;
         }
@@ -350,23 +441,31 @@ bool IRGenerator::visitVarDecl(ast_node * node)
     Type * declType = node->sons[0]->type;
     std::string varName = node->sons[1]->name;
 
-    Value * varValue = module->newVarValue(declType, varName);
-    if (!varValue) {
-        return false;
-    }
-
     if (module->getCurrentFunction()) {
+        Value * varValue = module->newVarValue(declType, varName);
+        if (!varValue) {
+            return false;
+        }
+
+        AllocaInst * slot = emitAlloca(declType);
+        varAllocaMap[varValue] = slot;
+
         if (node->sons.size() >= 3) {
             Value * initValue = visitExpr(node->sons[2]);
             if (!initValue) {
                 return false;
             }
-            emitInst(new MoveInstruction(currentFunction(), varValue, initValue));
+            if (declType->isInt32Type() && initValue->getType()->isInt1Byte()) {
+                initValue = ensureI32(initValue);
+            }
+            emitToBlock(new StoreInst(currentFunction(), initValue, slot));
         }
+
         return true;
     }
 
-    auto * globalVar = dynamic_cast<GlobalVariable *>(varValue);
+    // Global variable
+    auto * globalVar = dynamic_cast<GlobalVariable *>(module->newVarValue(declType, varName));
     if (!globalVar) {
         minic_log(LOG_ERROR, "全局变量(%s)创建失败", varName.c_str());
         return false;
@@ -393,10 +492,13 @@ Value * IRGenerator::visitExpr(ast_node * node)
     switch (node->node_type) {
         case ast_operator_type::AST_OP_LEAF_LITERAL_UINT:
             return module->newConstInt(static_cast<int32_t>(node->integer_val));
+
         case ast_operator_type::AST_OP_LEAF_VAR_ID:
             return visitLeafVarId(node);
+
         case ast_operator_type::AST_OP_FUNC_CALL:
             return visitFuncCall(node);
+
         case ast_operator_type::AST_OP_ADD:
             return emitBinary(node, IRInstOperator::IRINST_OP_ADD_I);
         case ast_operator_type::AST_OP_SUB:
@@ -407,74 +509,99 @@ Value * IRGenerator::visitExpr(ast_node * node)
             return emitBinary(node, IRInstOperator::IRINST_OP_DIV_I);
         case ast_operator_type::AST_OP_MOD:
             return emitBinary(node, IRInstOperator::IRINST_OP_MOD_I);
+
         case ast_operator_type::AST_OP_LT:
-            return emitBinary(node, IRInstOperator::IRINST_OP_LT_I);
+            return emitICmp(node, IRInstOperator::IRINST_OP_LT_I);
         case ast_operator_type::AST_OP_GT:
-            return emitBinary(node, IRInstOperator::IRINST_OP_GT_I);
+            return emitICmp(node, IRInstOperator::IRINST_OP_GT_I);
         case ast_operator_type::AST_OP_LE:
-            return emitBinary(node, IRInstOperator::IRINST_OP_LE_I);
+            return emitICmp(node, IRInstOperator::IRINST_OP_LE_I);
         case ast_operator_type::AST_OP_GE:
-            return emitBinary(node, IRInstOperator::IRINST_OP_GE_I);
+            return emitICmp(node, IRInstOperator::IRINST_OP_GE_I);
         case ast_operator_type::AST_OP_EQ:
-            return emitBinary(node, IRInstOperator::IRINST_OP_EQ_I);
+            return emitICmp(node, IRInstOperator::IRINST_OP_EQ_I);
         case ast_operator_type::AST_OP_NE:
-            return emitBinary(node, IRInstOperator::IRINST_OP_NE_I);
+            return emitICmp(node, IRInstOperator::IRINST_OP_NE_I);
+
         case ast_operator_type::AST_OP_NEG:
-            return emitUnary(node, IRInstOperator::IRINST_OP_NEG_I);
+            return emitNeg(node);
         case ast_operator_type::AST_OP_NOT:
-            return emitUnary(node, IRInstOperator::IRINST_OP_NOT_I);
+            return emitNot(node);
+
         case ast_operator_type::AST_OP_LAND: {
             Function * func = currentFunction();
-            auto * result = static_cast<LocalVariable *>(module->newVarValue(IntegerType::getTypeInt()));
-            emitInst(new MoveInstruction(func, result, module->newConstInt(0)));
+            AllocaInst * resultSlot = emitAlloca(IntegerType::getTypeInt());
+            emitToBlock(new StoreInst(func, module->newConstInt(0), resultSlot));
 
-            auto * rhsLabel = createLabel();
-            auto * endLabel = createLabel();
+            BasicBlock * rhsBB = newBlock();
+            BasicBlock * endBB = newBlock();
 
-            Value * lhsValue = visitExpr(node->sons[0]);
-            if (!lhsValue) {
+            Value * lhsVal = visitExpr(node->sons[0]);
+            if (!lhsVal) {
                 return nullptr;
             }
+            Value * lhsBool = emitBoolize(lhsVal);
 
-            emitInst(new CondGotoInstruction(func, emitBoolize(lhsValue), rhsLabel, endLabel));
-            emitInst(rhsLabel);
+            BasicBlock * condBlock = currentBlock;
+            emitToBlock(new CondBranchInst(func, lhsBool, rhsBB, endBB));
+            condBlock->linkSuccessor(rhsBB);
+            condBlock->linkSuccessor(endBB);
 
-            Value * rhsValue = visitExpr(node->sons[1]);
-            if (!rhsValue) {
+            switchToBlock(rhsBB);
+            Value * rhsVal = visitExpr(node->sons[1]);
+            if (!rhsVal) {
                 return nullptr;
             }
+            Value * rhsBool = emitBoolize(rhsVal);
+            Value * rhsI32 = ensureI32(rhsBool);
+            emitToBlock(new StoreInst(func, rhsI32, resultSlot));
+            BasicBlock * rhsEnd = currentBlock;
+            emitToBlock(new BranchInst(func, endBB));
+            rhsEnd->linkSuccessor(endBB);
 
-            emitInst(new MoveInstruction(func, result, emitBoolize(rhsValue)));
-            emitInst(new GotoInstruction(func, endLabel));
-            emitInst(endLabel);
+            switchToBlock(endBB);
+            auto * result = new LoadInst(func, resultSlot, IntegerType::getTypeInt());
+            emitToBlock(result);
             return result;
         }
+
         case ast_operator_type::AST_OP_LOR: {
             Function * func = currentFunction();
-            auto * result = static_cast<LocalVariable *>(module->newVarValue(IntegerType::getTypeInt()));
-            emitInst(new MoveInstruction(func, result, module->newConstInt(1)));
+            AllocaInst * resultSlot = emitAlloca(IntegerType::getTypeInt());
+            emitToBlock(new StoreInst(func, module->newConstInt(1), resultSlot));
 
-            auto * rhsLabel = createLabel();
-            auto * endLabel = createLabel();
+            BasicBlock * rhsBB = newBlock();
+            BasicBlock * endBB = newBlock();
 
-            Value * lhsValue = visitExpr(node->sons[0]);
-            if (!lhsValue) {
+            Value * lhsVal = visitExpr(node->sons[0]);
+            if (!lhsVal) {
                 return nullptr;
             }
+            Value * lhsBool = emitBoolize(lhsVal);
 
-            emitInst(new CondGotoInstruction(func, emitBoolize(lhsValue), endLabel, rhsLabel));
-            emitInst(rhsLabel);
+            BasicBlock * condBlock = currentBlock;
+            emitToBlock(new CondBranchInst(func, lhsBool, endBB, rhsBB));
+            condBlock->linkSuccessor(endBB);
+            condBlock->linkSuccessor(rhsBB);
 
-            Value * rhsValue = visitExpr(node->sons[1]);
-            if (!rhsValue) {
+            switchToBlock(rhsBB);
+            Value * rhsVal = visitExpr(node->sons[1]);
+            if (!rhsVal) {
                 return nullptr;
             }
+            Value * rhsBool = emitBoolize(rhsVal);
+            Value * rhsI32 = ensureI32(rhsBool);
+            emitToBlock(new StoreInst(func, rhsI32, resultSlot));
+            BasicBlock * rhsEnd = currentBlock;
+            emitToBlock(new BranchInst(func, endBB));
+            rhsEnd->linkSuccessor(endBB);
 
-            emitInst(new MoveInstruction(func, result, emitBoolize(rhsValue)));
-            emitInst(new GotoInstruction(func, endLabel));
-            emitInst(endLabel);
+            switchToBlock(endBB);
+            auto * result = new LoadInst(func, resultSlot, IntegerType::getTypeInt());
+            emitToBlock(result);
             return result;
         }
+
         default:
             minic_log(LOG_ERROR, "表达式不支持的节点类型: %d", static_cast<int>(node->node_type));
             return nullptr;
@@ -492,10 +619,13 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
 
     std::vector<Value *> args;
     ast_node * paramsNode = node->sons[1];
-    for (auto argNode: paramsNode->sons) {
+    for (auto argNode : paramsNode->sons) {
         Value * argValue = visitExpr(argNode);
         if (!argValue) {
             return nullptr;
+        }
+        if (argValue->getType()->isInt1Byte()) {
+            argValue = ensureI32(argValue);
         }
         args.push_back(argValue);
     }
@@ -513,8 +643,8 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
         }
     }
 
-    auto * callInst = new FuncCallInstruction(func, calledFunc, args, calledFunc->getReturnType());
-    emitInst(callInst);
+    auto * callInst = new CallInst(func, calledFunc, args, calledFunc->getReturnType());
+    emitToBlock(callInst);
 
     if (calledFunc->getReturnType()->isVoidType()) {
         return module->newConstInt(0);
@@ -525,11 +655,27 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
 
 Value * IRGenerator::visitLeafVarId(ast_node * node)
 {
-    Value * value = module->findVarValue(node->name);
-    if (!value) {
+    Value * var = module->findVarValue(node->name);
+    if (!var) {
         minic_log(LOG_ERROR, "变量(%s)未定义", node->name.c_str());
+        return nullptr;
     }
-    return value;
+
+    auto * globalVar = dynamic_cast<GlobalVariable *>(var);
+    if (globalVar) {
+        auto * loadInst = new LoadInst(currentFunction(), globalVar, globalVar->getType());
+        emitToBlock(loadInst);
+        return loadInst;
+    }
+
+    AllocaInst * slot = getOrCreateVarSlot(var);
+    if (!slot) {
+        return nullptr;
+    }
+
+    auto * loadInst = new LoadInst(currentFunction(), slot, slot->getAllocaType());
+    emitToBlock(loadInst);
+    return loadInst;
 }
 
 Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator op)
@@ -538,54 +684,133 @@ Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator op)
     if (!lhs) {
         return nullptr;
     }
-
     Value * rhs = visitExpr(node->sons[1]);
     if (!rhs) {
         return nullptr;
     }
 
-    auto * inst = new BinaryInstruction(currentFunction(), op, lhs, rhs, IntegerType::getTypeInt());
-    emitInst(inst);
+    lhs = ensureI32(lhs);
+    rhs = ensureI32(rhs);
+
+    auto * inst = new BinaryInst(currentFunction(), op, lhs, rhs, IntegerType::getTypeInt());
+    emitToBlock(inst);
     return inst;
 }
 
-Value * IRGenerator::emitUnary(ast_node * node, IRInstOperator op)
+Value * IRGenerator::emitICmp(ast_node * node, IRInstOperator op)
+{
+    Value * lhs = visitExpr(node->sons[0]);
+    if (!lhs) {
+        return nullptr;
+    }
+    Value * rhs = visitExpr(node->sons[1]);
+    if (!rhs) {
+        return nullptr;
+    }
+
+    lhs = ensureI32(lhs);
+    rhs = ensureI32(rhs);
+
+    auto * inst = new ICmpInst(currentFunction(), op, lhs, rhs, IntegerType::getTypeBool());
+    emitToBlock(inst);
+    return inst;
+}
+
+Value * IRGenerator::emitNeg(ast_node * node)
 {
     Value * operand = visitExpr(node->sons[0]);
     if (!operand) {
         return nullptr;
     }
+    operand = ensureI32(operand);
 
-    auto * inst = new UnaryInstruction(currentFunction(), op, operand, IntegerType::getTypeInt());
-    emitInst(inst);
+    auto * inst = new BinaryInst(currentFunction(), IRInstOperator::IRINST_OP_SUB_I,
+                                 module->newConstInt(0), operand, IntegerType::getTypeInt());
+    emitToBlock(inst);
+    return inst;
+}
+
+Value * IRGenerator::emitNot(ast_node * node)
+{
+    Value * operand = visitExpr(node->sons[0]);
+    if (!operand) {
+        return nullptr;
+    }
+    operand = ensureI32(operand);
+
+    auto * inst = new ICmpInst(currentFunction(), IRInstOperator::IRINST_OP_EQ_I,
+                               operand, module->newConstInt(0), IntegerType::getTypeBool());
+    emitToBlock(inst);
     return inst;
 }
 
 Value * IRGenerator::emitBoolize(Value * value)
 {
-    if (auto * constVal = dynamic_cast<ConstInt *>(value)) {
-        return module->newConstInt(constVal->getVal() != 0 ? 1 : 0);
+    if (value->getType()->isInt1Byte()) {
+        return value;
     }
-
-    auto * inst = new BinaryInstruction(
-        currentFunction(), IRInstOperator::IRINST_OP_NE_I, value, module->newConstInt(0), IntegerType::getTypeInt());
-    emitInst(inst);
+    auto * inst = new ICmpInst(currentFunction(), IRInstOperator::IRINST_OP_NE_I,
+                               value, module->newConstInt(0), IntegerType::getTypeBool());
+    emitToBlock(inst);
     return inst;
 }
 
-LabelInstruction * IRGenerator::createLabel()
+Value * IRGenerator::ensureI32(Value * value)
 {
-    return new LabelInstruction(currentFunction());
-}
-
-void IRGenerator::emitInst(Instruction * inst)
-{
-    if (currentFunction()) {
-        currentFunction()->getInterCode().addInst(inst);
+    if (!value->getType()->isInt1Byte()) {
+        return value;
     }
+    auto * zext = new ZExtInst(currentFunction(), value, IntegerType::getTypeInt());
+    emitToBlock(zext);
+    return zext;
 }
 
 Function * IRGenerator::currentFunction() const
 {
     return module->getCurrentFunction();
+}
+
+BasicBlock * IRGenerator::newBlock()
+{
+    return currentFunction()->newBasicBlock();
+}
+
+void IRGenerator::switchToBlock(BasicBlock * bb)
+{
+    currentBlock = bb;
+}
+
+bool IRGenerator::isTerminated() const
+{
+    return currentBlock != nullptr && currentBlock->isTerminated();
+}
+
+void IRGenerator::emitToBlock(Instruction * inst)
+{
+    if (currentBlock) {
+        currentBlock->addInstruction(inst);
+    }
+}
+
+AllocaInst * IRGenerator::emitAlloca(Type * type)
+{
+    auto * alloca = new AllocaInst(currentFunction(), type);
+    // Insert at the front of the entry block so all allocas appear before any
+    // regular instructions, regardless of when (during the traversal) they
+    // were emitted.  The order among allocas is reversed but that is harmless.
+    entryBlock->getInstructions().push_front(alloca);
+    alloca->setParentBlock(entryBlock);
+    return alloca;
+}
+
+AllocaInst * IRGenerator::getOrCreateVarSlot(Value * var)
+{
+    auto it = varAllocaMap.find(var);
+    if (it != varAllocaMap.end()) {
+        return it->second;
+    }
+
+    auto * slot = emitAlloca(var->getType());
+    varAllocaMap[var] = slot;
+    return slot;
 }
