@@ -81,7 +81,11 @@ set(FRONTEND_SRCS
 
 )
 
+# 是否编译后端代码（ARM32 即将废弃；CI 中仅需编译前端+IR，可关闭后端）
+set(BUILD_BACKEND ON CACHE BOOL "Enable/Disable backend (ARM32/RiscV64) compilation")
+
 # 后端源代码集合
+if(BUILD_BACKEND)
 set(BACKEND_SRCS
 	# 后端共性代码
 	backend/CodeGenerator.cpp
@@ -124,8 +128,10 @@ set(BACKEND_SRCS
 	backend/riscv64/SpillStrategy.h
 	backend/riscv64/HeuristicSpillStrategy.cpp
 	backend/riscv64/HeuristicSpillStrategy.h
-
 )
+else()
+set(BACKEND_SRCS)
+endif()
 
 # 中间IR(ir)源代码集合
 set(IR_SRCS
@@ -206,6 +212,8 @@ set(IR_SRCS
 	ir/Instructions/PhiInst.cpp
 	ir/Instructions/ZExtInst.h
 	ir/Instructions/ZExtInst.cpp
+	ir/Instructions/CopyInst.h
+	ir/Instructions/CopyInst.cpp
 	ir/Type.h
 	ir/analysis/DominatorTree.h
 	ir/analysis/DominatorTree.cpp
@@ -213,6 +221,8 @@ set(IR_SRCS
 	ir/analysis/DominanceFrontier.cpp
 	ir/passes/Mem2Reg.h
 	ir/passes/Mem2Reg.cpp
+	ir/passes/PhiLowering.h
+	ir/passes/PhiLowering.cpp
 )
 
 # 符号表等共通化代码集合
