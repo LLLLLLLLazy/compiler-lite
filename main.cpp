@@ -22,7 +22,9 @@
 #include "Antlr4Executor.h"
 #include "FrontEndExecutor.h"
 #include "Graph.h"
-#include "IREmitter.h"
+#include "IRGenerator.h"
+#include "LLVMIREmitter.h"
+#include "Module.h"
 
 ///
 /// @brief 是否显示帮助信息
@@ -35,12 +37,17 @@ static bool gShowHelp = false;
 static bool gShowAST = false;
 
 ///
-/// @brief 产生线性IR（LLVM IR），默认输出
+/// @brief 产生结构化线性IR，供后端和调试使用
 ///
-static bool gShowLineIR = false;
+static bool gShowStructIR = false;
 
 ///
-/// @brief 输出中间IR，含汇编或者自定义IR等，默认输出线性IR
+/// @brief 产生LLVM IR文本，默认输出
+///
+static bool gShowLLVMIR = false;
+
+///
+/// @brief 输出中间结果，含结构化IR、LLVM IR等
 ///
 static bool gShowSymbol = false;
 
@@ -60,7 +67,7 @@ static bool gFrontEndAntlr4 = false;
 static bool gFrontEndRecursiveDescentParsing = false;
 
 ///
-/// @brief 在输出汇编时是否输出中间IR作为注释
+/// @brief 预留给后端汇编输出时作为注释显示IR
 ///
 static bool gAsmAlsoShowIR = false;
 
@@ -100,7 +107,7 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -o, --output=FILE          Specify output file\n";
 	std::cout << "  -S, --symbol               Show symbol information\n";
 	std::cout << "  -T, --ast                  Output abstract syntax tree\n";
-	std::cout << "  -I, --ir                   Output LLVM IR (same as -L)\n";
+	std::cout << "  -I, --ir                   Output structured linear IR\n";
 	std::cout << "  -L, --llvmir               Output LLVM IR (.ll)\n";
 	std::cout << "  -A, --antlr4               Deprecated, now always use Antlr4\n";
 	std::cout << "  -D, --recursive-descent    Deprecated, now always use Antlr4\n";
@@ -146,12 +153,12 @@ lb_check:
 				gShowAST = true;
 				break;
 			case 'I':
-				// 产生LLVM IR
-				gShowLineIR = true;
+				// 产生结构化线性IR
+				gShowStructIR = true;
 				break;
 			case 'L':
 				// 产生LLVM IR
-				gShowLineIR = true;
+				gShowLLVMIR = true;
 				break;
 			case 'A':
 				// 选用antlr4
@@ -212,13 +219,13 @@ lb_check:
 		return -1;
 	}
 
-	int flag = (int) gShowLineIR + (int) gShowAST;
+	int flag = (int) gShowStructIR + (int) gShowLLVMIR + (int) gShowAST;
 
 	if (0 == flag) {
 		// 没有指定，则默认输出LLVM IR
-		gShowLineIR = true;
+		gShowLLVMIR = true;
 	} else if (flag != 1) {
-		// LLVM IR、抽象语法树只能同时选择一个
+		// 结构化IR、LLVM IR、抽象语法树只能同时选择一个
 		return -1;
 	}
 
@@ -228,6 +235,8 @@ lb_check:
 		// 默认文件名
 		if (gShowAST) {
 			gOutputFile = "output.png";
+		} else if (gShowStructIR) {
+			gOutputFile = "output.ir";
 		} else {
 			gOutputFile = "output.ll";
 		}
@@ -248,13 +257,14 @@ static int compile(std::string inputFile, std::string outputFile)
 
 	// 内部函数调用返回值保存变量
 	int subResult;
+	Module * module = nullptr;
 
 	do {
 
 		// 编译过程主要包括：
 		// 1）词法语法分析生成AST
-		// 2) 遍历AST生成LLVM IR
-		// 3) 输出LLVM IR或汇编
+		// 2) 遍历AST生成结构化IR
+		// 3) 基于结构化IR输出调试IR或LLVM IR
 		//
 		// TODO：实现 RISCV64 后端支持
 
@@ -289,20 +299,37 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
-		// 遍历AST产生LLVM IR文本
-		IREmitter irEmitter(astRoot, inputFile);
-		subResult = irEmitter.run();
+		module = new Module(inputFile);
+		IRGenerator irGenerator(astRoot, module);
+		subResult = irGenerator.run();
 		if (!subResult) {
 
-			minic_log(LOG_ERROR, "LLVM IR生成错误");
+			minic_log(LOG_ERROR, "结构化IR生成错误");
 
 			// 清理抽象语法树
 			ast_node::Delete(astRoot);
 			break;
 		}
 
-		// 清理抽象语法树
+		module->renameIR();
+
+		// 结构化IR已经生成完成，后续输出不再依赖AST
 		ast_node::Delete(astRoot);
+
+		if (gShowStructIR) {
+			module->outputIR(outputFile);
+
+			result = 0;
+			break;
+		}
+
+		LLVMIREmitter irEmitter(module, inputFile);
+		subResult = irEmitter.run();
+		if (!subResult) {
+
+			minic_log(LOG_ERROR, "LLVM IR生成错误");
+			break;
+		}
 
 		// 输出LLVM IR文本
 		if (!irEmitter.writeToFile(outputFile)) {
@@ -314,6 +341,11 @@ static int compile(std::string inputFile, std::string outputFile)
 		result = 0;
 
 	} while (false);
+
+	if (module) {
+		module->Delete();
+		delete module;
+	}
 
 	return result;
 }
