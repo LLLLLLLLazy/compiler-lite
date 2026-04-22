@@ -16,7 +16,7 @@ const std::string PlatformRiscV64::regName[PlatformRiscV64::maxRegNum] = {
 	"t0",   // x5, 临时寄存器
 	"t1",   // x6, 临时寄存器
 	"t2",   // x7, 临时寄存器
-	"fp",   // x8, 帧指针寄存器(s0/fp)
+	"s0",   // x8, 帧指针寄存器(s0/fp)
 	"s1",   // x9, 被调用者保存寄存器
 	"a0",   // x10, 返回值/第1个参数
 	"a1",   // x11, 第2个参数
@@ -78,6 +78,7 @@ RegVariable * PlatformRiscV64::intRegVal[PlatformRiscV64::maxRegNum] = {
 };
 
 /// @brief 判断是否是合法的立即数表达式
+/// RISC-V I-type: 12位有符号立即数, 范围 -2048 ~ 2047
 /// @param num
 /// @return
 bool PlatformRiscV64::constExpr(int num)
@@ -86,6 +87,7 @@ bool PlatformRiscV64::constExpr(int num)
 }
 
 /// @brief 判定是否是合法的偏移
+/// 与constExpr一致，用于load/store的offset(base)寻址
 /// @param num
 /// @return
 bool PlatformRiscV64::isDisp(int num)
@@ -94,6 +96,7 @@ bool PlatformRiscV64::isDisp(int num)
 }
 
 /// @brief 判断是否是合法的寄存器名
+/// 支持两种命名: x编号(x0-x31)和ABI名称(zero/ra/sp/gp/tp/t0-t6/s0-s11/a0-a7/fp)
 /// @param name 寄存器名字
 /// @return 是否是
 bool PlatformRiscV64::isReg(std::string name)
