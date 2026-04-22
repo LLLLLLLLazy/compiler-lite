@@ -72,6 +72,18 @@ enum class ast_operator_type : int {
 	/// @brief return语句运算符
 	AST_OP_RETURN,
 
+	/// @brief if/if-else 语句运算符
+	AST_OP_IF,
+
+	/// @brief while 语句运算符
+	AST_OP_WHILE,
+
+	/// @brief break 语句运算符
+	AST_OP_BREAK,
+
+	/// @brief continue 语句运算符
+	AST_OP_CONTINUE,
+
 	/// @brief 赋值语句运算符
 	AST_OP_ASSIGN,
 
@@ -96,10 +108,35 @@ enum class ast_operator_type : int {
 	/// @brief 二元运算符%
 	AST_OP_MOD,
 
+	/// @brief 二元关系运算符<
+	AST_OP_LT,
+
+	/// @brief 二元关系运算符>
+	AST_OP_GT,
+
+	/// @brief 二元关系运算符<=
+	AST_OP_LE,
+
+	/// @brief 二元关系运算符>=
+	AST_OP_GE,
+
+	/// @brief 二元相等运算符==
+	AST_OP_EQ,
+
+	/// @brief 二元不等运算符!=
+	AST_OP_NE,
+
+	/// @brief 逻辑与运算符&&
+	AST_OP_LAND,
+
+	/// @brief 逻辑或运算符||
+	AST_OP_LOR,
+
 	/// @brief 单目运算符- (求负)
 	AST_OP_NEG,
 
-	// TODO 抽象语法树其它内部节点运算符追加
+	/// @brief 单目运算符! (逻辑非)
+	AST_OP_NOT,
 
 	/// @brief 最大标识符，表示非法运算符
 	AST_OP_MAX,
