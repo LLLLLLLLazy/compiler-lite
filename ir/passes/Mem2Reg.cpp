@@ -1,6 +1,6 @@
 ///
 /// @file Mem2Reg.cpp
-/// @brief mem2reg pass 实现 – Phase 6
+/// @brief mem2reg pass 实现
 ///
 /// 参考：
 ///   Cytron et al., "Efficiently Computing Static Single Assignment Form and

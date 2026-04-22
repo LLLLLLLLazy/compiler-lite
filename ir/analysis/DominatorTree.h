@@ -1,6 +1,6 @@
 ///
 /// @file DominatorTree.h
-/// @brief 支配树（Dominator Tree）– Phase 5 CFG 分析基础设施
+/// @brief 支配树（Dominator Tree）
 ///
 /// 实现 Cooper et al. (2001) "A Simple, Fast Dominance Algorithm"。
 /// 提供：

@@ -29,17 +29,6 @@ public:
         return intVal;
     }
 
-    int32_t getLoadRegId()
-    {
-        return this->loadRegNo;
-    }
-
-    void setLoadRegId(int32_t regId)
-    {
-        this->loadRegNo = regId;
-    }
-
 private:
     int32_t intVal = 0;
-    int32_t loadRegNo = -1;
 };

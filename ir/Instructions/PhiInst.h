@@ -1,6 +1,6 @@
 ///
 /// @file PhiInst.h
-/// @brief φ 节点（SSA 形式，Phase 6 正式使用，Phase 2 先占位）
+/// @brief φ 节点
 ///
 /// PhiInst 表示 SSA φ 函数：在控制流汇合处，根据前驱基本块选择不同的值。
 /// 每个 incoming 条目是一个 (Value*, BasicBlock*) 对。

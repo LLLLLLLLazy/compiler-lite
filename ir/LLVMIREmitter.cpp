@@ -1,6 +1,6 @@
 ///
 /// @file LLVMIREmitter.cpp
-/// @brief LLVM IR 文本发射器（Phase 4 纯打印器）
+/// @brief LLVM IR 文本发射器
 ///
 /// 只负责将结构化 IR（Module / Function / BasicBlock / Instruction）
 /// 序列化为 LLVM IR 文本，不承担任何 lowering / 语义补全工作。

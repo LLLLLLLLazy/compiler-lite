@@ -1,6 +1,6 @@
 ///
 /// @file BasicBlock.h
-/// @brief 基本块 – Phase 2 块结构 IR 核心类
+/// @brief 基本块类
 ///
 /// 每个 BasicBlock 包含一个有序指令列表，并维护 CFG 中的前驱/后继集合。
 /// 基本块的最后一条指令必须是终结指令（BranchInst、CondBranchInst 或 ReturnInst）。

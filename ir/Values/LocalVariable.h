@@ -25,48 +25,6 @@ public:
         return scope_level;
     }
 
-    int32_t getRegId()
-    {
-        return regId;
-    }
-
-    bool getMemoryAddr(int32_t * _regId = nullptr, int64_t * _offset = nullptr)
-    {
-        if (this->baseRegNo == -1) {
-            return false;
-        }
-
-        if (_regId) {
-            *_regId = this->baseRegNo;
-        }
-        if (_offset) {
-            *_offset = this->offset;
-        }
-
-        return true;
-    }
-
-    void setMemoryAddr(int32_t _regId, int64_t _offset)
-    {
-        baseRegNo = _regId;
-        offset = _offset;
-    }
-
-    int32_t getLoadRegId()
-    {
-        return this->loadRegNo;
-    }
-
-    void setLoadRegId(int32_t regId)
-    {
-        this->loadRegNo = regId;
-    }
-
 private:
     int32_t scope_level = -1;
-    int32_t regId = -1;
-    int32_t offset = 0;
-    int32_t baseRegNo = -1;
-    std::string baseRegName;
-    int32_t loadRegNo = -1;
 };

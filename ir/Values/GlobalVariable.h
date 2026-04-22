@@ -32,16 +32,6 @@ public:
         return 0;
     }
 
-    int32_t getLoadRegId()
-    {
-        return this->loadRegNo;
-    }
-
-    void setLoadRegId(int32_t regId)
-    {
-        this->loadRegNo = regId;
-    }
-
     void setInitIntValue(int32_t value)
     {
         initIntValue = value;
@@ -59,7 +49,6 @@ public:
     }
 
 private:
-    int32_t loadRegNo = -1;
     bool inBSSSection = true;
     int32_t initIntValue = 0;
 };

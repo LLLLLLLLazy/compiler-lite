@@ -1,8 +1,7 @@
 ///
 /// @file CondBranchInst.h
-/// @brief 条件跳转指令（终结指令，Phase 2 块结构版）
+/// @brief 条件跳转指令
 ///
-/// 与旧的 CondGotoInstruction（跳转到 LabelInstruction）不同，
 /// 此指令直接持有 BasicBlock* 目标，适用于块结构 CFG。
 ///
 

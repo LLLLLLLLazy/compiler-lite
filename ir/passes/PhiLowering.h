@@ -1,6 +1,6 @@
 ///
 /// @file PhiLowering.h
-/// @brief phi 降级 pass（Phase 7，路线 B）
+/// @brief phi 降级 pass
 ///
 /// 将 SSA 中的 phi 节点转换为各前驱块末尾的 copy 指令序列，从而产生
 /// 无 phi 的 IR，供后端（指令选择 + 寄存器分配）直接消费。
@@ -22,14 +22,6 @@
 ///
 /// 4. 从 BB 的指令列表中移除 phi，并清除其操作数（维护 use-def 链）。
 ///
-/// ## 验收标准（Phase 7）
-///
-/// - 所有 phi 节点消失，IR 可被后端按基本块顺序逐指令翻译；
-/// - CopyInst(explicitDst) 的逻辑目标是原 phi 结果 Value*，后端可据此
-///   建立寄存器合并（coalescing）约束；
-/// - 处理后调用 module->renameIR() 可为新值复制指令分配 IRName。
-///
-
 #pragma once
 
 #include <unordered_map>
