@@ -1,0 +1,47 @@
+///
+/// @file PhiInst.h
+/// @brief φ 节点（SSA 形式，Phase 6 正式使用，Phase 2 先占位）
+///
+/// PhiInst 表示 SSA φ 函数：在控制流汇合处，根据前驱基本块选择不同的值。
+/// 每个 incoming 条目是一个 (Value*, BasicBlock*) 对。
+///
+
+#pragma once
+
+#include <vector>
+
+#include "BasicBlock.h"
+#include "Instruction.h"
+
+class Value;
+
+class PhiInst final : public Instruction {
+
+public:
+    struct Incoming {
+        Value * value;
+        BasicBlock * block;
+    };
+
+    /// @param func     所在函数
+    /// @param type     φ 值类型
+    explicit PhiInst(Function * func, Type * type);
+
+    /// 添加一个 (value, block) incoming 对
+    void addIncoming(Value * value, BasicBlock * block);
+
+    int32_t getIncomingCount() const
+    {
+        return static_cast<int32_t>(incoming.size());
+    }
+
+    const Incoming & getIncoming(int32_t i) const
+    {
+        return incoming[i];
+    }
+
+    void toString(std::string & str) override;
+
+private:
+    std::vector<Incoming> incoming;
+};

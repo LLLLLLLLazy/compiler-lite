@@ -144,6 +144,8 @@ set(IR_SRCS
 	ir/IRCode.cpp
 	ir/Instruction.h
 	ir/Instruction.cpp
+	ir/BasicBlock.h
+	ir/BasicBlock.cpp
 	ir/Function.h
 	ir/Function.cpp
 	ir/Generator/IRGenerator.h
@@ -182,6 +184,26 @@ set(IR_SRCS
 	ir/Instructions/GotoInstruction.cpp
 	ir/Instructions/CondGotoInstruction.h
 	ir/Instructions/CondGotoInstruction.cpp
+	ir/Instructions/AllocaInst.h
+	ir/Instructions/AllocaInst.cpp
+	ir/Instructions/LoadInst.h
+	ir/Instructions/LoadInst.cpp
+	ir/Instructions/StoreInst.h
+	ir/Instructions/StoreInst.cpp
+	ir/Instructions/BinaryInst.h
+	ir/Instructions/BinaryInst.cpp
+	ir/Instructions/ICmpInst.h
+	ir/Instructions/ICmpInst.cpp
+	ir/Instructions/CallInst.h
+	ir/Instructions/CallInst.cpp
+	ir/Instructions/BranchInst.h
+	ir/Instructions/BranchInst.cpp
+	ir/Instructions/CondBranchInst.h
+	ir/Instructions/CondBranchInst.cpp
+	ir/Instructions/ReturnInst.h
+	ir/Instructions/ReturnInst.cpp
+	ir/Instructions/PhiInst.h
+	ir/Instructions/PhiInst.cpp
 	ir/Type.h
 )
 
