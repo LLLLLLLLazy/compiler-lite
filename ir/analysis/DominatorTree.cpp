@@ -1,6 +1,6 @@
 ///
 /// @file DominatorTree.cpp
-/// @brief 支配树（Dominator Tree）实现 – Phase 5
+/// @brief 支配树（Dominator Tree）实现
 ///
 /// 算法参考：
 ///   Cooper, Harvey, Kennedy (2001) "A Simple, Fast Dominance Algorithm"

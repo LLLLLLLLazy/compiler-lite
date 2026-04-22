@@ -1,6 +1,6 @@
 ///
 /// @file IRGenerator.h
-/// @brief AST遍历产生块结构化 IR（Phase 3）的头文件
+/// @brief AST 遍历产生块结构 IR 的头文件
 ///
 
 #pragma once
@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "AST.h"
+#include "Instruction.h"
 #include "Module.h"
 
 class AllocaInst;
@@ -86,7 +87,7 @@ private:
     /// Append inst to currentBlock
     void emitToBlock(Instruction * inst);
 
-    /// Insert an alloca at the entry-block alloca point (Phase 3 canonical position)
+    /// Insert an alloca at the entry-block alloca point
     AllocaInst * emitAlloca(Type * type);
 
     /// Return (or lazily create) the alloca slot for a local variable/param

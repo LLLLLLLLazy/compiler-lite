@@ -36,12 +36,12 @@
 static bool gShowHelp = false;
 
 ///
-/// @brief 显示抽象语法树，非线性IR
+/// @brief 显示抽象语法树
 ///
 static bool gShowAST = false;
 
 ///
-/// @brief 产生结构化线性IR，供后端和调试使用
+/// @brief 输出结构化 IR，供调试使用
 ///
 static bool gShowStructIR = false;
 
@@ -51,7 +51,7 @@ static bool gShowStructIR = false;
 static bool gShowLLVMIR = false;
 
 ///
-/// @brief 输出支配树与支配边界分析结果（Phase 5 调试输出）
+/// @brief 输出支配树与支配边界分析结果
 ///
 static bool gShowDomInfo = false;
 
@@ -117,14 +117,14 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -o, --output=FILE          Specify output file\n";
 	std::cout << "  -S, --symbol               Show symbol information\n";
 	std::cout << "  -T, --ast                  Output abstract syntax tree\n";
-	std::cout << "  -I, --ir                   Output structured linear IR\n";
+	std::cout << "  -I, --ir                   Output structured IR\n";
 	std::cout << "  -L, --llvmir               Output LLVM IR (.ll)\n";
 	std::cout << "  -A, --antlr4               Deprecated, now always use Antlr4\n";
 	std::cout << "  -D, --recursive-descent    Deprecated, now always use Antlr4\n";
 	std::cout << "  -O, --optimize=LEVEL       Set optimization level\n";
 	std::cout << "  -t, --target=CPU           Specify target CPU architecture\n";
 	std::cout << "  -c, --asmir                Show IR instructions as comments in assembly output\n";
-	std::cout << "  --dom                      Output dominator tree and dominance frontier (Phase 5 debug)\n";
+	std::cout << "  --dom                      Output dominator tree and dominance frontier\n";
 }
 
 /// @brief 参数解析与有效性检查
@@ -164,7 +164,7 @@ lb_check:
 				gShowAST = true;
 				break;
 			case 'I':
-				// 产生结构化线性IR
+				// 输出结构化 IR
 				gShowStructIR = true;
 				break;
 			case 'L':
@@ -278,9 +278,9 @@ static int compile(std::string inputFile, std::string outputFile)
 	do {
 
 		// 编译过程主要包括：
-		// 1）词法语法分析生成AST
-		// 2) 遍历AST生成结构化IR
-		// 3) 基于结构化IR输出调试IR或LLVM IR
+		// 1）词法语法分析生成 AST
+		// 2) 遍历 AST 生成结构化 IR
+		// 3) 基于结构化 IR 输出调试 IR 或 LLVM IR
 		//
 		// TODO：实现 RISCV64 后端支持
 
@@ -340,7 +340,7 @@ static int compile(std::string inputFile, std::string outputFile)
 		}
 
 		if (gShowDomInfo) {
-			// Phase 5: 对每个函数计算支配树与支配边界，并输出到文件
+			// 对每个函数计算支配树与支配边界，并输出到文件
 			std::string domOutput;
 			for (auto * func : module->getFunctionList()) {
 				if (func->isBuiltin() || func->getBlocks().empty()) {
@@ -364,7 +364,7 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
-		// Phase 6: run mem2reg to promote scalar alloca/load/store to SSA phi nodes
+		// 运行 mem2reg，将可提升的 alloca/load/store 转为 SSA 形式
 		for (auto * func : module->getFunctionList()) {
 			if (!func->isBuiltin() && !func->getBlocks().empty()) {
 				Mem2Reg mem2reg(func, module);

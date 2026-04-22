@@ -1,6 +1,6 @@
 ///
 /// @file DominanceFrontier.cpp
-/// @brief 支配边界（Dominance Frontier）实现 – Phase 5
+/// @brief 支配边界（Dominance Frontier）实现
 ///
 
 #include "DominanceFrontier.h"

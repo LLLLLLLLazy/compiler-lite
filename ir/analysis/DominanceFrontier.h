@@ -1,6 +1,6 @@
 ///
 /// @file DominanceFrontier.h
-/// @brief 支配边界（Dominance Frontier）– Phase 5 CFG 分析基础设施
+/// @brief 支配边界（Dominance Frontier）
 ///
 /// 使用标准算法（Cytron et al.）计算每个基本块的支配边界集合：
 ///

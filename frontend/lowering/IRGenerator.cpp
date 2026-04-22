@@ -1,6 +1,6 @@
 ///
 /// @file IRGenerator.cpp
-/// @brief AST遍历产生块结构化 IR（Phase 3）的源文件
+/// @brief AST 遍历产生块结构 IR 的源文件
 ///
 /// 局部变量通过 alloca/load/store 建模；
 /// 控制流（if/else、while、break/continue）通过 BasicBlock + 终结指令建模；
@@ -636,13 +636,6 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
     }
 
     Function * func = currentFunction();
-    if (func) {
-        func->setExistFuncCall(true);
-        if (static_cast<int>(args.size()) > func->getMaxFuncCallArgCnt()) {
-            func->setMaxFuncCallArgCnt(static_cast<int>(args.size()));
-        }
-    }
-
     auto * callInst = new CallInst(func, calledFunc, args, calledFunc->getReturnType());
     emitToBlock(callInst);
 

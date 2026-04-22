@@ -1,6 +1,6 @@
 ///
 /// @file PhiLowering.cpp
-/// @brief phi 降级 pass 实现 – Phase 7
+/// @brief phi 降级 pass 实现
 ///
 /// 参考：
 ///   Briggs, Cooper, Harvey, Simpson, "Practical Improvements to the

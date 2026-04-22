@@ -537,7 +537,7 @@ minic -S [-A | -D] [-T | -I] [-o output] [-O level] [-t cpu] source
 选项-A与-D都不指定时按默认的flex+bison进行词法与语法分析。
 
 选项-T指定时，输出抽象语法树，默认输出的文件名为ast.png，可通过-o选项来指定输出的文件。
-选项-I指定时，输出结构化线性IR，默认输出的文件名为output.ir，可通过-o选项来指定输出的文件。
+选项-I指定时，输出结构化IR，默认输出的文件名为output.ir，可通过-o选项来指定输出的文件。
 选项-L指定时，输出LLVM IR文本，默认输出的文件名为output.ll，可通过-o选项来指定输出的文件。
 选项-T、-I与-L都不指定时，默认输出LLVM IR文本，默认输出的文件名为output.ll，可通过-o选项来指定输出的文件。
 
@@ -551,11 +551,11 @@ minic -S [-A | -D] [-T | -I] [-o output] [-O level] [-t cpu] source
 │   ├── figures
 │   └── graphviz
 ├── frontend                    前端
+│   ├── lowering                AST 到结构化 IR 的 lowering
 │   ├── antlr4                  Antlr4实现
 │   ├── flexbison               Flex/bison实现
 │   └── recursivedescent        递归下降分析法实现
 ├── ir                          中间IR
-│   ├── Generator               中间IR的产生器
 │   ├── Instructions            中间IR的指令
 │   ├── Types                   中间IR的类型
 │   └── Values                  中间IR的值
@@ -734,18 +734,17 @@ tests 目录下存放了一些简单的测试用例。
 
 调试运行配置可参考.vscode/launch.json中的配置。
 
-### 1.9.2. 生成结构化线性IR与运行
+### 1.9.2. 生成结构化IR
 
-前提需要下载并安装IRCompiler工具。
+当前 `-I` 输出的是项目内部使用的结构化 IR，主要用于调试和查看 lowering 结果。
+历史上的 `IRCompiler` 工作流针对旧 IR 设计，不再适用于当前输出。
 
 ```shell
-# 翻译 test1-1.c 成 ARM32 汇编
+# 生成结构化 IR
 ./build/minic -S -I -o tests/test1-1.ir tests/test1-1.txt
-./IRCompiler -R tests/test1-1.ir
 ```
 
-第一条指令通过minic编译器生成结构化线性IR文件test1-1.ir
-第二条指令借助IRCompiler工具实现对生成IR的解释执行。
+上述命令会生成结构化 IR 文件 `test1-1.ir`。
 
 ### 1.9.3. 生成 ARM32 的汇编
 

@@ -1,6 +1,6 @@
 ///
 /// @file LLVMIREmitter.h
-/// @brief LLVM IR 文本发射器（Phase 4 纯打印器）
+/// @brief LLVM IR 文本发射器
 ///
 /// 职责：遍历 Module / Function / BasicBlock / Instruction 结构化 IR，
 /// 将每条指令的 toString() 输出序列化为标准 LLVM IR 文本。

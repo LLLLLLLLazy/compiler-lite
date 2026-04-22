@@ -1,6 +1,6 @@
 ///
 /// @file ReturnInst.h
-/// @brief 函数返回指令（终结指令，Phase 2 块结构版）
+/// @brief 函数返回指令
 ///
 
 #pragma once

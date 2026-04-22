@@ -1,6 +1,6 @@
 ///
 /// @file Mem2Reg.h
-/// @brief mem2reg pass – Phase 6
+/// @brief mem2reg pass
 ///
 /// 将可提升的局部变量从 alloca/load/store 形式提升为 SSA φ 节点。
 /// 只提升满足以下条件的 alloca：
