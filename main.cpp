@@ -28,6 +28,7 @@
 #include "Module.h"
 #include "DominatorTree.h"
 #include "DominanceFrontier.h"
+#include "Mem2Reg.h"
 
 ///
 /// @brief 是否显示帮助信息
@@ -362,6 +363,16 @@ static int compile(std::string inputFile, std::string outputFile)
 			result = domFile.good() ? 0 : -1;
 			break;
 		}
+
+		// Phase 6: run mem2reg to promote scalar alloca/load/store to SSA phi nodes
+		for (auto * func : module->getFunctionList()) {
+			if (!func->isBuiltin() && !func->getBlocks().empty()) {
+				Mem2Reg mem2reg(func, module);
+				mem2reg.run();
+			}
+		}
+		// Re-number IR names after mem2reg inserted phi nodes
+		module->renameIR();
 
 		LLVMIREmitter irEmitter(module, inputFile);
 		subResult = irEmitter.run();
