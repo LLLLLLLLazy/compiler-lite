@@ -20,7 +20,6 @@
 #include "Antlr4CSTVisitor.h"
 #include "AST.h"
 #include "AttrType.h"
-#include "MiniCParser.h"
 
 #define Instanceof(res, type, var) auto res = dynamic_cast<type>(var)
 
@@ -465,16 +464,8 @@ std::any MiniCCSTVisitor::visitUnaryExp(MiniCParser::UnaryExpContext * ctx)
 	// 识别文法产生式：unaryExp: primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN | unaryOp unaryExp;
 
 	if (ctx->primaryExp()) {
-		// 普通表达式，可能带有unaryOp*前缀
-		ast_node * node = std::any_cast<ast_node *>(visitPrimaryExp(ctx->primaryExp()));
-
-		// 逆序遍历unaryOp，从内到外包裹AST_OP_NEG节点
-		auto unaryOps = ctx->unaryOp();
-		for (int i = (int) unaryOps.size() - 1; i >= 0; i--) {
-			node = ast_node::New(ast_operator_type::AST_OP_NEG, node);
-		}
-
-		return node;
+		// 普通表达式
+		return visitPrimaryExp(ctx->primaryExp());
 	} else if (ctx->T_ID()) {
 
 		// 创建函数调用名终结符节点
