@@ -101,15 +101,15 @@ void LLVMIREmitter::emitFunction(Function * function, std::vector<std::string> &
 {
     lines.emplace_back("define " + formatFunctionSignature(function, true) + " {");
 
-    bool firstBlock = true;
     for (auto * bb : function->getBlocks()) {
         // Skip completely empty blocks (unreachable dead-code sinks)
         if (bb->getInstructions().empty()) {
             continue;
         }
 
-        // Print block label for all blocks except the entry (first) block
-        if (!firstBlock) {
+        // Print block label for all blocks (including the entry block, so phi
+        // nodes in successor blocks can reference it by name)
+        {
             std::string label = bb->getIRName();
             if (!label.empty() && label.front() == '%') {
                 label = label.substr(1);
@@ -118,7 +118,7 @@ void LLVMIREmitter::emitFunction(Function * function, std::vector<std::string> &
                 lines.emplace_back(label + ":");
             }
         }
-        firstBlock = false;
+
 
         for (auto * inst : bb->getInstructions()) {
             std::string instStr;
