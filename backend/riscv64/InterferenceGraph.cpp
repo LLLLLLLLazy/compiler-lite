@@ -11,18 +11,29 @@
 
 namespace {
 
+/// 每个节点的位向量长度（以64位为单位），匹配CPU字长，便于位运算优化
 constexpr std::size_t kBitsPerWord = 64;
 
+/// @brief 验证节点索引是否合法
+/// @param node 节点索引
+/// @param numNodes 节点总数
+/// @return 是否有效
 bool isValidNode(int node, int numNodes)
 {
 	return node >= 0 && node < numNodes;
 }
 
+/// @brief 计算节点索引对应的位向量位置
+/// @param node 节点索引
+/// @return 位向量中的word索引
 std::size_t wordIndexFor(int node)
 {
 	return static_cast<std::size_t>(node) / kBitsPerWord;
 }
 
+/// @brief 计算节点索引对应的位掩码
+/// @param node 节点索引
+/// @return 位掩码
 std::uint64_t bitMaskFor(int node)
 {
 	return std::uint64_t{1} << (static_cast<std::size_t>(node) % kBitsPerWord);
@@ -76,6 +87,9 @@ const std::set<int> & InterferenceGraph::getNeighbors(int node) const
 }
 
 /// @brief 获取与某节点干涉的所有已分配物理寄存器集合
+/// @param node 节点索引
+/// @param intervals 生存区间向量
+/// @return 与节点干涉的所有已分配物理寄存器集合
 std::set<int> InterferenceGraph::getInterferingRegs(int node, const std::vector<LiveInterval *> & intervals) const
 {
 	std::set<int> regs;
@@ -84,6 +98,7 @@ std::set<int> InterferenceGraph::getInterferingRegs(int node, const std::vector<
 	}
 
 	for (int neighbor : adjList[node]) {
+		// 跳过无效邻居和未分配寄存器的节点
 		if (neighbor < 0 || static_cast<std::size_t>(neighbor) >= intervals.size() || intervals[neighbor] == nullptr) {
 			continue;
 		}
