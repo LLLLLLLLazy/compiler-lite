@@ -1,6 +1,6 @@
 ///
 /// @file Mem2Reg.h
-/// @brief mem2reg pass
+/// @brief mem2reg 优化
 ///
 /// 将可提升的局部变量从 alloca/load/store 形式提升为 SSA φ 节点。
 /// 只提升满足以下条件的 alloca：
@@ -32,9 +32,11 @@ class Value;
 class Mem2Reg {
 
 public:
+    /// @brief 构造 mem2reg 优化器
     Mem2Reg(Function * func, Module * mod);
 
-    /// 对函数原地执行 mem2reg。执行后，可提升的 alloca/load/store 被移除，
+    /// @brief 对函数原地执行 mem2reg
+    /// 执行后，可提升的 alloca/load/store 被移除，
     /// 控制流汇合点插入 φ 节点。
     void run();
 
@@ -42,7 +44,7 @@ private:
     Function * func;
     Module * mod;
 
-    // ---- Step 1 ----
+    // ---- 第 1 步：识别可提升的 alloca ----
 
     /// 收集入口块中所有可提升的 alloca 指令。
     std::vector<AllocaInst *> findPromotableAllocas();
@@ -50,7 +52,7 @@ private:
     /// 若 alloca 的所有用途均为 load/store（且不作为 store 的值操作数），返回 true。
     bool isPromotable(AllocaInst * alloca) const;
 
-    // ---- Step 2 ----
+    // ---- 第 2 步：插入 phi 节点 ----
 
     /// 用 IDF 算法为每个可提升 alloca 在合适的块头插入 φ 节点。
     /// 结果写入 allocaPhis（alloca → block → phi）和 phiToAlloca（phi → alloca）。
@@ -60,7 +62,7 @@ private:
         std::unordered_map<AllocaInst *, std::unordered_map<BasicBlock *, PhiInst *>> & allocaPhis,
         std::unordered_map<PhiInst *, AllocaInst *> & phiToAlloca);
 
-    // ---- Step 3 ----
+    // ---- 第 3 步：沿支配树重命名 ----
 
     /// 重命名遍：沿支配树 DFS，用到达定值替换 load，记录 store 定值，填充 φ incoming。
     void rename(
@@ -71,7 +73,7 @@ private:
         const std::unordered_map<PhiInst *, AllocaInst *> & phiToAlloca,
         std::unordered_set<BasicBlock *> & visited);
 
-    // ---- Step 4 ----
+    // ---- 第 4 步：清理无用指令 ----
 
     /// 删除所有被标记为 dead 的 load/store，以及可提升的 alloca 本身。
     void cleanup(const std::vector<AllocaInst *> & allocas);
