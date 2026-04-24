@@ -96,18 +96,6 @@ set(BACKEND_SRCS
 	backend/CodeGeneratorAsm.h
 	backend/RegVariable.h
 
-	# 后端产生ARM32汇编指令
-	# backend/arm32/ILocArm32.cpp
-	# backend/arm32/ILocArm32.h
-	# backend/arm32/InstSelectorArm32.cpp
-	# backend/arm32/InstSelectorArm32.h
-	# backend/arm32/PlatformArm32.cpp
-	# backend/arm32/PlatformArm32.h
-	# backend/arm32/CodeGeneratorArm32.cpp
-	# backend/arm32/CodeGeneratorArm32.h
-	# backend/arm32/SimpleRegisterAllocator.cpp
-	# backend/arm32/SimpleRegisterAllocator.h
-
 	# 后端产生RISCV64汇编指令
 	backend/riscv64/PlatformRiscV64.cpp
 	backend/riscv64/PlatformRiscV64.h
