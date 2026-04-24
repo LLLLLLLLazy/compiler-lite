@@ -626,8 +626,8 @@ Ninja是一个专注于速度的小型构建系统，旨在通过并行构建来
 2. 安装 ANTLR4 C++ runtime 4.12.0
 3. 使用 CMake + Ninja 构建 minic
 4. 运行选定的 2023 功能测试
-   - tests/2023_function/2023_func_00_main
-   - tests/2023_function/2023_func_01_var_defn2
+   - LLVM IR 通过集见 `tests/2023_function/llvmir_passed.txt`，当前实测通过 `46/100`
+   - AST 通过集见 `tests/2023_function/ast_passed.txt`，当前实测通过 `46/100`
    - 通过 tools/run-local-tests.sh 生成 ARM32 汇编、交叉编译并用 qemu 运行
    - 将程序输出和退出码与对应的 .out 文件进行比对
 ```

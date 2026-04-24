@@ -47,6 +47,21 @@ protected:
 	/// @return AST的节点
 	std::any visitFuncDef(MiniCParser::FuncDefContext * ctx) override;
 
+	/// @brief 非终结符funcType的遍历
+	/// @param ctx CST上下文
+	/// @return 类型属性
+	std::any visitFuncType(MiniCParser::FuncTypeContext * ctx) override;
+
+	/// @brief 非终结符formalParamList的遍历
+	/// @param ctx CST上下文
+	/// @return AST的节点
+	std::any visitFormalParamList(MiniCParser::FormalParamListContext * ctx) override;
+
+	/// @brief 非终结符formalParam的遍历
+	/// @param ctx CST上下文
+	/// @return AST的节点
+	std::any visitFormalParam(MiniCParser::FormalParamContext * ctx) override;
+
 	/// @brief 非终结运算符block的遍历
 	/// @param ctx CST上下文
 	/// @return AST的节点

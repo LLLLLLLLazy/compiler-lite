@@ -92,18 +92,21 @@ std::any MiniCCSTVisitor::visitCompileUnit(MiniCParser::CompileUnitContext * ctx
 /// @param ctx CST上下文
 std::any MiniCCSTVisitor::visitFuncDef(MiniCParser::FuncDefContext * ctx)
 {
-	// 识别的文法产生式：funcDef : T_INT T_ID T_L_PAREN T_R_PAREN block;
+	// 识别的文法产生式：funcDef : funcType T_ID T_L_PAREN formalParamList? T_R_PAREN block;
 
-	// 函数返回类型，终结符
-	type_attr funcReturnType{BasicType::TYPE_INT, (int64_t) ctx->T_INT()->getSymbol()->getLine()};
+	// 函数返回类型
+	type_attr funcReturnType = std::any_cast<type_attr>(visitFuncType(ctx->funcType()));
 
 	// 创建函数名的标识符终结符节点，终结符
 	char * id = strdup(ctx->T_ID()->getText().c_str());
 
 	var_id_attr funcId{id, (int64_t) ctx->T_ID()->getSymbol()->getLine()};
 
-	// 形参结点目前没有，设置为空指针
+	// 形参节点
 	ast_node * formalParamsNode = nullptr;
+	if (ctx->formalParamList()) {
+		formalParamsNode = std::any_cast<ast_node *>(visitFormalParamList(ctx->formalParamList()));
+	}
 
 	// 遍历block结点创建函数体节点，非终结符
 	auto blockNode = std::any_cast<ast_node *>(visitBlock(ctx->block()));
@@ -111,6 +114,47 @@ std::any MiniCCSTVisitor::visitFuncDef(MiniCParser::FuncDefContext * ctx)
 	// 创建函数定义的节点，孩子有类型，函数名，语句块和形参(实际上无)
 	// create_func_def函数内会释放funcId中指向的标识符空间，切记，之后不要再释放，之前一定要是通过strdup函数或者malloc分配的空间
 	return ast_node::create_func_def(funcReturnType, funcId, blockNode, formalParamsNode);
+}
+
+std::any MiniCCSTVisitor::visitFuncType(MiniCParser::FuncTypeContext * ctx)
+{
+	type_attr attr{BasicType::TYPE_VOID, -1};
+	if (ctx->T_INT()) {
+		attr.type = BasicType::TYPE_INT;
+		attr.lineno = (int64_t) ctx->T_INT()->getSymbol()->getLine();
+	} else if (ctx->T_VOID()) {
+		attr.type = BasicType::TYPE_VOID;
+		attr.lineno = (int64_t) ctx->T_VOID()->getSymbol()->getLine();
+	}
+
+	return attr;
+}
+
+std::any MiniCCSTVisitor::visitFormalParamList(MiniCParser::FormalParamListContext * ctx)
+{
+	auto * paramsNode = ast_node::New(ast_operator_type::AST_OP_FUNC_FORMAL_PARAMS);
+
+	for (auto * paramCtx: ctx->formalParam()) {
+		auto * paramNode = std::any_cast<ast_node *>(visitFormalParam(paramCtx));
+		paramsNode->insert_son_node(paramNode);
+	}
+
+	return paramsNode;
+}
+
+std::any MiniCCSTVisitor::visitFormalParam(MiniCParser::FormalParamContext * ctx)
+{
+	type_attr typeAttr = std::any_cast<type_attr>(visitBasicType(ctx->basicType()));
+	ast_node * typeNode = ast_node::create_type_node(typeAttr);
+
+	int64_t lineNo = (int64_t) ctx->T_ID()->getSymbol()->getLine();
+	ast_node * idNode = ast_node::New(ctx->T_ID()->getText(), lineNo);
+
+	ast_node * paramNode = ast_node::New(ast_operator_type::AST_OP_FUNC_FORMAL_PARAM, typeNode, idNode);
+	paramNode->type = typeNode->type;
+	paramNode->name = idNode->name;
+
+	return paramNode;
 }
 
 /// @brief 非终结运算符block的遍历
@@ -204,7 +248,11 @@ std::any MiniCCSTVisitor::visitStatement(MiniCParser::StatementContext * ctx)
 ///
 std::any MiniCCSTVisitor::visitReturnStatement(MiniCParser::ReturnStatementContext * ctx)
 {
-	// 识别的文法产生式：returnStatement -> T_RETURN expr T_SEMICOLON
+	// 识别的文法产生式：returnStatement -> T_RETURN expr? T_SEMICOLON
+
+	if (!ctx->expr()) {
+		return ast_node::New(ast_operator_type::AST_OP_RETURN);
+	}
 
 	// 非终结符，表达式expr遍历
 	auto exprNode = std::any_cast<ast_node *>(visitExpr(ctx->expr()));

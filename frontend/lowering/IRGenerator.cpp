@@ -9,6 +9,7 @@
 
 #include "IRGenerator.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -234,6 +235,11 @@ bool IRGenerator::visitReturn(ast_node * node)
 
     ReturnInst * retInst;
     if (!node->sons.empty()) {
+        if (func->getReturnType()->isVoidType()) {
+            minic_log(LOG_ERROR, "void 函数(%s)不能返回值", func->getName().c_str());
+            return false;
+        }
+
         Value * retVal = visitExpr(node->sons[0]);
         if (!retVal) {
             return false;
@@ -243,6 +249,10 @@ bool IRGenerator::visitReturn(ast_node * node)
         }
         retInst = new ReturnInst(func, retVal);
     } else {
+        if (!func->getReturnType()->isVoidType()) {
+            minic_log(LOG_ERROR, "非 void 函数(%s)必须返回值", func->getName().c_str());
+            return false;
+        }
         retInst = new ReturnInst(func, nullptr);
     }
 
@@ -472,15 +482,120 @@ bool IRGenerator::visitVarDecl(ast_node * node)
     }
 
     if (node->sons.size() >= 3) {
-        ast_node * initNode = node->sons[2];
-        if (initNode->node_type != ast_operator_type::AST_OP_LEAF_LITERAL_UINT) {
+        int32_t initValue = 0;
+        if (!evaluateGlobalIntConstExpr(node->sons[2], initValue)) {
             minic_log(LOG_ERROR, "全局变量(%s)只支持常量初始化", varName.c_str());
             return false;
         }
-        globalVar->setInitIntValue(static_cast<int32_t>(initNode->integer_val));
+        globalVar->setInitIntValue(initValue);
     }
 
     return true;
+}
+
+bool IRGenerator::evaluateGlobalIntConstExpr(ast_node * node, int32_t & result)
+{
+    if (!node) {
+        return false;
+    }
+
+    switch (node->node_type) {
+        case ast_operator_type::AST_OP_LEAF_LITERAL_UINT:
+            result = static_cast<int32_t>(node->integer_val);
+            return true;
+
+        case ast_operator_type::AST_OP_NEG: {
+            int32_t operand = 0;
+            if (!evaluateGlobalIntConstExpr(node->sons[0], operand)) {
+                return false;
+            }
+            result = -operand;
+            return true;
+        }
+
+        case ast_operator_type::AST_OP_NOT: {
+            int32_t operand = 0;
+            if (!evaluateGlobalIntConstExpr(node->sons[0], operand)) {
+                return false;
+            }
+            result = !operand;
+            return true;
+        }
+
+        case ast_operator_type::AST_OP_ADD:
+        case ast_operator_type::AST_OP_SUB:
+        case ast_operator_type::AST_OP_MUL:
+        case ast_operator_type::AST_OP_DIV:
+        case ast_operator_type::AST_OP_MOD:
+        case ast_operator_type::AST_OP_LT:
+        case ast_operator_type::AST_OP_GT:
+        case ast_operator_type::AST_OP_LE:
+        case ast_operator_type::AST_OP_GE:
+        case ast_operator_type::AST_OP_EQ:
+        case ast_operator_type::AST_OP_NE:
+        case ast_operator_type::AST_OP_LAND:
+        case ast_operator_type::AST_OP_LOR: {
+            int32_t lhs = 0;
+            int32_t rhs = 0;
+            if (!evaluateGlobalIntConstExpr(node->sons[0], lhs) ||
+                !evaluateGlobalIntConstExpr(node->sons[1], rhs)) {
+                return false;
+            }
+
+            switch (node->node_type) {
+                case ast_operator_type::AST_OP_ADD:
+                    result = lhs + rhs;
+                    return true;
+                case ast_operator_type::AST_OP_SUB:
+                    result = lhs - rhs;
+                    return true;
+                case ast_operator_type::AST_OP_MUL:
+                    result = lhs * rhs;
+                    return true;
+                case ast_operator_type::AST_OP_DIV:
+                    if (rhs == 0) {
+                        return false;
+                    }
+                    result = lhs / rhs;
+                    return true;
+                case ast_operator_type::AST_OP_MOD:
+                    if (rhs == 0) {
+                        return false;
+                    }
+                    result = lhs % rhs;
+                    return true;
+                case ast_operator_type::AST_OP_LT:
+                    result = lhs < rhs;
+                    return true;
+                case ast_operator_type::AST_OP_GT:
+                    result = lhs > rhs;
+                    return true;
+                case ast_operator_type::AST_OP_LE:
+                    result = lhs <= rhs;
+                    return true;
+                case ast_operator_type::AST_OP_GE:
+                    result = lhs >= rhs;
+                    return true;
+                case ast_operator_type::AST_OP_EQ:
+                    result = lhs == rhs;
+                    return true;
+                case ast_operator_type::AST_OP_NE:
+                    result = lhs != rhs;
+                    return true;
+                case ast_operator_type::AST_OP_LAND:
+                    result = (lhs != 0) && (rhs != 0);
+                    return true;
+                case ast_operator_type::AST_OP_LOR:
+                    result = (lhs != 0) || (rhs != 0);
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        default:
+            return false;
+    }
 }
 
 Value * IRGenerator::visitExpr(ast_node * node)
