@@ -13,6 +13,8 @@
 #include "ScopeStack.h"
 #include "VoidType.h"
 
+/// @brief 构造模块对象并初始化内建函数与全局作用域
+/// @param _name 模块名称
 Module::Module(std::string _name) : name(std::move(_name))
 {
     scopeStack = new ScopeStack();
@@ -24,26 +26,38 @@ Module::Module(std::string _name) : name(std::move(_name))
     (void) newFunction("getch", IntegerType::getTypeInt(), {}, true);
 }
 
+/// @brief 进入一层新的作用域
 void Module::enterScope()
 {
     scopeStack->enterScope();
 }
 
+/// @brief 离开当前作用域
 void Module::leaveScope()
 {
     scopeStack->leaveScope();
 }
 
+/// @brief 获取当前正在处理的函数
+/// @return 当前函数对象
 Function * Module::getCurrentFunction()
 {
     return currentFunc;
 }
 
+/// @brief 设置当前正在处理的函数
+/// @param current 当前函数对象
 void Module::setCurrentFunction(Function * current)
 {
     currentFunc = current;
 }
 
+/// @brief 创建并注册一个函数对象
+/// @param name 函数名
+/// @param returnType 返回值类型
+/// @param params 形参列表
+/// @param builtin 是否为内建函数
+/// @return 创建成功时返回函数对象，失败时返回空指针
 Function * Module::newFunction(std::string name, Type * returnType, std::vector<FormalParam *> params, bool builtin)
 {
     Function * tempFunc = findFunction(name);
@@ -66,6 +80,9 @@ Function * Module::newFunction(std::string name, Type * returnType, std::vector<
     return tempFunc;
 }
 
+/// @brief 按名称查找函数
+/// @param name 函数名
+/// @return 查找到的函数对象，未找到时返回空指针
 Function * Module::findFunction(std::string name)
 {
     auto pIter = funcMap.find(name);
@@ -76,23 +93,32 @@ Function * Module::findFunction(std::string name)
     return nullptr;
 }
 
+/// @brief 直接把函数插入模块容器
+/// @param func 待插入的函数对象
 void Module::insertFunctionDirectly(Function * func)
 {
     funcMap.insert({func->getName(), func});
     funcVector.emplace_back(func);
 }
 
+/// @brief 直接把全局变量插入模块容器
+/// @param val 待插入的全局变量对象
 void Module::insertGlobalValueDirectly(GlobalVariable * val)
 {
     globalVariableMap.emplace(val->getName(), val);
     globalVariableVector.push_back(val);
 }
 
+/// @brief 直接把整型常量插入模块容器
+/// @param val 待插入的整型常量对象
 void Module::insertConstIntDirectly(ConstInt * val)
 {
     constIntMap.emplace(val->getVal(), val);
 }
 
+/// @brief 获取或创建整型常量对象
+/// @param intVal 整型常量值
+/// @return 对应的常量对象
 ConstInt * Module::newConstInt(int32_t intVal)
 {
     ConstInt * val = findConstInt(intVal);
@@ -104,6 +130,9 @@ ConstInt * Module::newConstInt(int32_t intVal)
     return val;
 }
 
+/// @brief 按数值查找整型常量对象
+/// @param val 常量值
+/// @return 查找到的常量对象，未找到时返回空指针
 ConstInt * Module::findConstInt(int32_t val)
 {
     auto pIter = constIntMap.find(val);
@@ -114,6 +143,10 @@ ConstInt * Module::findConstInt(int32_t val)
     return nullptr;
 }
 
+/// @brief 创建新的变量值对象并插入当前作用域
+/// @param type 变量类型
+/// @param name 变量名
+/// @return 创建成功时返回变量对象，失败时返回空指针
 Value * Module::newVarValue(Type * type, std::string name)
 {
     Value * retVal = nullptr;
@@ -140,11 +173,18 @@ Value * Module::newVarValue(Type * type, std::string name)
     return retVal;
 }
 
+/// @brief 按名称查找变量值对象
+/// @param name 变量名
+/// @return 查找到的变量对象，未找到时返回空指针
 Value * Module::findVarValue(std::string name)
 {
     return scopeStack->findAllScope(name);
 }
 
+/// @brief 创建并注册全局变量对象
+/// @param type 全局变量类型
+/// @param name 全局变量名
+/// @return 新创建的全局变量对象
 GlobalVariable * Module::newGlobalVariable(Type * type, std::string name)
 {
     auto * val = new GlobalVariable(type, std::move(name));
@@ -152,6 +192,9 @@ GlobalVariable * Module::newGlobalVariable(Type * type, std::string name)
     return val;
 }
 
+/// @brief 按名称查找全局变量对象
+/// @param name 全局变量名
+/// @return 查找到的全局变量对象，未找到时返回空指针
 GlobalVariable * Module::findGlobalVariable(std::string name)
 {
     auto pIter = globalVariableMap.find(name);
@@ -162,6 +205,7 @@ GlobalVariable * Module::findGlobalVariable(std::string name)
     return nullptr;
 }
 
+/// @brief 释放模块持有的全部资源
 void Module::Delete()
 {
     for (auto func: funcVector) {
@@ -185,6 +229,7 @@ void Module::Delete()
     scopeStack = nullptr;
 }
 
+/// @brief 重新命名模块中函数里的 IR 值
 void Module::renameIR()
 {
     for (auto func: funcVector) {
@@ -192,6 +237,8 @@ void Module::renameIR()
     }
 }
 
+/// @brief 将模块内容转换为 IR 文本
+/// @return 模块对应的 IR 字符串
 std::string Module::toIRString()
 {
     std::string result;
@@ -228,6 +275,8 @@ std::string Module::toIRString()
     return result;
 }
 
+/// @brief 将 IR 文本输出到指定文件
+/// @param filePath 输出文件路径
 void Module::outputIR(const std::string & filePath)
 {
     FILE * fp = fopen(filePath.c_str(), "w");

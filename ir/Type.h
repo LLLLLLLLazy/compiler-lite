@@ -28,16 +28,16 @@ public:
 	/// @brief 类型ID
 	///
 	enum TypeID {
-		// PrimitiveTypes
-		FloatTyID, ///< 32-bit floating point type
-		VoidTyID,  ///< type with no size
-		TokenTyID, ///< Tokens
+		// 基础类型
+		FloatTyID, ///< 32 位浮点类型
+		VoidTyID,  ///< 无大小的 void 类型
+		TokenTyID, ///< 记号类型
 
-		// Derived types
-		IntegerTyID,  ///< Arbitrary bit width integers
-		FunctionTyID, ///< Functions
-		PointerTyID,  ///< Pointers
-		ArrayTyID,	  ///< Arrays
+		// 派生类型
+		IntegerTyID,  ///< 任意位宽整数类型
+		FunctionTyID, ///< 函数类型
+		PointerTyID,  ///< 指针类型
+		ArrayTyID, 	  ///< 数组类型
 	};
 
 	///

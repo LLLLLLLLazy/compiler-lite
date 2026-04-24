@@ -7,6 +7,8 @@
 
 #include "User.h"
 
+/// @brief 将当前 Use 重新指向新的 Value
+/// @param newVal 新的被使用值
 void Use::setUsee(Value * newVal)
 {
     this->usee->removeUse(this);
@@ -14,6 +16,7 @@ void Use::setUsee(Value * newVal)
     this->usee->addUse(this);
 }
 
+/// @brief 解除当前 Use 与 Value/User 之间的关联
 void Use::remove()
 {
     usee->removeUse(this);

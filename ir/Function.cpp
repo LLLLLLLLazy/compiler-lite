@@ -10,6 +10,10 @@
 #include "IRConstant.h"
 #include "Instruction.h"
 
+/// @brief 构造函数对象
+/// @param _name 函数名
+/// @param _type 函数类型
+/// @param _builtin 是否为内建函数
 Function::Function(std::string _name, FunctionType * _type, bool _builtin)
     : GlobalValue(_type, std::move(_name)), builtIn(_builtin)
 {
@@ -17,26 +21,35 @@ Function::Function(std::string _name, FunctionType * _type, bool _builtin)
     setAlignment(1);
 }
 
+/// @brief 析构函数
 Function::~Function()
 {
     Delete();
 }
 
+/// @brief 获取函数返回值类型
+/// @return 返回值类型对象
 Type * Function::getReturnType()
 {
     return returnType;
 }
 
+/// @brief 获取函数形参列表
+/// @return 形参列表引用
 std::vector<FormalParam *> & Function::getParams()
 {
     return params;
 }
 
+/// @brief 判断函数是否为内建函数
+/// @return true 表示为内建函数，false 表示为用户函数
 bool Function::isBuiltin()
 {
     return builtIn;
 }
 
+/// @brief 将函数转换为 IR 文本
+/// @param str 输出的 IR 文本
 void Function::toString(std::string & str)
 {
     if (builtIn) {
@@ -65,6 +78,11 @@ void Function::toString(std::string & str)
     str += "}\n";
 }
 
+/// @brief 创建一个新的局部变量值对象
+/// @param type 变量类型
+/// @param name 变量名
+/// @param scope_level 作用域层级
+/// @return 新创建的局部变量对象
 LocalVariable * Function::newLocalVarValue(Type * type, std::string name, int32_t scope_level)
 {
     auto * varValue = new LocalVariable(type, std::move(name), scope_level);
@@ -72,6 +90,8 @@ LocalVariable * Function::newLocalVarValue(Type * type, std::string name, int32_
     return varValue;
 }
 
+/// @brief 创建并追加一个新的基本块
+/// @return 新创建的基本块对象
 BasicBlock * Function::newBasicBlock()
 {
     auto * bb = new BasicBlock(this);
@@ -82,6 +102,7 @@ BasicBlock * Function::newBasicBlock()
     return bb;
 }
 
+/// @brief 释放函数拥有的形参、局部变量和基本块资源
 void Function::Delete()
 {
     for (auto & param: params) {
@@ -101,6 +122,7 @@ void Function::Delete()
     entryBlock = nullptr;
 }
 
+/// @brief 重新为函数中的参数、基本块和指令命名 IR 名称
 void Function::renameIR()
 {
     if (isBuiltin()) {

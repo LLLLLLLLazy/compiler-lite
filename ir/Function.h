@@ -17,52 +17,64 @@
 class Function : public GlobalValue {
 
 public:
+    /// @brief 构造函数对象
     explicit Function(std::string _name, FunctionType * _type, bool _builtin = false);
 
+    /// @brief 析构函数
     ~Function() override;
 
+    /// @brief 获取函数返回值类型
     Type * getReturnType();
 
+    /// @brief 获取函数形参列表
     std::vector<FormalParam *> & getParams();
 
+    /// @brief 判断函数是否为内建函数
     bool isBuiltin();
 
+    /// @brief 将函数转换为 IR 文本
     void toString(std::string & str);
 
+    /// @brief 获取函数内创建的局部变量列表
     std::vector<LocalVariable *> & getVarValues()
     {
         return varsVector;
     }
 
+    /// @brief 判断当前值是否为函数对象
     [[nodiscard]] bool isFunction() const override
     {
         return true;
     }
 
+    /// @brief 创建一个新的局部变量值对象
     LocalVariable * newLocalVarValue(Type * type, std::string name = "", int32_t scope_level = 1);
 
-    /// 创建并返回一个新的 BasicBlock，追加到 blocks 列表中
+    /// @brief 创建并返回一个新的基本块，并追加到 blocks 列表中
     BasicBlock * newBasicBlock();
 
-    /// 返回入口基本块（第一个块）
+    /// @brief 返回入口基本块
     BasicBlock * getEntryBlock() const
     {
         return entryBlock;
     }
 
-    /// 返回所有基本块
+    /// @brief 返回可修改的基本块列表
     std::vector<BasicBlock *> & getBlocks()
     {
         return blocks;
     }
 
+    /// @brief 返回只读的基本块列表
     const std::vector<BasicBlock *> & getBlocks() const
     {
         return blocks;
     }
 
+    /// @brief 释放函数拥有的各类 IR 资源
     void Delete();
 
+    /// @brief 重新为函数中的 IR 值命名
     void renameIR();
 
 private:

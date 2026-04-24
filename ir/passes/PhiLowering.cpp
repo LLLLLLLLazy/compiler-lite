@@ -1,6 +1,8 @@
 ///
 /// @file PhiLowering.cpp
-/// @brief phi 降级 pass 实现
+/// @brief phi 降级优化实现
+///
+///        把 SSA 里的 phi 指令，变回普通的赋值/拷贝指令
 ///
 /// 参考：
 ///   Briggs, Cooper, Harvey, Simpson, "Practical Improvements to the
@@ -27,97 +29,102 @@
 #include "Value.h"
 
 // ---------------------------------------------------------------------------
-// Constructor
+// 构造函数
 // ---------------------------------------------------------------------------
 
+/// @brief 构造 phi 降级优化器
+/// @param _func 待处理的函数
+/// @param _mod 所属模块
 PhiLowering::PhiLowering(Function * _func, Module * _mod) : func(_func), mod(_mod)
 {}
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// 对外入口
 // ---------------------------------------------------------------------------
 
+/// @brief 对函数执行 phi 降级
 void PhiLowering::run()
 {
     if (!func || func->isBuiltin() || func->getBlocks().empty()) {
         return;
     }
 
-    // Collect phi nodes and their removals.
-    // Iterate over a snapshot of the block list (phi removal may modify the
-    // instruction list but not the block list).
+    // 收集待删除的 phi 节点。
+    // 遍历基本块列表的快照即可，因为删除 phi 只会改动指令链表，不会改动块列表。
     std::vector<PhiInst *> toDelete;
 
     for (auto * bb : func->getBlocks()) {
-        // Collect phi nodes at the top of this block.
+        // 收集当前块顶部连续出现的 phi 节点。
         std::vector<PhiInst *> phis;
         for (auto * inst : bb->getInstructions()) {
             if (auto * phi = dynamic_cast<PhiInst *>(inst)) {
                 phis.push_back(phi);
             } else {
-                break; // phi nodes are always at the top of a block
+                break; // phi 节点总是位于基本块顶部
             }
         }
         if (phis.empty()) {
             continue;
         }
 
-        // Build per-predecessor parallel-copy sets:
-        //   predCopies[pred] = { (phi_result*, incoming_value*) ... }
+        // 按前驱块构造并行复制集合：
+        // predCopies[pred] = { (phi_result*, incoming_value*) ... }
         std::unordered_map<BasicBlock *, std::vector<std::pair<Value *, Value *>>> predCopies;
         for (auto * phi : phis) {
             for (int i = 0; i < phi->getIncomingCount(); ++i) {
                 const auto & inc = phi->getIncoming(i);
-                // dst = phi itself (as Value*); src = incoming value
+                // 目标值是 phi 自身，源值是该前驱传入的 incoming 值
                 predCopies[inc.block].emplace_back(static_cast<Value *>(phi), inc.value);
             }
         }
 
-        // Insert sequential copies in each predecessor.
+        // 在每个前驱块中插入串行化后的 copy 指令。
         for (auto & [pred, copies] : predCopies) {
             insertSequentialCopies(pred, copies);
         }
 
-        // Remove phi instructions from BB (defer deletion to avoid use-after-free
-        // while the loop above still reads phi->getIncoming(...)).
+        // 从 BB 中移除 phi 指令本体，真正 delete 延后到所有读取结束之后，
+        // 避免前面仍在访问 phi->getIncoming(...) 时出现悬空引用。
         auto & insts = bb->getInstructions();
         for (auto * phi : phis) {
-            phi->clearOperands(); // unlink from use-def chain
+            phi->clearOperands(); // 从 use-def 链中摘除
             insts.remove(phi);
             toDelete.push_back(phi);
         }
     }
 
-    // Safe deletion after all phis have been unlinked.
+    // 等所有 phi 都已摘链后再统一删除。
     for (auto * phi : toDelete) {
         delete phi;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Parallel-copy serialisation (Briggs-Cooper worklist)
+// 并行复制串行化（Briggs-Cooper 工作队列算法）
 // ---------------------------------------------------------------------------
 //
-// Given a set of parallel copies { (dst_i, src_i) }, produce an equivalent
-// sequential list of copies that correctly handles cycles (e.g., swap).
+// 给定一组并行复制 { (dst_i, src_i) }，生成语义等价的串行 copy 序列，
+// 并正确处理交换等循环依赖场景。
 //
-// Key invariant:
-//   A copy (dst, src) is "ready" iff dst does NOT appear as the src of any
-//   other PENDING copy.  (If it did, emitting (dst := src) first would
-//   clobber the value that the other pending copy still needs to read.)
+// 关键不变量：
+//   当且仅当 dst 没有作为其他待处理复制的 src 出现时，复制 (dst, src)
+//   才是“可立即发射”的；否则过早写入 dst 会覆盖其他复制尚未读取的旧值。
 //
-// When the worklist contains only cyclic copies, break one cycle by:
-//   1. Pick any copy (dst0, src0) from the cycle.
-//   2. Insert a fresh temporary copy: %tmp = copy dst0.
-//   3. Replace every pending src == dst0 with %tmp.
-//   4. (dst0, src0) is now "ready" – add it to the ready queue.
+// 当工作队列中只剩循环依赖时，可通过以下方式打破一个环：
+//   1. 从环中任选一条复制 (dst0, src0)。
+//   2. 先插入一条临时复制：%tmp = copy dst0。
+//   3. 将所有待处理复制中 src == dst0 的位置替换为 %tmp。
+//   4. 此时 (dst0, src0) 变为可发射，加入就绪队列。
 //
 // ---------------------------------------------------------------------------
 
+/// @brief 将并行复制集合串行化并插入到前驱块末尾
+/// @param pred 前驱基本块
+/// @param copies 并行复制集合，元素为目标值与源值的二元组
 void PhiLowering::insertSequentialCopies(BasicBlock * pred,
                                           std::vector<std::pair<Value *, Value *>> & copies)
 {
-    // ---- Filter identity copies (dst == src) --------------------------------
+    // ---- 先移除恒等复制（dst == src） ----
     copies.erase(std::remove_if(copies.begin(),
                                 copies.end(),
                                 [](const std::pair<Value *, Value *> & p) {
@@ -129,42 +136,40 @@ void PhiLowering::insertSequentialCopies(BasicBlock * pred,
         return;
     }
 
-    // ---- Build per-element status trackers ----------------------------------
-    // pending[i] == true  →  copy i has not yet been emitted
+    // ---- 为每条复制建立状态跟踪 ----
+    // pending[i] == true 表示第 i 条复制尚未发射
     std::vector<bool> pending(copies.size(), true);
 
-    // Count how many PENDING copies have copies[i].first as their src.
-    // A copy is "ready" iff this count == 0 for its dst.
+    // 统计还有多少条待处理复制把某个目标值当作源值使用。
+    // 当某个 dst 的计数为 0 时，说明以它为目标的复制可以立即发射。
     std::unordered_map<Value *, int> dstUsedAsSrc;
     for (auto & [d, s] : copies) {
         (void) d;
-        dstUsedAsSrc[s]; // ensure entry exists
+        dstUsedAsSrc[s]; // 确保映射项存在
     }
     for (auto & [d, s] : copies) {
-        // s is used as src by this copy; but we care about whether d (the dst
-        // of some copy) is ALSO a src of another copy.
+        // 这里保留变量名仅为说明后续含义：我们关心的是某个 dst
+        // 是否也被其他待处理复制当作 src 使用。
         (void) s;
         (void) d;
     }
 
-    // Recompute cleanly: for each copy i, track how many other pending copies
-    // have copies[i].first (the dst of i) as their src.
-    // dst_as_src_count[v] = number of pending copies whose src == v
+    // 重新明确计算：dstAsSrcCount[v] 表示仍有多少条待处理复制以 v 为 src。
     std::unordered_map<Value *, int> dstAsSrcCount;
     for (auto & [d, s] : copies) {
-        dstAsSrcCount[d] += 0; // ensure entry
-        dstAsSrcCount[s] += 1; // s is consumed by this copy
+        dstAsSrcCount[d] += 0; // 确保目标值已有计数槽位
+        dstAsSrcCount[s] += 1; // 当前复制会消费一次源值 s
     }
 
-    // ---- Find the insertion point: just before the terminator ---------------
+    // ---- 找到插入位置：终结指令之前 ----
     auto & insts = pred->getInstructions();
     auto insertPos = insts.end();
     if (!insts.empty()) {
         auto lastIt = std::prev(insts.end());
         if ((*lastIt)->isTerminator()) {
-            insertPos = lastIt; // insert before terminator
+            insertPos = lastIt; // 插在终结指令之前
         }
-        // If there is no terminator (malformed block), we append at end.
+        // 若基本块没有终结指令，则退化为直接追加到末尾。
     }
 
     auto insertCopy = [&](CopyInst * ci) {
@@ -172,9 +177,8 @@ void PhiLowering::insertSequentialCopies(BasicBlock * pred,
         ci->setParentBlock(pred);
     };
 
-    // ---- Worklist algorithm -------------------------------------------------
-    //
-    // ready: indices of copies that can be emitted now (dst not used as src)
+    // ---- 工作队列算法 ----
+    // readyQueue 中保存当前可以直接发射的复制编号。
     std::vector<int> readyQueue;
     for (int i = 0; i < static_cast<int>(copies.size()); ++i) {
         if (dstAsSrcCount[copies[i].first] == 0) {
@@ -186,58 +190,34 @@ void PhiLowering::insertSequentialCopies(BasicBlock * pred,
 
     while (emitted < static_cast<int>(copies.size())) {
 
-        // ---- Drain ready queue ----------------------------------------------
+        // ---- 持续发射所有当前已就绪的复制 ----
         while (!readyQueue.empty()) {
             int idx = readyQueue.back();
             readyQueue.pop_back();
 
             if (!pending[idx]) {
-                continue; // already processed
+                continue; // 已处理过
             }
 
             auto [dst, src] = copies[idx];
             pending[idx] = false;
             ++emitted;
 
-            // Emit: dst_phi_irname = copy src
+            // 发射正文复制：dst = copy src
             auto * ci = new CopyInst(func, src, dst);
             insertCopy(ci);
 
-            // After we commit dst, any copy whose src == dst now has one fewer
-            // "blocker": decrement and check if it becomes ready.
+            // 发射后，凡是把 dst 当作旧值来源的复制都少了一个阻塞来源。
             auto it = dstAsSrcCount.find(dst);
             if (it != dstAsSrcCount.end()) {
-                // 'dst' was consumed as a src by some copies; now that we have
-                // finalised dst's value, those copies are unblocked.
-                // Actually: we need to find which copies HAD dst as src and
-                // recheck their own dst's count.
-                // But the count tracks "how many pending copies read this value".
-                // After emitting (dst := src), 'dst' is now *written*, meaning
-                // no future copy can safely read the old 'dst'.
-                // What we need: unblock copies whose DST was blocked because
-                // their DST was ALSO used as a src (by someone else).
-                // "Someone else" reading 'x' means (x in dstAsSrcCount and > 0).
-                // After emitting the current copy, 'dst' is no longer an
-                // original value; but other copies that had src == 'dst' in the
-                // *original* set would have already been counted.
-                // This is covered below by decrement logic.
+                // 这里保留空分支仅为了强调：真正的解锁逻辑由下面对 src
+                // 计数的递减与重新入队来完成。
             }
 
-            // For each still-pending copy j where copies[j].second == dst,
-            // decrement dstAsSrcCount[copies[j].first].
-            // (Those copies were waiting because their dst was also a src;
-            //  but we already process them via readyQueue logic.  What we
-            //  actually need: after emitting copy (dst := src), the value
-            //  'src' is no longer "needed as the original src for index idx",
-            //  so we decrease the count for 'src' – but only by 1 since only
-            //  this one copy consumed it.)
-            //
-            // More precisely: dstAsSrcCount[v] counts how many pending copies
-            // have v as their src.  Emitting idx removes one such consumer of
-            // 'src'.  If dstAsSrcCount[src] drops to 0, the copy whose dst
-            // is 'src' (if any) becomes ready.
+            // 更准确地说：发射当前复制后，源值 src 被“作为旧值读取”的需求少了一次。
+            // 若 src 的需求计数因此降到 0，则以 src 为目标值的复制就可能转为就绪。
             dstAsSrcCount[src] -= 1;
-            // Find the copy whose dst == src (if any) and add to ready if unblocked.
+            // 找到以 src 为目标值的复制，若其阻塞消失则加入就绪队列。
             for (int j = 0; j < static_cast<int>(copies.size()); ++j) {
                 if (pending[j] && copies[j].first == src && dstAsSrcCount[src] == 0) {
                     readyQueue.push_back(j);
@@ -249,8 +229,8 @@ void PhiLowering::insertSequentialCopies(BasicBlock * pred,
             break;
         }
 
-        // ---- Cycle detected: break it with a temporary ----------------------
-        // Find the first still-pending copy.
+        // ---- 若发生环，则借助临时值打破循环 ----
+        // 找到第一条尚未发射的复制。
         int cycleIdx = -1;
         for (int i = 0; i < static_cast<int>(copies.size()); ++i) {
             if (pending[i]) {
@@ -259,28 +239,26 @@ void PhiLowering::insertSequentialCopies(BasicBlock * pred,
             }
         }
         if (cycleIdx == -1) {
-            break; // should not happen
+            break; // 理论上不会发生，仅作保护
         }
 
         Value * cycleDst = copies[cycleIdx].first;
 
-        // Emit a fresh temporary copy: %tmp = copy cycleDst (reads the CURRENT
-        // value of cycleDst before it gets overwritten).
-        auto * tmpCopy = new CopyInst(func, cycleDst); // fresh-value copy
+        // 先生成一条临时复制，保存 cycleDst 当前尚未被覆盖的旧值。
+        auto * tmpCopy = new CopyInst(func, cycleDst); // 生成临时新值
         insertCopy(tmpCopy);
 
-        // Replace all pending copies whose src == cycleDst with %tmp.
+        // 将所有仍待发射且以 cycleDst 为源值的复制改为读取临时值 %tmp。
         for (int j = 0; j < static_cast<int>(copies.size()); ++j) {
             if (pending[j] && copies[j].second == cycleDst) {
                 copies[j].second = static_cast<Value *>(tmpCopy);
-                // dstAsSrcCount bookkeeping: cycleDst loses one consumer,
-                // tmpCopy gains one.
+                // 同步更新计数：cycleDst 少一个消费者，tmpCopy 多一个消费者。
                 dstAsSrcCount[cycleDst] -= 1;
                 dstAsSrcCount[static_cast<Value *>(tmpCopy)] += 1;
             }
         }
 
-        // cycleDst's dst-as-src count may have dropped to 0, making it ready.
+        // cycleDst 的阻塞计数可能已经降为 0，从而转为可立即发射。
         if (dstAsSrcCount[cycleDst] == 0) {
             readyQueue.push_back(cycleIdx);
         }

@@ -36,16 +36,17 @@ class Value;
 class PhiLowering {
 
 public:
+    /// @brief 构造 phi 降级优化器
     PhiLowering(Function * func, Module * mod);
 
-    /// 对函数原地执行 phi 降级。
+    /// @brief 对函数原地执行 phi 降级
     /// 调用后，函数中所有 phi 节点已被移除，前驱块末尾已插入对应的
     /// copy 指令序列。调用方应在此之后调用 module->renameIR() 以更新名称。
     void run();
 
 private:
     Function * func;
-    // mod is reserved for future passes that may need to create new constants
+    // 预留给后续可能需要创建新常量的优化过程使用。
     [[maybe_unused]] Module * mod;
 
     /// 将一个前驱块 pred 中收集到的并行复制集合
