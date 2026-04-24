@@ -88,9 +88,9 @@ static bool gAsmAlsoShowIR = false;
 static int gOptLevel = 0;
 
 ///
-/// @brief 指定CPU目标架构
+/// @brief 指定CPU目标架构，默认为RISCV64
 ///
-static std::string gCPUTarget;
+static std::string gCPUTarget = "RISCV64";
 
 ///
 /// @brief 输入源文件
@@ -246,8 +246,8 @@ lb_check:
 	int flag = (int) gShowStructIR + (int) gShowLLVMIR + (int) gShowAST + (int) gShowDomInfo;
 
 	if (0 == flag) {
-		// 没有指定，则默认输出LLVM IR
-		gShowLLVMIR = true;
+		// 没有指定，则默认输出汇编代码
+		// 不设置任何标志，让程序走到汇编生成路径
 	} else if (flag != 1) {
 		// 结构化IR、LLVM IR、抽象语法树、支配树信息只能同时选择一个
 		return -1;
@@ -263,8 +263,11 @@ lb_check:
 			gOutputFile = "output.ir";
 		} else if (gShowDomInfo) {
 			gOutputFile = "output.dom";
-		} else {
+		} else if (gShowLLVMIR) {
 			gOutputFile = "output.ll";
+		} else {
+			// 默认输出汇编文件
+			gOutputFile = "output.s";
 		}
 	}
 
@@ -378,7 +381,40 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
-		// RISC-V64后端编译路径
+		// LLVM IR输出路径（使用-L参数时）
+		if (gShowLLVMIR) {
+			// Re-number IR names after mem2reg inserted phi nodes
+			module->renameIR();
+
+			LLVMIREmitter irEmitter(module, inputFile);
+			subResult = irEmitter.run();
+			if (!subResult) {
+				minic_log(LOG_ERROR, "LLVM IR生成错误");
+				break;
+			}
+
+			// 确定LLVM IR输出文件名
+			std::string llvmIRFile = outputFile;
+			size_t dotPos = outputFile.rfind('.');
+			if (dotPos != std::string::npos) {
+				// 如果输出文件扩展名是.s，则LLVM IR使用.ll扩展名
+				llvmIRFile = outputFile.substr(0, dotPos) + ".ll";
+			} else {
+				// 如果没有扩展名，追加.ll
+				llvmIRFile = outputFile + ".ll";
+			}
+
+			// 输出LLVM IR文本
+			if (!irEmitter.writeToFile(llvmIRFile)) {
+				minic_log(LOG_ERROR, "LLVM IR输出错误");
+				break;
+			}
+
+			// LLVM IR输出成功，继续生成汇编代码
+			minic_log(LOG_INFO, "LLVM IR已输出到: %s", llvmIRFile.c_str());
+		}
+
+		// RISC-V64后端编译路径（默认）
 		if (gCPUTarget == "RISCV64") {
 			// 对每个非内建函数执行Phi降级（将phi节点转换为copy指令）
 			for (auto * func : module->getFunctionList()) {
@@ -391,36 +427,37 @@ static int compile(std::string inputFile, std::string outputFile)
 			// 重新编号IR名称
 			module->renameIR();
 
+			// 确定汇编输出文件名
+			std::string asmOutputFile = outputFile;
+			size_t dotPos = outputFile.rfind('.');
+			if (dotPos != std::string::npos) {
+				// 替换扩展名为.s
+				asmOutputFile = outputFile.substr(0, dotPos) + ".s";
+			} else {
+				// 如果没有扩展名，追加.s
+				asmOutputFile = outputFile + ".s";
+			}
+
 			// 使用RISCV64代码生成器生成汇编
 			CodeGeneratorRiscV64 generator(module);
 			generator.setShowLinearIR(gAsmAlsoShowIR);
-			if (!generator.run(outputFile)) {
+			if (!generator.run(asmOutputFile)) {
 				minic_log(LOG_ERROR, "RISCV64汇编生成错误");
 				break;
 			}
 
+			minic_log(LOG_INFO, "RISCV64汇编已输出到: %s", asmOutputFile.c_str());
 			result = 0;
 			break;
 		}
 
-		// Re-number IR names after mem2reg inserted phi nodes
-		module->renameIR();
 
-		LLVMIREmitter irEmitter(module, inputFile);
-		subResult = irEmitter.run();
-		if (!subResult) {
-			minic_log(LOG_ERROR, "LLVM IR生成错误");
+		// ARM32后端编译路径
+		if (gCPUTarget == "ARM32") {
+			// TODO: 实现ARM32后端
+			minic_log(LOG_ERROR, "ARM32后端暂未实现");
 			break;
 		}
-
-		// 输出LLVM IR文本
-		if (!irEmitter.writeToFile(outputFile)) {
-			minic_log(LOG_ERROR, "LLVM IR输出错误");
-			break;
-		}
-
-		// 成功执行
-		result = 0;
 
 	} while (false);
 
