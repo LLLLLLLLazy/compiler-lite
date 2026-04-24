@@ -29,6 +29,8 @@
 #include "DominatorTree.h"
 #include "DominanceFrontier.h"
 #include "Mem2Reg.h"
+#include "PhiLowering.h"
+#include "CodeGeneratorRiscV64.h"
 
 ///
 /// @brief 是否显示帮助信息
@@ -369,6 +371,38 @@ static int compile(std::string inputFile, std::string outputFile)
 				mem2reg.run();
 			}
 		}
+
+		// 检查目标CPU架构是否支持
+		if (!gCPUTarget.empty() && gCPUTarget != "ARM32" && gCPUTarget != "RISCV64") {
+			minic_log(LOG_ERROR, "指定的目标CPU架构(%s)不支持", gCPUTarget.c_str());
+			break;
+		}
+
+		// RISC-V64后端编译路径
+		if (gCPUTarget == "RISCV64") {
+			// 对每个非内建函数执行Phi降级（将phi节点转换为copy指令）
+			for (auto * func : module->getFunctionList()) {
+				if (!func->isBuiltin() && !func->getBlocks().empty()) {
+					PhiLowering phiLowering(func, module);
+					phiLowering.run();
+				}
+			}
+
+			// 重新编号IR名称
+			module->renameIR();
+
+			// 使用RISCV64代码生成器生成汇编
+			CodeGeneratorRiscV64 generator(module);
+			generator.setShowLinearIR(gAsmAlsoShowIR);
+			if (!generator.run(outputFile)) {
+				minic_log(LOG_ERROR, "RISCV64汇编生成错误");
+				break;
+			}
+
+			result = 0;
+			break;
+		}
+
 		// Re-number IR names after mem2reg inserted phi nodes
 		module->renameIR();
 

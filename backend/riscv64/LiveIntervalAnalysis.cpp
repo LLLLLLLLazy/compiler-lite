@@ -332,9 +332,9 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 			if (copyInst && copyInst->getDst()) {
 				Value * dst = copyInst->getDst();
 				if (needsInterval(dst)) {
-					// 逻辑目标在此处被定义（写入）
+					// PhiLowering生成的逻辑目标在此处被定义（写入）
 					LiveInterval * interval = getOrCreateInterval(dst);
-					interval->addUsePosition(instNum);
+					interval->addSegment(instNum, instNum + 1);
 				}
 			}
 		}
