@@ -71,6 +71,8 @@ private:
 
     Value * ensureI32(Value * value);
 
+    bool evaluateGlobalIntConstExpr(ast_node * node, int32_t & result);
+
     Function * currentFunction() const;
 
     // ---- Block IR infrastructure ----
@@ -108,4 +110,3 @@ private:
     std::vector<BasicBlock *> breakTargets;
     std::vector<BasicBlock *> continueTargets;
 };
-

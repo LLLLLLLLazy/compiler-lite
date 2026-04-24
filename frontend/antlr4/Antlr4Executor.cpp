@@ -13,7 +13,9 @@
 /// <tr><td>2024-09-29 <td>1.0     <td>zenglj  <td>新建
 /// </table>
 ///
+#include <any>
 #include <iostream>
+#include <exception>
 
 #include "AST.h"
 #include "Antlr4Executor.h"
@@ -51,11 +53,25 @@ bool Antlr4Executor::run()
 		return false;
 	}
 
+	if (parser.getNumberOfSyntaxErrors() > 0) {
+		minic_log(LOG_ERROR, "Antlr4语法分析失败，共%zu处错误",
+				  static_cast<size_t>(parser.getNumberOfSyntaxErrors()));
+		return false;
+	}
+
 	/// 新建遍历器对具体语法树进行分析，产生抽象语法树
 	MiniCCSTVisitor visitor;
 
-	// 遍历产生抽象语法树
-	astRoot = visitor.run(cstRoot);
+	try {
+		// 遍历产生抽象语法树
+		astRoot = visitor.run(cstRoot);
+	} catch (const std::bad_any_cast & ex) {
+		minic_log(LOG_ERROR, "AST构建失败: %s", ex.what());
+		return false;
+	} catch (const std::exception & ex) {
+		minic_log(LOG_ERROR, "Antlr4前端执行异常: %s", ex.what());
+		return false;
+	}
 
 	return true;
 }
