@@ -88,10 +88,9 @@ void PhiLowering::run()
         }
     }
 
-    // Safe deletion after all phis have been unlinked.
-    for (auto * phi : toDelete) {
-        delete phi;
-    }
+    // 不在此处删除phi对象。生成的CopyInst节点使用phi对象本身作为逻辑目标Value，
+    // 在out-of-SSA降级后，后续指令仍会引用该Value。
+    (void) toDelete;
 }
 
 // ---------------------------------------------------------------------------

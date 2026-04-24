@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "ILocRiscV64.h"
 #include "Common.h"
@@ -18,19 +19,32 @@
 
 namespace {
 
-constexpr int kSavedFrameBytes = 16;
+/// @brief callee-saved寄存器占用的栈帧字节数
+/// RISC-V64的callee-saved寄存器：ra, s0-s11, 共13个64位寄存器 = 104字节
+constexpr int kSavedFrameBytes = 104;
 
+/// @brief 判断指令是否为内部标签定义指令（以.L开头的标签）
 bool isInternalLabelInst(const RiscV64Inst * inst)
 {
 	return inst != nullptr && !inst->dead && inst->result == ":" && !inst->opcode.empty() &&
 		   inst->opcode.rfind(".L", 0) == 0;
 }
 
+/// @brief 判断指令是否为引用标签的跳转/分支指令
 bool isLabelReferenceInst(const RiscV64Inst * inst)
 {
 	return inst != nullptr && !inst->dead &&
 		   (inst->opcode == "j" || inst->opcode == "jal" || inst->opcode == "beq" || inst->opcode == "bne" ||
 			inst->opcode == "blt" || inst->opcode == "bge" || inst->opcode == "bltu" || inst->opcode == "bgeu");
+}
+
+/// @brief 判断指令是否引用了指定标签
+/// @param inst 指令
+/// @param label 标签名
+/// @return 是否引用了该标签
+bool referencesLabel(const RiscV64Inst * inst, const std::string & label)
+{
+	return inst->result == label || inst->arg1 == label || inst->arg2 == label || inst->addition == label;
 }
 
 int alignTo(int value, int align)
@@ -41,6 +55,9 @@ int alignTo(int value, int align)
 	return ((value + align - 1) / align) * align;
 }
 
+/// @brief 根据寄存器分配信息动态计算所需栈帧大小
+/// @param regAllocMap 寄存器分配映射表
+/// @return 16字节对齐的栈帧大小
 int computeFrameSize(const std::unordered_map<Value *, RegAllocInfo> & regAllocMap)
 {
 	int requiredBytes = kSavedFrameBytes;
@@ -50,10 +67,12 @@ int computeFrameSize(const std::unordered_map<Value *, RegAllocInfo> & regAllocM
 		}
 
 		int slotReach = 0;
-		if (info.baseRegId == RISCV64_FP_REG_NO) {
-			slotReach = info.offset < 0 ? static_cast<int>(-info.offset) : static_cast<int>(info.offset);
-			requiredBytes = std::max(requiredBytes, kSavedFrameBytes + slotReach);
+		// FP负方向偏移的栈槽：局部变量和溢出变量
+		if (info.baseRegId == RISCV64_FP_REG_NO && info.offset < 0) {
+			slotReach = static_cast<int>(-info.offset);
+			requiredBytes = std::max(requiredBytes, slotReach);
 		} else if (info.baseRegId == RISCV64_SP_REG_NO) {
+			// SP正方向偏移的栈槽：超出寄存器传递的调用参数
 			slotReach = static_cast<int>(info.offset);
 			requiredBytes = std::max(requiredBytes, kSavedFrameBytes + slotReach);
 		}
@@ -199,7 +218,7 @@ void ILocRiscV64::deleteUnusedLabel()
 		bool labelUsed = false;
 
 		for (RiscV64Inst * inst: code) {
-			if (isLabelReferenceInst(inst) && inst->result == labelInst->opcode) {
+			if (isLabelReferenceInst(inst) && referencesLabel(inst, labelInst->opcode)) {
 				labelUsed = true;
 				break;
 			}
@@ -491,43 +510,42 @@ void ILocRiscV64::leaStack(int rs_reg_no, int base_reg_no, int off)
 void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 {
 	(void) func;
-	const int frameSize = computeFrameSize(regAllocMap);
+	// 优先使用已计算的栈帧大小，否则动态计算
+	const int currentFrameSize = frameSize > 0 ? frameSize : computeFrameSize(regAllocMap);
 
 	// RISCV64 prologue:
 	// addi sp, sp, -framesize
-	if (PlatformRiscV64::constExpr(-frameSize)) {
-		emit("addi", "sp", "sp", std::to_string(-frameSize));
+	if (PlatformRiscV64::constExpr(-currentFrameSize)) {
+		emit("addi", "sp", "sp", std::to_string(-currentFrameSize));
 	} else {
-		// 偏移超出12位范围
-		load_imm(tmp_reg_no, -frameSize);
+		// 偏移超出12位有符号立即数范围，先加载到临时寄存器
+		load_imm(tmp_reg_no, -currentFrameSize);
 		emit("add", "sp", "sp", PlatformRiscV64::regName[tmp_reg_no]);
 	}
 
-	// sd ra, framesize-8(sp) - 保存返回地址
-	int ra_offset = frameSize - 8;
-	if (PlatformRiscV64::isDisp(ra_offset)) {
-		emit("sd", "ra", std::to_string(ra_offset) + "(sp)");
-	} else {
-		load_imm(tmp_reg_no, ra_offset);
-		emit("add", PlatformRiscV64::regName[tmp_reg_no], "sp", PlatformRiscV64::regName[tmp_reg_no]);
-		emit("sd", "ra", "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
-	}
+	// 保存callee-saved寄存器：ra, s0-s11，共13个64位寄存器
+	const std::vector<std::string> savedRegs = {
+		"ra", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
+	};
 
-	// sd s0, framesize-16(sp) - 保存帧指针
-	int fp_offset = frameSize - 16;
-	if (PlatformRiscV64::isDisp(fp_offset)) {
-		emit("sd", "s0", std::to_string(fp_offset) + "(sp)");
-	} else {
-		load_imm(tmp_reg_no, fp_offset);
-		emit("add", PlatformRiscV64::regName[tmp_reg_no], "sp", PlatformRiscV64::regName[tmp_reg_no]);
-		emit("sd", "s0", "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+	// 逐个保存callee-saved寄存器到栈帧顶部
+	for (int i = 0; i < static_cast<int>(savedRegs.size()); ++i) {
+		int offset = currentFrameSize - (i + 1) * 8;
+		if (PlatformRiscV64::isDisp(offset)) {
+			emit("sd", savedRegs[i], std::to_string(offset) + "(sp)");
+		} else {
+			// 偏移超出12位范围，通过临时寄存器计算地址
+			load_imm(tmp_reg_no, offset);
+			emit("add", PlatformRiscV64::regName[tmp_reg_no], "sp", PlatformRiscV64::regName[tmp_reg_no]);
+			emit("sd", savedRegs[i], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+		}
 	}
 
 	// addi s0, sp, framesize - 设置帧指针
-	if (PlatformRiscV64::constExpr(frameSize)) {
-		emit("addi", "s0", "sp", std::to_string(frameSize));
+	if (PlatformRiscV64::constExpr(currentFrameSize)) {
+		emit("addi", "s0", "sp", std::to_string(currentFrameSize));
 	} else {
-		load_imm(tmp_reg_no, frameSize);
+		load_imm(tmp_reg_no, currentFrameSize);
 		emit("add", "s0", "sp", PlatformRiscV64::regName[tmp_reg_no]);
 	}
 }

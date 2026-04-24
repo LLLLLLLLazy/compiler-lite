@@ -111,21 +111,8 @@ class ILocRiscV64 {
 	/// 由CodeGeneratorRiscV64在寄存器分配后填充
 	std::unordered_map<Value *, RegAllocInfo> regAllocMap;
 
-	/// @brief 加载立即数 li rd, imm 或 lui+addi
-	/// @param rs_reg_no 结果寄存器号
-	/// @param num 立即数
-	void load_imm(int rs_reg_no, int num);
-
-	/// @brief 加载符号地址 la rd, symbol
-	/// @param rs_reg_no 结果寄存器号
-	/// @param name Label名字
-	void load_symbol(int rs_reg_no, std::string name);
-
-	/// @brief 加载栈内变量地址
-	/// @param rs_reg_no 结果寄存器号
-	/// @param base_reg_no 基址寄存器
-	/// @param off 偏移
-	void leaStack(int rs_reg_no, int base_reg_no, int offset);
+	/// @brief 已计算好的函数栈帧大小
+	int frameSize = 0;
 
 public:
 	/// @brief 构造函数
@@ -144,6 +131,20 @@ public:
 	/// @return 寄存器分配信息引用
 	RegAllocInfo & getRegAllocInfo(Value * val);
 
+	/// @brief 设置函数栈帧大小
+	/// @param size 栈帧字节数
+	void setFrameSize(int size)
+	{
+		frameSize = size;
+	}
+
+	/// @brief 获取函数栈帧大小
+	/// @return 栈帧字节数
+	int getFrameSize() const
+	{
+		return frameSize;
+	}
+
 	/// @brief 注释指令，RISCV64使用#作为注释符
 	/// @param str 注释内容
 	void comment(std::string str);
@@ -157,6 +158,16 @@ public:
 	/// @brief 获取当前的代码序列
 	/// @return 代码序列
 	std::list<RiscV64Inst *> & getCode();
+
+	/// @brief 加载立即数 li rd, imm 或 lui+addi
+	/// @param rs_reg_no 结果寄存器号
+	/// @param num 立即数
+	void load_imm(int rs_reg_no, int num);
+
+	/// @brief 加载符号地址 la rd, symbol
+	/// @param rs_reg_no 结果寄存器号
+	/// @param name Label名字
+	void load_symbol(int rs_reg_no, std::string name);
 
 	/// @brief Load指令，基址寻址 lw rs, offset(base)
 	/// @param rs_reg_no 结果寄存器
@@ -194,6 +205,12 @@ public:
 	/// @param rs_reg_no 结果寄存器
 	/// @param var 变量
 	void lea_var(int rs_reg_no, Value * var);
+
+	/// @brief 加载栈内变量地址
+	/// @param rs_reg_no 结果寄存器号
+	/// @param base_reg_no 基址寄存器
+	/// @param off 偏移
+	void leaStack(int rs_reg_no, int base_reg_no, int offset);
 
 	/// @brief 保存寄存器到变量
 	/// 适配SSA IR：通过regAllocMap获取寄存器/栈位置信息
