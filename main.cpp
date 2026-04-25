@@ -80,16 +80,24 @@ static bool gFrontEndRecursiveDescentParsing = false;
 ///
 static bool gAsmAlsoShowIR = false;
 
+///
 /// @brief 优化的级别，即-O后面的数字，默认为0
+///
 static int gOptLevel = 0;
 
+///
 /// @brief 指定CPU目标架构
+///
 static std::string gCPUTarget;
 
+///
 /// @brief 输入源文件
+///
 static std::string gInputFile;
 
+///
 /// @brief 输出文件，不同的选项输出的内容不同
+///
 static std::string gOutputFile;
 
 static struct option long_options[] = {
@@ -290,7 +298,6 @@ static int compile(std::string inputFile, std::string outputFile)
 		// 前端执行：词法分析、语法分析后产生抽象语法树
 		subResult = frontEndExecutor->run();
 		if (!subResult) {
-
 			minic_log(LOG_ERROR, "前端分析错误");
 			break;
 		}
@@ -301,28 +308,20 @@ static int compile(std::string inputFile, std::string outputFile)
 		// 清理前端资源
 		delete frontEndExecutor;
 
+		// 显示抽象语法树
 		if (gShowAST) {
-
-			// 遍历抽象语法树，生成抽象语法树图片
 			OutputAST(astRoot, outputFile);
-
-			// 清理抽象语法树
 			ast_node::Delete(astRoot);
-
-			// 设置返回结果：正常
 			result = 0;
-
 			break;
 		}
 
+		// 生成结构化 IR
 		module = new Module(inputFile);
 		IRGenerator irGenerator(astRoot, module);
 		subResult = irGenerator.run();
 		if (!subResult) {
-
 			minic_log(LOG_ERROR, "结构化IR生成错误");
-
-			// 清理抽象语法树
 			ast_node::Delete(astRoot);
 			break;
 		}
@@ -334,7 +333,6 @@ static int compile(std::string inputFile, std::string outputFile)
 
 		if (gShowStructIR) {
 			module->outputIR(outputFile);
-
 			result = 0;
 			break;
 		}
@@ -377,7 +375,6 @@ static int compile(std::string inputFile, std::string outputFile)
 		LLVMIREmitter irEmitter(module, inputFile);
 		subResult = irEmitter.run();
 		if (!subResult) {
-
 			minic_log(LOG_ERROR, "LLVM IR生成错误");
 			break;
 		}
@@ -404,7 +401,7 @@ static int compile(std::string inputFile, std::string outputFile)
 /// @brief 主程序
 /// @param argc
 /// @param argv
-/// @return
+/// @return compile的执行结果，0表示成功，非0表示失败
 int main(int argc, char * argv[])
 {
 	// 函数返回值，默认-1
@@ -417,19 +414,14 @@ int main(int argc, char * argv[])
 	// 参数解析
 	result = ArgsAnalysis(argc, argv);
 	if (result < 0) {
-
-		// 在终端显示程序帮助信息
+		// 如果参数解析失败，显示帮助信息
 		showHelp(argv[0]);
-
 		return -1;
 	}
 
 	// 显示帮助
 	if (gShowHelp) {
-
-		// 在终端显示程序帮助信息
 		showHelp(argv[0]);
-
 		return 0;
 	}
 
