@@ -83,11 +83,7 @@ set(FRONTEND_SRCS
 
 )
 
-# 是否编译后端代码
-set(BUILD_BACKEND ON CACHE BOOL "Enable/Disable backend (ARM32/RiscV64) compilation")
-
 # 后端源代码集合
-if(BUILD_BACKEND)
 set(BACKEND_SRCS
 	# 后端共性代码
 	backend/CodeGenerator.cpp
@@ -120,9 +116,6 @@ set(BACKEND_SRCS
 	backend/riscv64/HeuristicSpillStrategy.cpp
 	backend/riscv64/HeuristicSpillStrategy.h
 )
-else()
-set(BACKEND_SRCS)
-endif()
 
 # 中间IR(ir)源代码集合
 set(IR_SRCS

@@ -18,10 +18,12 @@ jobs:
           sudo apt-get install -y \
             clang \
             cmake \
+            gcc-riscv64-linux-gnu \
             ninja-build \
             graphviz \
             graphviz-dev \
             openjdk-17-jdk \
+            qemu-user-static \
             unzip \
             curl
 
@@ -44,8 +46,7 @@ jobs:
         run: |
           cmake -B build -S . -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DBUILD_BACKEND=OFF
+            -DCMAKE_CXX_COMPILER=clang++
 
       - name: Build
         run: cmake --build build --parallel
@@ -56,6 +57,13 @@ jobs:
             [[ -n "${test_case}" ]] || continue
             MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2023 "${test_case}"
           done < ./tests/2023_function/llvmir_passed.txt
+
+      - name: Run 2023 RISCV64 asm smoke tests
+        run: |
+          while IFS= read -r test_case; do
+            [[ -n "${test_case}" ]] || continue
+            bash ./tools/run-local-riscv64-tests.sh 2023 "${test_case}"
+          done < ./tests/2023_function/asm_passed.txt
 
       - name: Run 2023 AST smoke tests
         run: |
