@@ -289,14 +289,6 @@ static int compile(std::string inputFile, std::string outputFile)
 	Module * module = nullptr;
 
 	do {
-
-		// 编译过程主要包括：
-		// 1）词法语法分析生成 AST
-		// 2) 遍历 AST 生成结构化 IR
-		// 3) 基于结构化 IR 输出调试 IR 或 LLVM IR
-		//
-		// TODO：实现 RISCV64 后端支持
-
 		// 创建词法语法分析器
 		FrontEndExecutor * frontEndExecutor = new Antlr4Executor(inputFile);
 
@@ -450,7 +442,6 @@ static int compile(std::string inputFile, std::string outputFile)
 			result = 0;
 			break;
 		}
-
 
 		// ARM32后端编译路径
 		if (gCPUTarget == "ARM32") {
