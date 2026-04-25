@@ -30,6 +30,9 @@ public:
     /// 添加一个 (value, block) incoming 对
     void addIncoming(Value * value, BasicBlock * block);
 
+    /// 删除所有来自指定前驱块的 incoming 对
+    void removeIncomingBlock(BasicBlock * block);
+
     int32_t getIncomingCount() const
     {
         return static_cast<int32_t>(incoming.size());
