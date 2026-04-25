@@ -28,6 +28,7 @@
 #include "Module.h"
 #include "DominatorTree.h"
 #include "DominanceFrontier.h"
+#include "DCE.h"
 #include "Mem2Reg.h"
 #include "PhiLowering.h"
 #include "CodeGeneratorRiscV64.h"
@@ -305,7 +306,7 @@ static int compile(std::string inputFile, std::string outputFile)
 		// 清理前端资源
 		delete frontEndExecutor;
 
-		// 显示抽象语法树
+		// 显示抽象语法树（使用-T或--ast选项时）
 		if (gShowAST) {
 			OutputAST(astRoot, outputFile);
 			ast_node::Delete(astRoot);
@@ -334,8 +335,8 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
+		// 输出支配树与支配边界分析结果（使用--dom选项时）
 		if (gShowDomInfo) {
-			// 对每个函数计算支配树与支配边界，并输出到文件
 			std::string domOutput;
 			for (auto * func : module->getFunctionList()) {
 				if (func->isBuiltin() || func->getBlocks().empty()) {
@@ -348,7 +349,6 @@ static int compile(std::string inputFile, std::string outputFile)
 				df.print(domOutput);
 				domOutput += "\n";
 			}
-
 			std::ofstream domFile(outputFile, std::ios::out | std::ios::trunc);
 			if (!domFile.is_open()) {
 				minic_log(LOG_ERROR, "支配树输出文件打开失败");
@@ -367,15 +367,16 @@ static int compile(std::string inputFile, std::string outputFile)
 			}
 		}
 
-		// 检查目标CPU架构是否支持
-		if (!gCPUTarget.empty() && gCPUTarget != "ARM32" && gCPUTarget != "RISCV64") {
-			minic_log(LOG_ERROR, "指定的目标CPU架构(%s)不支持", gCPUTarget.c_str());
-			break;
+		// 运行 DCE，删除死代码
+		for (auto * func : module->getFunctionList()) {
+			if (!func->isBuiltin() && !func->getBlocks().empty()) {
+				DCE dce(func);
+				dce.run();
+			}
 		}
 
 		// LLVM IR输出路径（使用-L参数时）
 		if (gShowLLVMIR) {
-			// Re-number IR names after mem2reg inserted phi nodes
 			module->renameIR();
 
 			LLVMIREmitter irEmitter(module, inputFile);
@@ -389,10 +390,8 @@ static int compile(std::string inputFile, std::string outputFile)
 			std::string llvmIRFile = outputFile;
 			size_t dotPos = outputFile.rfind('.');
 			if (dotPos != std::string::npos) {
-				// 如果输出文件扩展名是.s，则LLVM IR使用.ll扩展名
 				llvmIRFile = outputFile.substr(0, dotPos) + ".ll";
 			} else {
-				// 如果没有扩展名，追加.ll
 				llvmIRFile = outputFile + ".ll";
 			}
 
@@ -402,53 +401,48 @@ static int compile(std::string inputFile, std::string outputFile)
 				break;
 			}
 
-			// LLVM IR输出成功，继续生成汇编代码
 			minic_log(LOG_INFO, "LLVM IR已输出到: %s", llvmIRFile.c_str());
-		}
-
-		// RISC-V64后端编译路径（默认）
-		if (gCPUTarget == "RISCV64") {
-			// 对每个非内建函数执行Phi降级（将phi节点转换为copy指令）
-			for (auto * func : module->getFunctionList()) {
-				if (!func->isBuiltin() && !func->getBlocks().empty()) {
-					PhiLowering phiLowering(func, module);
-					phiLowering.run();
-				}
-			}
-
-			// 重新编号IR名称
-			module->renameIR();
-
-			// 确定汇编输出文件名
-			std::string asmOutputFile = outputFile;
-			size_t dotPos = outputFile.rfind('.');
-			if (dotPos != std::string::npos) {
-				// 替换扩展名为.s
-				asmOutputFile = outputFile.substr(0, dotPos) + ".s";
-			} else {
-				// 如果没有扩展名，追加.s
-				asmOutputFile = outputFile + ".s";
-			}
-
-			// 使用RISCV64代码生成器生成汇编
-			CodeGeneratorRiscV64 generator(module);
-			generator.setShowLinearIR(gAsmAlsoShowIR);
-			if (!generator.run(asmOutputFile)) {
-				minic_log(LOG_ERROR, "RISCV64汇编生成错误");
-				break;
-			}
-
-			minic_log(LOG_INFO, "RISCV64汇编已输出到: %s", asmOutputFile.c_str());
 			result = 0;
 			break;
 		}
 
-		// ARM32后端编译路径
-		if (gCPUTarget == "ARM32") {
-			// TODO: 实现ARM32后端
-			minic_log(LOG_ERROR, "ARM32后端暂未实现");
+		// 检查目标CPU架构是否支持
+		if (!gCPUTarget.empty() && gCPUTarget != "RISCV64") {
+			minic_log(LOG_ERROR, "指定的目标CPU架构(%s)不支持", gCPUTarget.c_str());
 			break;
 		}
+
+		// 对每个非内建函数执行Phi降级（将phi节点转换为copy指令）
+		for (auto * func : module->getFunctionList()) {
+			if (!func->isBuiltin() && !func->getBlocks().empty()) {
+				PhiLowering phiLowering(func, module);
+				phiLowering.run();
+			}
+		}
+
+		// 重新编号IR名称
+		module->renameIR();
+
+		// 确定汇编输出文件名
+		std::string asmOutputFile = outputFile;
+		size_t dotPos = outputFile.rfind('.');
+		if (dotPos != std::string::npos) {
+			asmOutputFile = outputFile.substr(0, dotPos) + ".s";
+		} else {
+			asmOutputFile = outputFile + ".s";
+		}
+
+		// 使用RISCV64代码生成器生成汇编
+		CodeGeneratorRiscV64 generator(module);
+		generator.setShowLinearIR(gAsmAlsoShowIR);
+		if (!generator.run(asmOutputFile)) {
+			minic_log(LOG_ERROR, "RISCV64汇编生成错误");
+			break;
+		}
+
+		minic_log(LOG_INFO, "RISCV64汇编已输出到: %s", asmOutputFile.c_str());
+		result = 0;
+		break;
 
 	} while (false);
 
