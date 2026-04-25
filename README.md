@@ -182,13 +182,380 @@ MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2023
 MINIC_TEST_MODE=asm bash ./tools/run-local-tests.sh 2023
 ```
 
-### 5.2 已通过测试（2023 功能测试集）
+### 5.2 已通过测试
 
-当前已通过 **46 / 100** 个测试用例.
+###### 2023 已通过测试
 
-详细用例列表见 [已通过测试.md](已通过测试.md)。
+测试命令：
 
----
+```bash
+MINIC_FRONTEND=antlr MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2023
+```
+
+统计结果：`46 / 100` 通过。
+
+说明：以下列表与 [tests/2023_function/llvmir_passed.txt](/workspace/tests/2023_function/llvmir_passed.txt) 同步。
+
+| 序号 | 用例 |
+| --- | --- |
+| 1 | `2023_func_00_main` |
+| 2 | `2023_func_01_var_defn2` |
+| 3 | `2023_func_02_var_defn3` |
+| 4 | `2023_func_09_func_defn` |
+| 5 | `2023_func_10_var_defn_func` |
+| 6 | `2023_func_11_add2` |
+| 7 | `2023_func_14_subc` |
+| 8 | `2023_func_15_mul` |
+| 9 | `2023_func_17_div` |
+| 10 | `2023_func_19_mod` |
+| 11 | `2023_func_20_rem` |
+| 12 | `2023_func_21_if_test2` |
+| 13 | `2023_func_22_if_test3` |
+| 14 | `2023_func_23_if_test4` |
+| 15 | `2023_func_24_if_test5` |
+| 16 | `2023_func_25_while_if` |
+| 17 | `2023_func_26_while_test1` |
+| 18 | `2023_func_27_while_test2` |
+| 19 | `2023_func_28_while_test3` |
+| 20 | `2023_func_29_break` |
+| 21 | `2023_func_30_continue` |
+| 22 | `2023_func_31_while_if_test1` |
+| 23 | `2023_func_32_while_if_test2` |
+| 24 | `2023_func_33_while_if_test3` |
+| 25 | `2023_func_35_op_priority1` |
+| 26 | `2023_func_36_op_priority2` |
+| 27 | `2023_func_37_op_priority3` |
+| 28 | `2023_func_38_op_priority4` |
+| 29 | `2023_func_39_op_priority5` |
+| 30 | `2023_func_40_unary_op` |
+| 31 | `2023_func_41_unary_op2` |
+| 32 | `2023_func_43_logi_assign` |
+| 33 | `2023_func_45_comment1` |
+| 34 | `2023_func_46_hex_defn` |
+| 35 | `2023_func_47_hex_oct_add` |
+| 36 | `2023_func_48_assign_complex_expr` |
+| 37 | `2023_func_49_if_complex_expr` |
+| 38 | `2023_func_50_short_circuit` |
+| 39 | `2023_func_52_scope` |
+| 40 | `2023_func_53_scope2` |
+| 41 | `2023_func_67_reverse_output` |
+| 42 | `2023_func_72_hanoi` |
+| 43 | `2023_func_78_side_effect` |
+| 44 | `2023_func_89_many_globals` |
+| 45 | `2023_func_91_many_locals2` |
+| 46 | `2023_func_92_register_alloc` |
+
+###### 2023 还未通过测试
+
+统计结果：`54 / 100` 未通过。
+
+说明：以下列表由 `tests/2023_function` 全量用例减去 [tests/2023_function/llvmir_passed.txt](/workspace/tests/2023_function/llvmir_passed.txt) 计算得到。
+
+| 序号 | 用例 |
+| --- | --- |
+| 1 | `2023_func_03_arr_defn2` |
+| 2 | `2023_func_04_arr_defn3` |
+| 3 | `2023_func_05_arr_defn4` |
+| 4 | `2023_func_06_const_var_defn2` |
+| 5 | `2023_func_07_const_var_defn3` |
+| 6 | `2023_func_08_const_array_defn` |
+| 7 | `2023_func_12_addc` |
+| 8 | `2023_func_13_sub2` |
+| 9 | `2023_func_16_mulc` |
+| 10 | `2023_func_18_divc` |
+| 11 | `2023_func_34_arr_expr_len` |
+| 12 | `2023_func_42_empty_stmt` |
+| 13 | `2023_func_44_stmt_expr` |
+| 14 | `2023_func_51_short_circuit3` |
+| 15 | `2023_func_54_hidden_var` |
+| 16 | `2023_func_55_sort_test1` |
+| 17 | `2023_func_56_sort_test2` |
+| 18 | `2023_func_57_sort_test3` |
+| 19 | `2023_func_58_sort_test4` |
+| 20 | `2023_func_59_sort_test5` |
+| 21 | `2023_func_60_sort_test6` |
+| 22 | `2023_func_61_sort_test7` |
+| 23 | `2023_func_62_percolation` |
+| 24 | `2023_func_63_big_int_mul` |
+| 25 | `2023_func_64_calculator` |
+| 26 | `2023_func_65_color` |
+| 27 | `2023_func_66_exgcd` |
+| 28 | `2023_func_68_brainfk` |
+| 29 | `2023_func_69_expr_eval` |
+| 30 | `2023_func_70_dijkstra` |
+| 31 | `2023_func_71_full_conn` |
+| 32 | `2023_func_73_int_io` |
+| 33 | `2023_func_74_kmp` |
+| 34 | `2023_func_75_max_flow` |
+| 35 | `2023_func_76_n_queens` |
+| 36 | `2023_func_77_substr` |
+| 37 | `2023_func_79_var_name` |
+| 38 | `2023_func_80_chaos_token` |
+| 39 | `2023_func_81_skip_spaces` |
+| 40 | `2023_func_82_long_func` |
+| 41 | `2023_func_83_long_array` |
+| 42 | `2023_func_84_long_array2` |
+| 43 | `2023_func_85_long_code` |
+| 44 | `2023_func_86_long_code2` |
+| 45 | `2023_func_87_many_params` |
+| 46 | `2023_func_88_many_params2` |
+| 47 | `2023_func_90_many_locals` |
+| 48 | `2023_func_93_nested_calls` |
+| 49 | `2023_func_94_nested_loops` |
+| 50 | `2023_func_95_float` |
+| 51 | `2023_func_96_matrix_add` |
+| 52 | `2023_func_97_matrix_sub` |
+| 53 | `2023_func_98_matrix_mul` |
+| 54 | `2023_func_99_matrix_tran` |
+
+###### 2023 AST 已通过测试
+
+测试命令：
+
+```bash
+MINIC_FRONTEND=antlr MINIC_TEST_MODE=ast bash ./tools/run-local-tests.sh 2023
+```
+
+统计结果：`46 / 100` 通过。
+
+说明：以下列表与 [tests/2023_function/ast_passed.txt](/workspace/tests/2023_function/ast_passed.txt) 同步。
+
+| 序号 | 用例 |
+| --- | --- |
+| 1 | `2023_func_00_main` |
+| 2 | `2023_func_01_var_defn2` |
+| 3 | `2023_func_02_var_defn3` |
+| 4 | `2023_func_09_func_defn` |
+| 5 | `2023_func_10_var_defn_func` |
+| 6 | `2023_func_11_add2` |
+| 7 | `2023_func_14_subc` |
+| 8 | `2023_func_15_mul` |
+| 9 | `2023_func_17_div` |
+| 10 | `2023_func_19_mod` |
+| 11 | `2023_func_20_rem` |
+| 12 | `2023_func_21_if_test2` |
+| 13 | `2023_func_22_if_test3` |
+| 14 | `2023_func_23_if_test4` |
+| 15 | `2023_func_24_if_test5` |
+| 16 | `2023_func_25_while_if` |
+| 17 | `2023_func_26_while_test1` |
+| 18 | `2023_func_27_while_test2` |
+| 19 | `2023_func_28_while_test3` |
+| 20 | `2023_func_29_break` |
+| 21 | `2023_func_30_continue` |
+| 22 | `2023_func_31_while_if_test1` |
+| 23 | `2023_func_32_while_if_test2` |
+| 24 | `2023_func_33_while_if_test3` |
+| 25 | `2023_func_35_op_priority1` |
+| 26 | `2023_func_36_op_priority2` |
+| 27 | `2023_func_37_op_priority3` |
+| 28 | `2023_func_38_op_priority4` |
+| 29 | `2023_func_39_op_priority5` |
+| 30 | `2023_func_40_unary_op` |
+| 31 | `2023_func_41_unary_op2` |
+| 32 | `2023_func_43_logi_assign` |
+| 33 | `2023_func_45_comment1` |
+| 34 | `2023_func_46_hex_defn` |
+| 35 | `2023_func_47_hex_oct_add` |
+| 36 | `2023_func_48_assign_complex_expr` |
+| 37 | `2023_func_49_if_complex_expr` |
+| 38 | `2023_func_50_short_circuit` |
+| 39 | `2023_func_52_scope` |
+| 40 | `2023_func_53_scope2` |
+| 41 | `2023_func_67_reverse_output` |
+| 42 | `2023_func_72_hanoi` |
+| 43 | `2023_func_78_side_effect` |
+| 44 | `2023_func_89_many_globals` |
+| 45 | `2023_func_91_many_locals2` |
+| 46 | `2023_func_92_register_alloc` |
+
+###### 2023 AST 还未通过测试
+
+统计结果：`54 / 100` 未通过。
+
+说明：以下列表由 `tests/2023_function` 全量用例减去 [tests/2023_function/ast_passed.txt](/workspace/tests/2023_function/ast_passed.txt) 计算得到。
+
+| 序号 | 用例 |
+| --- | --- |
+| 1 | `2023_func_03_arr_defn2` |
+| 2 | `2023_func_04_arr_defn3` |
+| 3 | `2023_func_05_arr_defn4` |
+| 4 | `2023_func_06_const_var_defn2` |
+| 5 | `2023_func_07_const_var_defn3` |
+| 6 | `2023_func_08_const_array_defn` |
+| 7 | `2023_func_12_addc` |
+| 8 | `2023_func_13_sub2` |
+| 9 | `2023_func_16_mulc` |
+| 10 | `2023_func_18_divc` |
+| 11 | `2023_func_34_arr_expr_len` |
+| 12 | `2023_func_42_empty_stmt` |
+| 13 | `2023_func_44_stmt_expr` |
+| 14 | `2023_func_51_short_circuit3` |
+| 15 | `2023_func_54_hidden_var` |
+| 16 | `2023_func_55_sort_test1` |
+| 17 | `2023_func_56_sort_test2` |
+| 18 | `2023_func_57_sort_test3` |
+| 19 | `2023_func_58_sort_test4` |
+| 20 | `2023_func_59_sort_test5` |
+| 21 | `2023_func_60_sort_test6` |
+| 22 | `2023_func_61_sort_test7` |
+| 23 | `2023_func_62_percolation` |
+| 24 | `2023_func_63_big_int_mul` |
+| 25 | `2023_func_64_calculator` |
+| 26 | `2023_func_65_color` |
+| 27 | `2023_func_66_exgcd` |
+| 28 | `2023_func_68_brainfk` |
+| 29 | `2023_func_69_expr_eval` |
+| 30 | `2023_func_70_dijkstra` |
+| 31 | `2023_func_71_full_conn` |
+| 32 | `2023_func_73_int_io` |
+| 33 | `2023_func_74_kmp` |
+| 34 | `2023_func_75_max_flow` |
+| 35 | `2023_func_76_n_queens` |
+| 36 | `2023_func_77_substr` |
+| 37 | `2023_func_79_var_name` |
+| 38 | `2023_func_80_chaos_token` |
+| 39 | `2023_func_81_skip_spaces` |
+| 40 | `2023_func_82_long_func` |
+| 41 | `2023_func_83_long_array` |
+| 42 | `2023_func_84_long_array2` |
+| 43 | `2023_func_85_long_code` |
+| 44 | `2023_func_86_long_code2` |
+| 45 | `2023_func_87_many_params` |
+| 46 | `2023_func_88_many_params2` |
+| 47 | `2023_func_90_many_locals` |
+| 48 | `2023_func_93_nested_calls` |
+| 49 | `2023_func_94_nested_loops` |
+| 50 | `2023_func_95_float` |
+| 51 | `2023_func_96_matrix_add` |
+| 52 | `2023_func_97_matrix_sub` |
+| 53 | `2023_func_98_matrix_mul` |
+| 54 | `2023_func_99_matrix_tran` |
+
+###### 2023 RISCV64 已通过测试
+
+测试命令：
+
+```bash
+MINIC_FRONTEND=antlr bash ./tools/run-local-riscv64-tests.sh 2023
+```
+
+统计结果：`46 / 100` 通过。
+
+说明：以下列表与 [tests/2023_function/asm_passed.txt](/workspace/tests/2023_function/asm_passed.txt) 同步。
+
+| 序号 | 用例 |
+| --- | --- |
+| 1 | `2023_func_00_main` |
+| 2 | `2023_func_01_var_defn2` |
+| 3 | `2023_func_02_var_defn3` |
+| 4 | `2023_func_09_func_defn` |
+| 5 | `2023_func_10_var_defn_func` |
+| 6 | `2023_func_11_add2` |
+| 7 | `2023_func_14_subc` |
+| 8 | `2023_func_15_mul` |
+| 9 | `2023_func_17_div` |
+| 10 | `2023_func_19_mod` |
+| 11 | `2023_func_20_rem` |
+| 12 | `2023_func_21_if_test2` |
+| 13 | `2023_func_22_if_test3` |
+| 14 | `2023_func_23_if_test4` |
+| 15 | `2023_func_24_if_test5` |
+| 16 | `2023_func_25_while_if` |
+| 17 | `2023_func_26_while_test1` |
+| 18 | `2023_func_27_while_test2` |
+| 19 | `2023_func_28_while_test3` |
+| 20 | `2023_func_29_break` |
+| 21 | `2023_func_30_continue` |
+| 22 | `2023_func_31_while_if_test1` |
+| 23 | `2023_func_32_while_if_test2` |
+| 24 | `2023_func_33_while_if_test3` |
+| 25 | `2023_func_35_op_priority1` |
+| 26 | `2023_func_36_op_priority2` |
+| 27 | `2023_func_37_op_priority3` |
+| 28 | `2023_func_38_op_priority4` |
+| 29 | `2023_func_39_op_priority5` |
+| 30 | `2023_func_40_unary_op` |
+| 31 | `2023_func_41_unary_op2` |
+| 32 | `2023_func_43_logi_assign` |
+| 33 | `2023_func_45_comment1` |
+| 34 | `2023_func_46_hex_defn` |
+| 35 | `2023_func_47_hex_oct_add` |
+| 36 | `2023_func_48_assign_complex_expr` |
+| 37 | `2023_func_49_if_complex_expr` |
+| 38 | `2023_func_50_short_circuit` |
+| 39 | `2023_func_52_scope` |
+| 40 | `2023_func_53_scope2` |
+| 41 | `2023_func_67_reverse_output` |
+| 42 | `2023_func_72_hanoi` |
+| 43 | `2023_func_78_side_effect` |
+| 44 | `2023_func_89_many_globals` |
+| 45 | `2023_func_91_many_locals2` |
+| 46 | `2023_func_92_register_alloc` |
+
+###### 2023 RISCV64 还未通过测试
+
+统计结果：`54 / 100` 未通过。
+
+说明：以下列表由 `tests/2023_function` 全量用例减去 [tests/2023_function/asm_passed.txt](/workspace/tests/2023_function/asm_passed.txt) 计算得到。
+
+| 序号 | 用例 |
+| --- | --- |
+| 1 | `2023_func_03_arr_defn2` |
+| 2 | `2023_func_04_arr_defn3` |
+| 3 | `2023_func_05_arr_defn4` |
+| 4 | `2023_func_06_const_var_defn2` |
+| 5 | `2023_func_07_const_var_defn3` |
+| 6 | `2023_func_08_const_array_defn` |
+| 7 | `2023_func_12_addc` |
+| 8 | `2023_func_13_sub2` |
+| 9 | `2023_func_16_mulc` |
+| 10 | `2023_func_18_divc` |
+| 11 | `2023_func_34_arr_expr_len` |
+| 12 | `2023_func_42_empty_stmt` |
+| 13 | `2023_func_44_stmt_expr` |
+| 14 | `2023_func_51_short_circuit3` |
+| 15 | `2023_func_54_hidden_var` |
+| 16 | `2023_func_55_sort_test1` |
+| 17 | `2023_func_56_sort_test2` |
+| 18 | `2023_func_57_sort_test3` |
+| 19 | `2023_func_58_sort_test4` |
+| 20 | `2023_func_59_sort_test5` |
+| 21 | `2023_func_60_sort_test6` |
+| 22 | `2023_func_61_sort_test7` |
+| 23 | `2023_func_62_percolation` |
+| 24 | `2023_func_63_big_int_mul` |
+| 25 | `2023_func_64_calculator` |
+| 26 | `2023_func_65_color` |
+| 27 | `2023_func_66_exgcd` |
+| 28 | `2023_func_68_brainfk` |
+| 29 | `2023_func_69_expr_eval` |
+| 30 | `2023_func_70_dijkstra` |
+| 31 | `2023_func_71_full_conn` |
+| 32 | `2023_func_73_int_io` |
+| 33 | `2023_func_74_kmp` |
+| 34 | `2023_func_75_max_flow` |
+| 35 | `2023_func_76_n_queens` |
+| 36 | `2023_func_77_substr` |
+| 37 | `2023_func_79_var_name` |
+| 38 | `2023_func_80_chaos_token` |
+| 39 | `2023_func_81_skip_spaces` |
+| 40 | `2023_func_82_long_func` |
+| 41 | `2023_func_83_long_array` |
+| 42 | `2023_func_84_long_array2` |
+| 43 | `2023_func_85_long_code` |
+| 44 | `2023_func_86_long_code2` |
+| 45 | `2023_func_87_many_params` |
+| 46 | `2023_func_88_many_params2` |
+| 47 | `2023_func_90_many_locals` |
+| 48 | `2023_func_93_nested_calls` |
+| 49 | `2023_func_94_nested_loops` |
+| 50 | `2023_func_95_float` |
+| 51 | `2023_func_96_matrix_add` |
+| 52 | `2023_func_97_matrix_sub` |
+| 53 | `2023_func_98_matrix_mul` |
+| 54 | `2023_func_99_matrix_tran` |
+
 
 ## 6. 手动完整链路示例
 
