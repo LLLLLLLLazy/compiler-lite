@@ -77,6 +77,9 @@ public:
     /// 建立 this -> succ 的 CFG 边（同时更新双方的前驱/后继集合）
     void linkSuccessor(BasicBlock * succ);
 
+    int getLoopDepth() const { return loopDepth; }
+    void setLoopDepth(int d) { loopDepth = d; }
+
     void toString(std::string & str);
 
 private:
@@ -84,4 +87,5 @@ private:
     std::list<Instruction *> insts;
     std::vector<BasicBlock *> preds;
     std::vector<BasicBlock *> succs;
+    int loopDepth = 0;
 };

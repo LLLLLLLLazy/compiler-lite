@@ -189,6 +189,8 @@ set(IR_SRCS
 	ir/passes/ConstProp.cpp
 	ir/passes/DCE.h
 	ir/passes/DCE.cpp
+	ir/analysis/LoopInfo.h
+	ir/analysis/LoopInfo.cpp
 	ir/passes/Mem2Reg.h
 	ir/passes/Mem2Reg.cpp
 	ir/passes/PhiLowering.h

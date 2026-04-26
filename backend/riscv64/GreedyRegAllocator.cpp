@@ -16,11 +16,13 @@
 #include "AllocaInst.h"
 #include "BasicBlock.h"
 #include "CallInst.h"
+#include "DominatorTree.h"
 #include "Function.h"
 #include "HeuristicSpillStrategy.h"
 #include "InterferenceGraph.h"
 #include "LiveInterval.h"
 #include "LiveIntervalAnalysis.h"
+#include "LoopInfo.h"
 #include "PlatformRiscV64.h"
 #include "Value.h"
 
@@ -62,8 +64,17 @@ void GreedyRegAllocator::allocate(Function * func)
 	// 构建可用物理寄存器池
 	availableRegs = buildRegisterPool(func);
 
+	// 构建支配树和循环分析，用于计算循环深度加权的溢出权重
+	DominatorTree domTree(func);
+	LoopInfo loopInfo(func, &domTree);
+
+	// 将循环深度写入BasicBlock，供后续指令选择等阶段使用
+	for (auto * bb : func->getBlocks()) {
+		bb->setLoopDepth(loopInfo.getLoopDepth(bb));
+	}
+
 	// 执行活跃区间分析
-	LiveIntervalAnalysis analysis(func);
+	LiveIntervalAnalysis analysis(func, &loopInfo);
 	analysis.run();
 
 	// 建立活跃区间到索引的映射

@@ -30,6 +30,7 @@
 #include "DominanceFrontier.h"
 #include "ConstProp.h"
 #include "DCE.h"
+#include "LoopInfo.h"
 #include "Mem2Reg.h"
 #include "PhiLowering.h"
 #include "CodeGeneratorRiscV64.h"
@@ -354,6 +355,8 @@ static int compile(std::string inputFile, std::string outputFile)
 				dt.print(domOutput);
 				DominanceFrontier df(func, dt);
 				df.print(domOutput);
+				LoopInfo li(func, &dt);
+				li.print(domOutput);
 				domOutput += "\n";
 			}
 			std::ofstream domFile(outputFile, std::ios::out | std::ios::trunc);
