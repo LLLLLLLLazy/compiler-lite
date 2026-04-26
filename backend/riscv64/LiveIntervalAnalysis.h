@@ -17,6 +17,7 @@
 
 class Function;
 class Instruction;
+class LoopInfo;
 class Value;
 
 /// @brief 活跃区间分析器
@@ -29,7 +30,8 @@ class LiveIntervalAnalysis {
 public:
 	/// @brief 构造函数
 	/// @param func 待分析的函数
-	explicit LiveIntervalAnalysis(Function * func);
+	/// @param loopInfo 循环分析结果（可选），用于计算循环深度加权的溢出权重
+	explicit LiveIntervalAnalysis(Function * func, LoopInfo * loopInfo = nullptr);
 
 	/// @brief 执行完整的活跃区间分析流程
 	/// 依次调用 computeLiveIntervals() 和 buildInterferenceGraph()
@@ -90,4 +92,7 @@ private:
 
 	/// @brief 下一条指令的编号
 	int nextInstNum = 0;
+
+	/// @brief 循环分析结果（用于计算溢出权重）
+	LoopInfo * loopInfo = nullptr;
 };

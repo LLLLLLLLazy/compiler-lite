@@ -13,6 +13,7 @@
 #include <unordered_map>
 
 #include "AllocaInst.h"
+#include "LoopInfo.h"
 #include "BasicBlock.h"
 #include "BinaryInst.h"
 #include "CallInst.h"
@@ -34,8 +35,9 @@
 
 /// @brief 构造函数
 /// @param func 待分析的函数
-LiveIntervalAnalysis::LiveIntervalAnalysis(Function * func)
-	: func(func), interferenceGraph(nullptr), nextInstNum(0)
+/// @param loopInfo 循环分析结果（可选），用于计算循环深度加权的溢出权重
+LiveIntervalAnalysis::LiveIntervalAnalysis(Function * func, LoopInfo * loopInfo)
+	: func(func), interferenceGraph(nullptr), nextInstNum(0), loopInfo(loopInfo)
 {}
 
 /// @brief 执行完整的活跃区间分析流程
@@ -382,7 +384,6 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 			interval->addSegment(0, lastUse + 1);
 		}
 	}
-
 	// 线性编号本身不表达回边迭代。对所有“在循环内使用、且定义发生在循环外”的值，
 	// 保守地把活跃区间延长到循环头之后，避免循环不变量在一次迭代后被错误复用寄存器。
 	for (auto * bb : blocks) {
@@ -420,9 +421,32 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 		}
 	}
 
-	// 计算溢出权重（当前循环深度默认为0，后续可扩展）
-	for (auto * interval : intervals) {
-		interval->calcSpillWeight(0);
+	// 计算溢出权重
+	if (loopInfo != nullptr) {
+		// 建立指令编号到循环深度的映射
+		std::unordered_map<int, int> instNumToLoopDepth;
+		for (auto & [inst, num] : instNumbering) {
+			BasicBlock * bb = inst->getParentBlock();
+			if (bb != nullptr) {
+				instNumToLoopDepth[num] = loopInfo->getLoopDepth(bb);
+			}
+		}
+
+		for (auto * interval : intervals) {
+			int maxDepth = 0;
+			for (int pos : interval->getUsePositions()) {
+				auto it = instNumToLoopDepth.find(pos);
+				if (it != instNumToLoopDepth.end()) {
+					maxDepth = std::max(maxDepth, it->second);
+				}
+			}
+			interval->maxLoopDepth = maxDepth;
+			interval->calcSpillWeight(maxDepth);
+		}
+	} else {
+		for (auto * interval : intervals) {
+			interval->calcSpillWeight(0);
+		}
 	}
 }
 

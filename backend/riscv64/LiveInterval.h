@@ -131,4 +131,7 @@ public:
 
 	/// 溢出栈偏移
 	int64_t spillSlot;
+
+	/// 该变量所在的最大循环深度（由LiveIntervalAnalysis根据LoopInfo填入）
+	int maxLoopDepth = 0;
 };
