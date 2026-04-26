@@ -182,6 +182,8 @@ set(IR_SRCS
 	ir/analysis/DominatorTree.cpp
 	ir/analysis/DominanceFrontier.h
 	ir/analysis/DominanceFrontier.cpp
+	ir/analysis/LoopInfo.h
+	ir/analysis/LoopInfo.cpp
 	ir/passes/Mem2Reg.h
 	ir/passes/Mem2Reg.cpp
 	ir/passes/PhiLowering.h
