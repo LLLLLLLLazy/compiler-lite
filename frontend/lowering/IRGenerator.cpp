@@ -9,6 +9,7 @@
 
 #include "IRGenerator.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -29,9 +30,12 @@
 #include "StoreInst.h"
 #include "ZExtInst.h"
 
+/// @brief 构造 AST 到结构化 IR 的生成器
 IRGenerator::IRGenerator(ast_node * _root, Module * _module) : root(_root), module(_module)
 {}
 
+/// @brief 执行 AST 到结构化 IR 的整体生成流程
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::run()
 {
     if (!root) {
@@ -50,6 +54,9 @@ bool IRGenerator::run()
     return visitCompileUnit(root);
 }
 
+/// @brief 预声明编译单元中的所有函数
+/// @param node 编译单元根节点
+/// @return true 表示预声明成功，false 表示存在重复定义等错误
 bool IRGenerator::declareCompileUnit(ast_node * node)
 {
     for (auto son : node->sons) {
@@ -78,6 +85,9 @@ bool IRGenerator::declareCompileUnit(ast_node * node)
     return true;
 }
 
+/// @brief 遍历编译单元并生成全局对象与函数体 IR
+/// @param node 编译单元根节点
+/// @return true 表示遍历成功，false 表示生成失败
 bool IRGenerator::visitCompileUnit(ast_node * node)
 {
     module->setCurrentFunction(nullptr);
@@ -107,6 +117,9 @@ bool IRGenerator::visitCompileUnit(ast_node * node)
     return true;
 }
 
+/// @brief 生成单条语句对应的 IR
+/// @param node 语句节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitStatement(ast_node * node)
 {
     if (!node) {
@@ -131,14 +144,17 @@ bool IRGenerator::visitStatement(ast_node * node)
         case ast_operator_type::AST_OP_DECL_STMT:
             return visitDeclStmt(node);
         default:
-            // Expression statement: evaluate and discard result
+            // 表达式语句只计算结果，不保留其值
             return visitExpr(node) != nullptr;
     }
 }
 
+/// @brief 生成函数定义对应的 IR
+/// @param node 函数定义节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitFuncDef(ast_node * node)
 {
-    (void) node->sons[0]; // typeNode – only used in declareCompileUnit
+    (void) node->sons[0]; // 返回类型节点仅在 declareCompileUnit 中使用
     ast_node * nameNode = node->sons[1];
     ast_node * blockNode = node->sons[3];
 
@@ -151,22 +167,22 @@ bool IRGenerator::visitFuncDef(ast_node * node)
     module->setCurrentFunction(func);
     module->enterScope();
 
-    // Reset per-function block IR state
+    // 重置当前函数的块级 IR 生成状态
     varAllocaMap.clear();
     breakTargets.clear();
     continueTargets.clear();
 
-    // Create entry block – all allocas will be inserted here
+    // 创建入口块，所有 alloca 都插入到这里
     entryBlock = func->newBasicBlock();
     currentBlock = entryBlock;
 
-    // Create alloca slots for function parameters and store their values
+    // 为形参创建栈槽并保存实参初值
     for (auto * param : func->getParams()) {
         if (param->getName().empty()) {
             continue;
         }
 
-        // Create a LocalVariable entry in the scope stack for this param name
+        // 为形参名在作用域栈中创建一个局部变量条目
         Value * paramLocal = module->newVarValue(param->getType(), param->getName());
         if (!paramLocal) {
             module->leaveScope();
@@ -177,11 +193,11 @@ bool IRGenerator::visitFuncDef(ast_node * node)
         AllocaInst * slot = emitAlloca(param->getType());
         varAllocaMap[paramLocal] = slot;
 
-        // Store the actual param value into the alloca slot
+        // 将传入的形参值写入对应栈槽
         emitToBlock(new StoreInst(func, param, slot));
     }
 
-    // Visit function body
+    // 遍历函数体
     blockNode->needScope = false;
     if (!visitBlock(blockNode)) {
         module->leaveScope();
@@ -189,7 +205,7 @@ bool IRGenerator::visitFuncDef(ast_node * node)
         return false;
     }
 
-    // Ensure the current block is properly terminated
+    // 保证当前基本块以合法的终结指令结束
     if (!isTerminated()) {
         if (func->getReturnType()->isVoidType()) {
             emitToBlock(new ReturnInst(func, nullptr));
@@ -203,6 +219,9 @@ bool IRGenerator::visitFuncDef(ast_node * node)
     return true;
 }
 
+/// @brief 生成语句块对应的 IR
+/// @param node 语句块节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitBlock(ast_node * node)
 {
     if (node->needScope) {
@@ -225,6 +244,9 @@ bool IRGenerator::visitBlock(ast_node * node)
     return true;
 }
 
+/// @brief 生成返回语句对应的 IR
+/// @param node return 语句节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitReturn(ast_node * node)
 {
     Function * func = currentFunction();
@@ -234,6 +256,11 @@ bool IRGenerator::visitReturn(ast_node * node)
 
     ReturnInst * retInst;
     if (!node->sons.empty()) {
+        if (func->getReturnType()->isVoidType()) {
+            minic_log(LOG_ERROR, "void 函数(%s)不能返回值", func->getName().c_str());
+            return false;
+        }
+
         Value * retVal = visitExpr(node->sons[0]);
         if (!retVal) {
             return false;
@@ -243,16 +270,23 @@ bool IRGenerator::visitReturn(ast_node * node)
         }
         retInst = new ReturnInst(func, retVal);
     } else {
+        if (!func->getReturnType()->isVoidType()) {
+            minic_log(LOG_ERROR, "非 void 函数(%s)必须返回值", func->getName().c_str());
+            return false;
+        }
         retInst = new ReturnInst(func, nullptr);
     }
 
     emitToBlock(retInst);
 
-    // Switch to a fresh unreachable block so visitBlock can continue
+    // 切换到新的不可达块，便于继续遍历后续语句
     switchToBlock(newBlock());
     return true;
 }
 
+/// @brief 生成 if/if-else 语句对应的 IR
+/// @param node 条件语句节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitIf(ast_node * node)
 {
     Function * func = currentFunction();
@@ -314,6 +348,9 @@ bool IRGenerator::visitIf(ast_node * node)
     return true;
 }
 
+/// @brief 生成 while 循环对应的 IR
+/// @param node while 语句节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitWhile(ast_node * node)
 {
     Function * func = currentFunction();
@@ -322,12 +359,12 @@ bool IRGenerator::visitWhile(ast_node * node)
     BasicBlock * bodyBB = newBlock();
     BasicBlock * exitBB = newBlock();
 
-    // Jump from current block to the condition check
+    // 先从当前块跳转到条件判断块
     BasicBlock * fromBB = currentBlock;
     emitToBlock(new BranchInst(func, condBB));
     fromBB->linkSuccessor(condBB);
 
-    // Build condition block
+    // 构造条件判断块
     switchToBlock(condBB);
     Value * condValue = visitExpr(node->sons[0]);
     if (!condValue) {
@@ -338,7 +375,7 @@ bool IRGenerator::visitWhile(ast_node * node)
     condBB->linkSuccessor(bodyBB);
     condBB->linkSuccessor(exitBB);
 
-    // Build body block
+    // 构造循环体块
     breakTargets.push_back(exitBB);
     continueTargets.push_back(condBB);
 
@@ -361,6 +398,9 @@ bool IRGenerator::visitWhile(ast_node * node)
     return true;
 }
 
+/// @brief 生成 break 语句对应的 IR
+/// @param node break 语句节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitBreak(ast_node * node)
 {
     (void) node;
@@ -378,6 +418,9 @@ bool IRGenerator::visitBreak(ast_node * node)
     return true;
 }
 
+/// @brief 生成 continue 语句对应的 IR
+/// @param node continue 语句节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitContinue(ast_node * node)
 {
     (void) node;
@@ -395,6 +438,9 @@ bool IRGenerator::visitContinue(ast_node * node)
     return true;
 }
 
+/// @brief 生成赋值语句对应的 IR
+/// @param node 赋值语句节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitAssign(ast_node * node)
 {
     Value * var = module->findVarValue(node->sons[0]->name);
@@ -426,6 +472,9 @@ bool IRGenerator::visitAssign(ast_node * node)
     return true;
 }
 
+/// @brief 生成声明语句中各变量的 IR
+/// @param node 声明语句节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitDeclStmt(ast_node * node)
 {
     for (auto child : node->sons) {
@@ -436,6 +485,9 @@ bool IRGenerator::visitDeclStmt(ast_node * node)
     return true;
 }
 
+/// @brief 生成单个变量声明对应的 IR
+/// @param node 变量声明节点
+/// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitVarDecl(ast_node * node)
 {
     Type * declType = node->sons[0]->type;
@@ -464,7 +516,7 @@ bool IRGenerator::visitVarDecl(ast_node * node)
         return true;
     }
 
-    // Global variable
+    // 处理全局变量声明
     auto * globalVar = dynamic_cast<GlobalVariable *>(module->newVarValue(declType, varName));
     if (!globalVar) {
         minic_log(LOG_ERROR, "全局变量(%s)创建失败", varName.c_str());
@@ -472,17 +524,129 @@ bool IRGenerator::visitVarDecl(ast_node * node)
     }
 
     if (node->sons.size() >= 3) {
-        ast_node * initNode = node->sons[2];
-        if (initNode->node_type != ast_operator_type::AST_OP_LEAF_LITERAL_UINT) {
+        int32_t initValue = 0;
+        if (!evaluateGlobalIntConstExpr(node->sons[2], initValue)) {
             minic_log(LOG_ERROR, "全局变量(%s)只支持常量初始化", varName.c_str());
             return false;
         }
-        globalVar->setInitIntValue(static_cast<int32_t>(initNode->integer_val));
+        globalVar->setInitIntValue(initValue);
     }
 
     return true;
 }
 
+/// @brief 计算全局整型常量初始化表达式的值
+/// @param node 常量表达式节点
+/// @param result 输出的计算结果
+/// @return true 表示计算成功，false 表示表达式不合法
+bool IRGenerator::evaluateGlobalIntConstExpr(ast_node * node, int32_t & result)
+{
+    if (!node) {
+        return false;
+    }
+
+    switch (node->node_type) {
+        case ast_operator_type::AST_OP_LEAF_LITERAL_UINT:
+            result = static_cast<int32_t>(node->integer_val);
+            return true;
+
+        case ast_operator_type::AST_OP_NEG: {
+            int32_t operand = 0;
+            if (!evaluateGlobalIntConstExpr(node->sons[0], operand)) {
+                return false;
+            }
+            result = -operand;
+            return true;
+        }
+
+        case ast_operator_type::AST_OP_NOT: {
+            int32_t operand = 0;
+            if (!evaluateGlobalIntConstExpr(node->sons[0], operand)) {
+                return false;
+            }
+            result = !operand;
+            return true;
+        }
+
+        case ast_operator_type::AST_OP_ADD:
+        case ast_operator_type::AST_OP_SUB:
+        case ast_operator_type::AST_OP_MUL:
+        case ast_operator_type::AST_OP_DIV:
+        case ast_operator_type::AST_OP_MOD:
+        case ast_operator_type::AST_OP_LT:
+        case ast_operator_type::AST_OP_GT:
+        case ast_operator_type::AST_OP_LE:
+        case ast_operator_type::AST_OP_GE:
+        case ast_operator_type::AST_OP_EQ:
+        case ast_operator_type::AST_OP_NE:
+        case ast_operator_type::AST_OP_LAND:
+        case ast_operator_type::AST_OP_LOR: {
+            int32_t lhs = 0;
+            int32_t rhs = 0;
+            if (!evaluateGlobalIntConstExpr(node->sons[0], lhs) ||
+                !evaluateGlobalIntConstExpr(node->sons[1], rhs)) {
+                return false;
+            }
+
+            switch (node->node_type) {
+                case ast_operator_type::AST_OP_ADD:
+                    result = lhs + rhs;
+                    return true;
+                case ast_operator_type::AST_OP_SUB:
+                    result = lhs - rhs;
+                    return true;
+                case ast_operator_type::AST_OP_MUL:
+                    result = lhs * rhs;
+                    return true;
+                case ast_operator_type::AST_OP_DIV:
+                    if (rhs == 0) {
+                        return false;
+                    }
+                    result = lhs / rhs;
+                    return true;
+                case ast_operator_type::AST_OP_MOD:
+                    if (rhs == 0) {
+                        return false;
+                    }
+                    result = lhs % rhs;
+                    return true;
+                case ast_operator_type::AST_OP_LT:
+                    result = lhs < rhs;
+                    return true;
+                case ast_operator_type::AST_OP_GT:
+                    result = lhs > rhs;
+                    return true;
+                case ast_operator_type::AST_OP_LE:
+                    result = lhs <= rhs;
+                    return true;
+                case ast_operator_type::AST_OP_GE:
+                    result = lhs >= rhs;
+                    return true;
+                case ast_operator_type::AST_OP_EQ:
+                    result = lhs == rhs;
+                    return true;
+                case ast_operator_type::AST_OP_NE:
+                    result = lhs != rhs;
+                    return true;
+                case ast_operator_type::AST_OP_LAND:
+                    result = (lhs != 0) && (rhs != 0);
+                    return true;
+                case ast_operator_type::AST_OP_LOR:
+                    result = (lhs != 0) || (rhs != 0);
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        default:
+            return false;
+    }
+}
+
+/// @brief 生成表达式并返回其结果值
+/// @param node 表达式节点
+/// @return 表达式对应的 IR 值，失败时返回空指针
 Value * IRGenerator::visitExpr(ast_node * node)
 {
     if (!node) {
@@ -608,6 +772,9 @@ Value * IRGenerator::visitExpr(ast_node * node)
     }
 }
 
+/// @brief 生成函数调用表达式对应的 IR
+/// @param node 函数调用节点
+/// @return 调用结果值，失败时返回空指针
 Value * IRGenerator::visitFuncCall(ast_node * node)
 {
     std::string funcName = node->sons[0]->name;
@@ -646,6 +813,9 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
     return callInst;
 }
 
+/// @brief 生成变量访问表达式对应的 IR
+/// @param node 标识符节点
+/// @return 变量加载后的值，失败时返回空指针
 Value * IRGenerator::visitLeafVarId(ast_node * node)
 {
     Value * var = module->findVarValue(node->name);
@@ -671,6 +841,10 @@ Value * IRGenerator::visitLeafVarId(ast_node * node)
     return loadInst;
 }
 
+/// @brief 生成二元算术表达式对应的 IR
+/// @param node 表达式节点
+/// @param op 目标 IR 操作码
+/// @return 生成出的指令值，失败时返回空指针
 Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator op)
 {
     Value * lhs = visitExpr(node->sons[0]);
@@ -690,6 +864,10 @@ Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator op)
     return inst;
 }
 
+/// @brief 生成整数比较表达式对应的 IR
+/// @param node 表达式节点
+/// @param op 目标 IR 比较操作码
+/// @return 生成出的比较结果值，失败时返回空指针
 Value * IRGenerator::emitICmp(ast_node * node, IRInstOperator op)
 {
     Value * lhs = visitExpr(node->sons[0]);
@@ -709,6 +887,9 @@ Value * IRGenerator::emitICmp(ast_node * node, IRInstOperator op)
     return inst;
 }
 
+/// @brief 生成一元取负表达式对应的 IR
+/// @param node 表达式节点
+/// @return 生成出的结果值，失败时返回空指针
 Value * IRGenerator::emitNeg(ast_node * node)
 {
     Value * operand = visitExpr(node->sons[0]);
@@ -723,6 +904,9 @@ Value * IRGenerator::emitNeg(ast_node * node)
     return inst;
 }
 
+/// @brief 生成逻辑非表达式对应的 IR
+/// @param node 表达式节点
+/// @return 生成出的结果值，失败时返回空指针
 Value * IRGenerator::emitNot(ast_node * node)
 {
     Value * operand = visitExpr(node->sons[0]);
@@ -737,6 +921,9 @@ Value * IRGenerator::emitNot(ast_node * node)
     return inst;
 }
 
+/// @brief 将整型值规范化为布尔值
+/// @param value 输入值
+/// @return 已经是布尔值或新生成的布尔比较结果
 Value * IRGenerator::emitBoolize(Value * value)
 {
     if (value->getType()->isInt1Byte()) {
@@ -748,6 +935,9 @@ Value * IRGenerator::emitBoolize(Value * value)
     return inst;
 }
 
+/// @brief 将 i1 类型的值扩展为 i32
+/// @param value 输入值
+/// @return 原值或新生成的零扩展结果
 Value * IRGenerator::ensureI32(Value * value)
 {
     if (!value->getType()->isInt1Byte()) {
@@ -758,26 +948,36 @@ Value * IRGenerator::ensureI32(Value * value)
     return zext;
 }
 
+/// @brief 获取当前正在生成的函数对象
+/// @return 当前函数对象
 Function * IRGenerator::currentFunction() const
 {
     return module->getCurrentFunction();
 }
 
+/// @brief 在当前函数中创建一个新的基本块
+/// @return 新创建的基本块
 BasicBlock * IRGenerator::newBlock()
 {
     return currentFunction()->newBasicBlock();
 }
 
+/// @brief 切换当前指令插入位置到指定基本块
+/// @param bb 目标基本块
 void IRGenerator::switchToBlock(BasicBlock * bb)
 {
     currentBlock = bb;
 }
 
+/// @brief 判断当前基本块是否已以终结指令结束
+/// @return true 表示已终结，false 表示仍可继续追加指令
 bool IRGenerator::isTerminated() const
 {
     return currentBlock != nullptr && currentBlock->isTerminated();
 }
 
+/// @brief 向当前基本块追加一条指令
+/// @param inst 待追加的指令
 void IRGenerator::emitToBlock(Instruction * inst)
 {
     if (currentBlock) {
@@ -785,17 +985,22 @@ void IRGenerator::emitToBlock(Instruction * inst)
     }
 }
 
+/// @brief 在入口基本块插入栈分配指令
+/// @param type 待分配对象的类型
+/// @return 新创建的 alloca 指令
 AllocaInst * IRGenerator::emitAlloca(Type * type)
 {
     auto * alloca = new AllocaInst(currentFunction(), type);
-    // Insert at the front of the entry block so all allocas appear before any
-    // regular instructions, regardless of when (during the traversal) they
-    // were emitted.  The order among allocas is reversed but that is harmless.
+    // 插入到入口块开头，确保所有 alloca 都位于普通指令之前。
+    // 即使在遍历中较晚生成，放在前面也不会影响语义；alloca 之间顺序反转是无害的。
     entryBlock->getInstructions().push_front(alloca);
     alloca->setParentBlock(entryBlock);
     return alloca;
 }
 
+/// @brief 获取变量对应的栈槽，必要时延迟创建
+/// @param var 目标变量
+/// @return 变量对应的 alloca 指令
 AllocaInst * IRGenerator::getOrCreateVarSlot(Value * var)
 {
     auto it = varAllocaMap.find(var);
