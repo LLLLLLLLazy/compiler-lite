@@ -173,14 +173,14 @@ public:
 	/// @param rs_reg_no 结果寄存器
 	/// @param base_reg_no 基址寄存器
 	/// @param disp 偏移
-	void load_base(int rs_reg_no, int base_reg_no, int disp);
+	void load_base(int rs_reg_no, int base_reg_no, int disp, bool wide = false);
 
 	/// @brief Store指令，基址寻址 sw src, offset(base)
 	/// @param src_reg_no 源寄存器
 	/// @param base_reg_no 基址寄存器
 	/// @param disp 偏移
 	/// @param tmp_reg_no 可能需要临时寄存器编号
-	void store_base(int src_reg_no, int base_reg_no, int disp, int tmp_reg_no);
+	void store_base(int src_reg_no, int base_reg_no, int disp, int tmp_reg_no, bool wide = false);
 
 	/// @brief 标签指令（用于BasicBlock标签输出）
 	/// @param name 标签名

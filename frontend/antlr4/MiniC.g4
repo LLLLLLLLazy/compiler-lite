@@ -11,9 +11,12 @@ grammar MiniC;
 // 语法规则描述：EBNF范式
 
 // 源文件编译单元定义
-compileUnit: (funcDef | varDecl)* EOF;
+compileUnit: (funcDef | decl)* EOF;
 
-// 函数定义，支持 void/int 返回类型与 int 形参
+// 声明
+decl: constDecl | varDecl;
+
+// 函数定义，支持 void/int 返回类型
 funcDef: funcType T_ID T_L_PAREN formalParamList? T_R_PAREN block;
 
 // 函数返回类型
@@ -22,8 +25,11 @@ funcType: T_INT | T_VOID;
 // 形参列表
 formalParamList: formalParam (T_COMMA formalParam)*;
 
-// 单个形参，目前仅支持 int 形参
-formalParam: basicType T_ID;
+// 单个形参，支持标量与数组形参
+formalParam: basicType T_ID formalParamDims?;
+
+// 数组形参维度：第一维可以省略
+formalParamDims: T_L_BRACK T_R_BRACK (T_L_BRACK expr T_R_BRACK)*;
 
 // 语句块看用作函数体，这里允许多个语句，并且不含任何语句
 block: T_L_BRACE blockItemList? T_R_BRACE;
@@ -31,17 +37,29 @@ block: T_L_BRACE blockItemList? T_R_BRACE;
 // 每个ItemList可包含至少一个Item
 blockItemList: blockItem+;
 
-// 每个Item可以是一个语句，或者变量声明语句
-blockItem: statement | varDecl;
+// 每个Item可以是一个语句，或者声明语句
+blockItem: statement | decl;
+
+// 常量声明
+constDecl: T_CONST basicType constDef (T_COMMA constDef)* T_SEMICOLON;
 
 // 变量声明，支持变量定义时初始化
 varDecl: basicType varDef (T_COMMA varDef)* T_SEMICOLON;
+
+// 常量定义
+constDef: T_ID arrayDefDims? T_ASSIGN initVal;
 
 // 基本类型
 basicType: T_INT;
 
 // 变量定义
-varDef: T_ID | T_ID T_ASSIGN expr;
+varDef: T_ID arrayDefDims? (T_ASSIGN initVal)?;
+
+// 数组定义维度
+arrayDefDims: (T_L_BRACK expr T_R_BRACK)+;
+
+// 初始化值
+initVal: expr | T_L_BRACE (initVal (T_COMMA initVal)*)? T_COMMA? T_R_BRACE;
 
 // 目前语句支持return、赋值、分支与循环
 statement:
@@ -100,12 +118,14 @@ primaryExp: T_L_PAREN expr T_R_PAREN | T_DIGIT | lVal;
 realParamList: expr (T_COMMA expr)*;
 
 // 左值表达式
-lVal: T_ID;
+lVal: T_ID (T_L_BRACK expr T_R_BRACK)*;
 
 // 用正规式来进行词法规则的描述
 
 T_L_PAREN: '(';
 T_R_PAREN: ')';
+T_L_BRACK: '[';
+T_R_BRACK: ']';
 T_SEMICOLON: ';';
 T_L_BRACE: '{';
 T_R_BRACE: '}';
@@ -136,6 +156,7 @@ T_WHILE: 'while';
 T_BREAK: 'break';
 T_CONTINUE: 'continue';
 T_RETURN: 'return';
+T_CONST: 'const';
 T_INT: 'int';
 T_VOID: 'void';
 
