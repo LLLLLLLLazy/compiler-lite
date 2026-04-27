@@ -66,6 +66,15 @@ string getNodeName(ast_node * astnode)
 		case ast_operator_type::AST_OP_DECL_STMT:
 			nodeName = "decl-stmt";
 			break;
+		case ast_operator_type::AST_OP_ARRAY_DIMS:
+			nodeName = "array-dims";
+			break;
+		case ast_operator_type::AST_OP_INIT_LIST:
+			nodeName = "init-list";
+			break;
+		case ast_operator_type::AST_OP_ARRAY_SUBSCRIPT:
+			nodeName = "[]";
+			break;
 		case ast_operator_type::AST_OP_ADD:
 			nodeName = "+";
 			break;
