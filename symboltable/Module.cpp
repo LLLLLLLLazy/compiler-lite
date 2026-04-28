@@ -10,6 +10,7 @@
 #include "Common.h"
 #include "FunctionType.h"
 #include "IntegerType.h"
+#include "PointerType.h"
 #include "ScopeStack.h"
 #include "VoidType.h"
 
@@ -24,6 +25,10 @@ Module::Module(std::string _name) : name(std::move(_name))
     (void) newFunction("getint", IntegerType::getTypeInt(), {}, true);
     (void) newFunction("putch", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt(), ""}}, true);
     (void) newFunction("getch", IntegerType::getTypeInt(), {}, true);
+    auto * intPtrType = const_cast<PointerType *>(PointerType::get(IntegerType::getTypeInt()));
+    (void) newFunction("getarray", IntegerType::getTypeInt(), {new FormalParam{intPtrType, ""}}, true);
+    (void) newFunction(
+        "putarray", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt(), ""}, new FormalParam{intPtrType, ""}}, true);
 }
 
 /// @brief 进入一层新的作用域

@@ -43,6 +43,9 @@ protected:
 	/// @return AST的节点
 	std::any visitCompileUnit(MiniCParser::CompileUnitContext * ctx) override;
 
+	/// @brief 声明的遍历
+	std::any visitDecl(MiniCParser::DeclContext * ctx) override;
+
 	/// @brief 非终结运算符funcDef的遍历
 	/// @param ctx CST上下文
 	/// @return AST的节点
@@ -77,6 +80,12 @@ protected:
 	/// @param ctx CST上下文
 	/// @return AST的节点
 	std::any visitBlockItem(MiniCParser::BlockItemContext * ctx) override;
+
+	/// @brief 常量声明的遍历
+	std::any visitConstDecl(MiniCParser::ConstDeclContext * ctx) override;
+
+	/// @brief 常量定义的遍历
+	std::any visitConstDef(MiniCParser::ConstDefContext * ctx) override;
 
 	/// @brief 非终结运算符statement中的遍历
 	/// @param ctx CST上下文
@@ -206,6 +215,9 @@ protected:
 	/// @return std::any AST的节点
 	///
 	std::any visitVarDef(MiniCParser::VarDefContext * ctx) override;
+
+	/// @brief 初始化值的分析
+	std::any visitInitVal(MiniCParser::InitValContext * ctx) override;
 
 	///
 	/// @brief 非终结符BasicType的分析

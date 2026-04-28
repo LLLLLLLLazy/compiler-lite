@@ -29,6 +29,7 @@
 #include "DominatorTree.h"
 #include "DominanceFrontier.h"
 #include "LoopInfo.h"
+#include "DCE.h"
 #include "Mem2Reg.h"
 #include "PhiLowering.h"
 #include "CodeGeneratorRiscV64.h"
@@ -83,16 +84,24 @@ static bool gFrontEndRecursiveDescentParsing = false;
 ///
 static bool gAsmAlsoShowIR = false;
 
+///
 /// @brief 优化的级别，即-O后面的数字，默认为0
+///
 static int gOptLevel = 0;
 
+///
 /// @brief 指定CPU目标架构，默认为RISCV64
+///
 static std::string gCPUTarget = "RISCV64";
 
+///
 /// @brief 输入源文件
+///
 static std::string gInputFile;
 
+///
 /// @brief 输出文件，不同的选项输出的内容不同
+///
 static std::string gOutputFile;
 
 static struct option long_options[] = {
@@ -282,21 +291,12 @@ static int compile(std::string inputFile, std::string outputFile)
 	Module * module = nullptr;
 
 	do {
-
-		// 编译过程主要包括：
-		// 1）词法语法分析生成 AST
-		// 2) 遍历 AST 生成结构化 IR
-		// 3) 基于结构化 IR 输出调试 IR 或 LLVM IR
-		//
-		// TODO：实现 RISCV64 后端支持
-
 		// 创建词法语法分析器
 		FrontEndExecutor * frontEndExecutor = new Antlr4Executor(inputFile);
 
 		// 前端执行：词法分析、语法分析后产生抽象语法树
 		subResult = frontEndExecutor->run();
 		if (!subResult) {
-
 			minic_log(LOG_ERROR, "前端分析错误");
 			break;
 		}
@@ -307,28 +307,20 @@ static int compile(std::string inputFile, std::string outputFile)
 		// 清理前端资源
 		delete frontEndExecutor;
 
+		// 显示抽象语法树（使用-T或--ast选项时）
 		if (gShowAST) {
-
-			// 遍历抽象语法树，生成抽象语法树图片
 			OutputAST(astRoot, outputFile);
-
-			// 清理抽象语法树
 			ast_node::Delete(astRoot);
-
-			// 设置返回结果：正常
 			result = 0;
-
 			break;
 		}
 
+		// 生成结构化 IR
 		module = new Module(inputFile);
 		IRGenerator irGenerator(astRoot, module);
 		subResult = irGenerator.run();
 		if (!subResult) {
-
 			minic_log(LOG_ERROR, "结构化IR生成错误");
-
-			// 清理抽象语法树
 			ast_node::Delete(astRoot);
 			break;
 		}
@@ -340,13 +332,12 @@ static int compile(std::string inputFile, std::string outputFile)
 
 		if (gShowStructIR) {
 			module->outputIR(outputFile);
-
 			result = 0;
 			break;
 		}
 
+		// 输出支配树与支配边界分析结果（使用--dom选项时）
 		if (gShowDomInfo) {
-			// 对每个函数计算支配树与支配边界，并输出到文件
 			std::string domOutput;
 			for (auto * func : module->getFunctionList()) {
 				if (func->isBuiltin() || func->getBlocks().empty()) {
@@ -361,7 +352,6 @@ static int compile(std::string inputFile, std::string outputFile)
 				li.print(domOutput);
 				domOutput += "\n";
 			}
-
 			std::ofstream domFile(outputFile, std::ios::out | std::ios::trunc);
 			if (!domFile.is_open()) {
 				minic_log(LOG_ERROR, "支配树输出文件打开失败");
@@ -380,8 +370,16 @@ static int compile(std::string inputFile, std::string outputFile)
 			}
 		}
 
+		// 运行 DCE，删除死代码
+		for (auto * func : module->getFunctionList()) {
+			if (!func->isBuiltin() && !func->getBlocks().empty()) {
+				DCE dce(func);
+				dce.run();
+			}
+		}
+
 		// 检查目标CPU架构是否支持
-		if (!gCPUTarget.empty() && gCPUTarget != "ARM32" && gCPUTarget != "RISCV64") {
+		if (!gCPUTarget.empty() && gCPUTarget != "RISCV64") {
 			minic_log(LOG_ERROR, "指定的目标CPU架构(%s)不支持", gCPUTarget.c_str());
 			break;
 		}
@@ -420,7 +418,7 @@ static int compile(std::string inputFile, std::string outputFile)
 		}
 
 		// RISC-V64后端编译路径（默认）
-		if (gCPUTarget == "RISCV64") {
+		{
 			// 对每个非内建函数执行Phi降级（将phi节点转换为copy指令）
 			for (auto * func : module->getFunctionList()) {
 				if (!func->isBuiltin() && !func->getBlocks().empty()) {
@@ -456,13 +454,6 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
-		// ARM32后端编译路径
-		if (gCPUTarget == "ARM32") {
-			// TODO: 实现ARM32后端
-			minic_log(LOG_ERROR, "ARM32后端暂未实现");
-			break;
-		}
-
 	} while (false);
 
 	if (module) {
@@ -476,7 +467,7 @@ static int compile(std::string inputFile, std::string outputFile)
 /// @brief 主程序
 /// @param argc
 /// @param argv
-/// @return
+/// @return compile的执行结果，0表示成功，非0表示失败
 int main(int argc, char * argv[])
 {
 	// 函数返回值，默认-1
@@ -489,19 +480,14 @@ int main(int argc, char * argv[])
 	// 参数解析
 	result = ArgsAnalysis(argc, argv);
 	if (result < 0) {
-
-		// 在终端显示程序帮助信息
+		// 如果参数解析失败，显示帮助信息
 		showHelp(argv[0]);
-
 		return -1;
 	}
 
 	// 显示帮助
 	if (gShowHelp) {
-
-		// 在终端显示程序帮助信息
 		showHelp(argv[0]);
-
 		return 0;
 	}
 

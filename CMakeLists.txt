@@ -84,10 +84,10 @@ set(FRONTEND_SRCS
 )
 
 # 是否编译后端代码
-set(BUILD_BACKEND ON CACHE BOOL "Enable/Disable backend (ARM32/RiscV64) compilation")
+set(BUILD_BACKEND ON CACHE BOOL "Enable/Disable backend (RiscV64) compilation")
+
 
 # 后端源代码集合
-if(BUILD_BACKEND)
 set(BACKEND_SRCS
 	# 后端共性代码
 	backend/CodeGenerator.cpp
@@ -120,9 +120,6 @@ set(BACKEND_SRCS
 	backend/riscv64/HeuristicSpillStrategy.cpp
 	backend/riscv64/HeuristicSpillStrategy.h
 )
-else()
-set(BACKEND_SRCS)
-endif()
 
 # 中间IR(ir)源代码集合
 set(IR_SRCS
@@ -149,6 +146,7 @@ set(IR_SRCS
 	ir/Types/IntegerType.cpp
 	ir/Types/FunctionType.h
 	ir/Types/PointerType.h
+	ir/Types/ArrayType.h
 	ir/Values/ConstInt.h
 	ir/Values/LocalVariable.h
 	ir/Values/GlobalVariable.h
@@ -177,6 +175,8 @@ set(IR_SRCS
 	ir/Instructions/ZExtInst.cpp
 	ir/Instructions/CopyInst.h
 	ir/Instructions/CopyInst.cpp
+	ir/Instructions/GetElementPtrInst.h
+	ir/Instructions/GetElementPtrInst.cpp
 	ir/Type.h
 	ir/analysis/DominatorTree.h
 	ir/analysis/DominatorTree.cpp
@@ -184,6 +184,8 @@ set(IR_SRCS
 	ir/analysis/DominanceFrontier.cpp
 	ir/analysis/LoopInfo.h
 	ir/analysis/LoopInfo.cpp
+	ir/passes/DCE.h
+	ir/passes/DCE.cpp
 	ir/passes/Mem2Reg.h
 	ir/passes/Mem2Reg.cpp
 	ir/passes/PhiLowering.h

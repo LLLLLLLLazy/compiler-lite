@@ -398,6 +398,7 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 			interval->calcSpillWeight(0);
 		}
 	}
+	}
 }
 
 /// @brief 根据活跃区间重叠关系构建干涉图

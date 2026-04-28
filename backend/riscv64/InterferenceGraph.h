@@ -20,6 +20,8 @@ class LiveInterval;
 /// 混合表示：邻接表（遍历邻居）+ 位向量（O(1)干涉查询）
 /// 节点通过LiveInterval的索引编号标识
 ///
+
+
 class InterferenceGraph {
 
 public:

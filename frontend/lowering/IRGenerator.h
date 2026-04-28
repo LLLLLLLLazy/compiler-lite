@@ -16,6 +16,7 @@
 class AllocaInst;
 class BasicBlock;
 class Value;
+class Type;
 
 class IRGenerator {
 
@@ -69,6 +70,9 @@ private:
     /// @brief 生成单个变量声明对应的 IR
     bool visitVarDecl(ast_node * node);
 
+    /// @brief 生成左值对应的地址
+    Value * visitLValueAddress(ast_node * node);
+
     /// @brief 生成表达式并返回结果值
     Value * visitExpr(ast_node * node);
 
@@ -77,6 +81,31 @@ private:
 
     /// @brief 生成变量访问表达式并返回加载后的值
     Value * visitLeafVarId(ast_node * node);
+
+    /// @brief 获取声明节点的最终类型
+    Type * buildDeclaredType(ast_node * declNode, bool forParam = false);
+
+    /// @brief 计算整型常量表达式
+    bool evaluateConstIntExpr(ast_node * node, int32_t & result);
+
+    /// @brief 获取变量对象的地址（全局变量或局部栈槽）
+    Value * getAddressOfVariable(Value * var);
+
+    /// @brief 生成数组/指针元素地址
+    Value * emitGEP(Value * basePtr, Value * index, bool decayArray);
+
+    /// @brief 按 C 初始化规则对地址执行初始化
+    bool emitInitializer(Value * addr, Type * type, ast_node * initNode);
+
+    /// @brief 将聚合初始化列表写入数组对象
+    bool emitArrayInitializer(
+        Value * addr, Type * type, const std::vector<ast_node *> & items, std::size_t begin, std::size_t end);
+
+    /// @brief 将对象全部清零
+    bool emitZeroInitializer(Value * addr, Type * type);
+
+    /// @brief 统计聚合对象包含的标量元素个数
+    std::size_t countScalarSlots(Type * type) const;
 
     /// @brief 生成二元算术表达式对应的 IR
     Value * emitBinary(ast_node * node, IRInstOperator op);
@@ -136,4 +165,6 @@ private:
 
     std::vector<BasicBlock *> breakTargets;
     std::vector<BasicBlock *> continueTargets;
+
+    std::vector<std::unordered_map<std::string, int32_t>> constBindings;
 };

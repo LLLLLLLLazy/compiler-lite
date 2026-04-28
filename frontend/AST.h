@@ -93,6 +93,15 @@ enum class ast_operator_type : int {
 	/// @brief 变量声明
 	AST_OP_VAR_DECL,
 
+	/// @brief 数组维度列表
+	AST_OP_ARRAY_DIMS,
+
+	/// @brief 初始化列表
+	AST_OP_INIT_LIST,
+
+	/// @brief 数组下标访问
+	AST_OP_ARRAY_SUBSCRIPT,
+
 	/// @brief 二元运算符+
 	AST_OP_ADD,
 
@@ -343,4 +352,10 @@ public:
 	/// @brief 在进入block等节点时是否要进行作用域管理。默认要做。
 	///
 	bool needScope = true;
+
+	/// @brief 当前声明是否为 const 声明
+	bool isConst = false;
+
+	/// @brief 数组形参是否省略了第一维
+	bool firstDimOmitted = false;
 };
