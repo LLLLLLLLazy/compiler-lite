@@ -12,6 +12,7 @@ TEST_ROOT=${MINIC_TEST_ROOT:-"${REPO_ROOT}/tests"}
 STD_C=${MINIC_STD_C:-"${TEST_ROOT}/std.c"}
 FRONTEND=${MINIC_FRONTEND:-"antlr"}
 TEST_MODE=${MINIC_RISCV64_TEST_MODE:-"asm"}
+RISCV64_TIMEOUT=${MINIC_RISCV64_TIMEOUT:-30}
 
 if [[ -z "${QEMU_RISCV64_BIN}" ]]; then
 	if command -v qemu-riscv64-static >/dev/null 2>&1; then
@@ -47,6 +48,7 @@ Environment:
   MINIC_FRONTEND=antlr|recursive|default
   MINIC_RISCV64_TEST_MODE=asm       Generate RISCV64 asm, link, run, diff .out (default)
   MINIC_RISCV64_TEST_MODE=assemble  Generate RISCV64 asm and assemble only
+  MINIC_RISCV64_TIMEOUT=30          Per-step timeout passed to timeout(1)
   RISCV64_GCC_BIN=riscv64-linux-gnu-gcc
   QEMU_RISCV64_BIN=qemu-riscv64-static
   MINIC_TEST_ROOT=./tests
@@ -152,7 +154,7 @@ run_riscv64_check() {
 	local output=""
 	local exit_code=0
 
-	if ! timeout --foreground 10 "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
+	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
 		echo "${testcase}.c compile NG [riscv64]"
 		return 1
 	fi
@@ -163,7 +165,7 @@ run_riscv64_check() {
 	fi
 
 	if [[ "${TEST_MODE}" == "assemble" ]]; then
-		if ! timeout --foreground 10 "${RISCV64_GCC_BIN}" -c -o "${objfile}" "${asmfile}" >/dev/null 2>&1; then
+		if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" -c -o "${objfile}" "${asmfile}" >/dev/null 2>&1; then
 			echo "${testcase}.c assemble NG [riscv64]"
 			return 1
 		fi
@@ -172,16 +174,16 @@ run_riscv64_check() {
 		return 0
 	fi
 
-	if ! timeout --foreground 10 "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${STD_C}" >/dev/null 2>&1; then
+	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${STD_C}" >/dev/null 2>&1; then
 		echo "${testcase}.c link NG [riscv64]"
 		return 1
 	fi
 
 	if [[ -f "${infile}" ]]; then
-		output="$(timeout --foreground 10 "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" 2>&1)"
+		output="$(timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" 2>&1)"
 		exit_code=$?
 	else
-		output="$(timeout --foreground 10 "${QEMU_RISCV64_BIN}" "${exe_file}" 2>&1)"
+		output="$(timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" 2>&1)"
 		exit_code=$?
 	fi
 

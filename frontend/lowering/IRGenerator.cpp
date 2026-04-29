@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -74,6 +75,8 @@ bool isArrayType(Type * type)
 {
     return type != nullptr && type->isArrayType();
 }
+
+constexpr std::size_t kFlatZeroInitThreshold = 256;
 
 Type * getVariableValueType(Value * var)
 {
@@ -828,6 +831,80 @@ std::size_t IRGenerator::countScalarSlots(Type * type) const
     return static_cast<std::size_t>(arrayType->getNumElements()) * countScalarSlots(arrayType->getElementType());
 }
 
+bool IRGenerator::emitFlatLoopZeroInitializer(Value * addr, Type * type)
+{
+    std::size_t scalarCount = countScalarSlots(type);
+    if (scalarCount == 0 || scalarCount > static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
+        minic_log(LOG_ERROR, "数组零初始化规模超出支持范围");
+        return false;
+    }
+
+    Type * scalarType = type;
+    Value * scalarBaseAddr = addr;
+    while (auto * arrayType = dynamic_cast<ArrayType *>(scalarType)) {
+        scalarBaseAddr = emitGEP(scalarBaseAddr, module->newConstInt(0), true);
+        if (!scalarBaseAddr) {
+            return false;
+        }
+        scalarType = arrayType->getElementType();
+    }
+
+    auto * indexSlot = emitAlloca(IntegerType::getTypeInt());
+    emitToBlock(new StoreInst(currentFunction(), module->newConstInt(0), indexSlot));
+
+    Function * func = currentFunction();
+    BasicBlock * condBB = newBlock();
+    BasicBlock * bodyBB = newBlock();
+    BasicBlock * exitBB = newBlock();
+
+    BasicBlock * fromBB = currentBlock;
+    emitToBlock(new BranchInst(func, condBB));
+    fromBB->linkSuccessor(condBB);
+
+    switchToBlock(condBB);
+    auto * indexValue = new LoadInst(func, indexSlot, IntegerType::getTypeInt());
+    emitToBlock(indexValue);
+    auto * condValue = new ICmpInst(
+        func,
+        IRInstOperator::IRINST_OP_LT_I,
+        indexValue,
+        module->newConstInt(static_cast<int32_t>(scalarCount)),
+        IntegerType::getTypeBool());
+    emitToBlock(condValue);
+    emitToBlock(new CondBranchInst(func, condValue, bodyBB, exitBB));
+    condBB->linkSuccessor(bodyBB);
+    condBB->linkSuccessor(exitBB);
+
+    switchToBlock(bodyBB);
+    auto * bodyIndex = new LoadInst(func, indexSlot, IntegerType::getTypeInt());
+    emitToBlock(bodyIndex);
+    Value * elemAddr = emitGEP(scalarBaseAddr, bodyIndex, false);
+    if (!elemAddr) {
+        return false;
+    }
+
+    Value * zeroValue = scalarType->isFloatType()
+                            ? static_cast<Value *>(module->newConstFloat(0.0f))
+                            : static_cast<Value *>(module->newConstInt(0));
+    emitToBlock(new StoreInst(func, zeroValue, elemAddr));
+
+    auto * nextIndex = new BinaryInst(
+        func,
+        IRInstOperator::IRINST_OP_ADD_I,
+        bodyIndex,
+        module->newConstInt(1),
+        IntegerType::getTypeInt());
+    emitToBlock(nextIndex);
+    emitToBlock(new StoreInst(func, nextIndex, indexSlot));
+
+    BasicBlock * bodyEnd = currentBlock;
+    emitToBlock(new BranchInst(func, condBB));
+    bodyEnd->linkSuccessor(condBB);
+
+    switchToBlock(exitBB);
+    return true;
+}
+
 bool IRGenerator::emitZeroInitializer(Value * addr, Type * type)
 {
     auto * arrayType = dynamic_cast<ArrayType *>(type);
@@ -837,6 +914,10 @@ bool IRGenerator::emitZeroInitializer(Value * addr, Type * type)
                                   : static_cast<Value *>(module->newConstInt(0));
         emitToBlock(new StoreInst(currentFunction(), zeroValue, addr));
         return true;
+    }
+
+    if (countScalarSlots(type) >= kFlatZeroInitThreshold) {
+        return emitFlatLoopZeroInitializer(addr, type);
     }
 
     for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
