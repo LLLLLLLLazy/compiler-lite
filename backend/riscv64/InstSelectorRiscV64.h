@@ -48,7 +48,14 @@ public:
 private:
 	struct OperandReg {
 		int reg = -1;
-		bool borrowed = false;
+		LocalTempManager::Lease lease;
+
+		OperandReg() = default;
+		explicit OperandReg(int _reg) : reg(_reg)
+		{}
+		explicit OperandReg(LocalTempManager::Lease _lease)
+			: reg(_lease.reg()), lease(std::move(_lease))
+		{}
 	};
 
 	/// @brief 指令翻译处理函数类型
@@ -145,7 +152,7 @@ private:
 	OperandReg loadOperand(Value * val, Instruction * inst, int excludeReg = -1, int preferredReg = -1);
 
 	/// @brief 释放通过loadOperand借用的临时寄存器
-	void releaseOperand(const OperandReg & operand);
+	void releaseOperand(OperandReg & operand);
 
 	/// @brief 将寄存器值存储到Value的目标位置
 	/// @param val 目标Value

@@ -31,6 +31,29 @@ class Value;
 class LocalTempManager {
 
 public:
+	class Lease {
+	public:
+		Lease() = default;
+		Lease(const Lease &) = delete;
+		Lease & operator=(const Lease &) = delete;
+		Lease(Lease && other) noexcept;
+		Lease & operator=(Lease && other) noexcept;
+		~Lease();
+
+		[[nodiscard]] int reg() const { return regId; }
+		[[nodiscard]] bool valid() const { return owner != nullptr && regId >= 0; }
+		void release();
+
+	private:
+		friend class LocalTempManager;
+
+		Lease(LocalTempManager * _owner, int _regId) : owner(_owner), regId(_regId)
+		{}
+
+		LocalTempManager * owner = nullptr;
+		int regId = -1;
+	};
+
 	/// @brief 构造函数
 	/// @param pool 全局可用物理寄存器池
 	/// @param allocMap 全局寄存器分配映射（Value* -> RegAllocInfo）
@@ -45,18 +68,14 @@ public:
 	/// @brief 为当前指令借用一个空闲物理寄存器
 	/// @param inst 当前正在翻译的IR指令
 	/// @param excludeReg 排除的物理寄存器编号（如dstReg），-1表示不排除
-	/// @return 物理寄存器编号
-	int borrow(Instruction * inst, int excludeReg = -1);
+	/// @return 寄存器租约
+	Lease borrow(Instruction * inst, int excludeReg = -1);
 
 	/// @brief 在当前IR指令的源操作数已经消费后借用临时寄存器
 	/// @param inst 当前正在翻译的IR指令
 	/// @param excludeReg 排除的物理寄存器编号
-	/// @return 物理寄存器编号
-	int borrowAfterUses(Instruction * inst, int excludeReg = -1);
-
-	/// @brief 归还借用的寄存器
-	/// @param reg 物理寄存器编号
-	void release(int reg);
+	/// @return 寄存器租约
+	Lease borrowAfterUses(Instruction * inst, int excludeReg = -1);
 
 	/// @brief 检查所有借出的寄存器是否已全部归还
 	/// @return 是否全部归还
@@ -77,6 +96,10 @@ private:
 
 	/// @brief 临时寄存器借用的通用实现
 	int borrowImpl(Instruction * inst, int excludeReg, bool afterUses);
+
+	/// @brief 归还借用的寄存器
+	/// @param reg 物理寄存器编号
+	void release(int reg);
 
 	/// @brief scratch物理寄存器池
 	std::vector<int> pool;
