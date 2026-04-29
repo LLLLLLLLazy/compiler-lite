@@ -812,7 +812,10 @@ bool IRGenerator::emitZeroInitializer(Value * addr, Type * type)
 {
     auto * arrayType = dynamic_cast<ArrayType *>(type);
     if (arrayType == nullptr) {
-        emitToBlock(new StoreInst(currentFunction(), module->newConstInt(0), addr));
+        Value * zeroValue = type->isFloatType()
+                                  ? static_cast<Value *>(module->newConstFloat(0.0f))
+                                  : static_cast<Value *>(module->newConstInt(0));
+        emitToBlock(new StoreInst(currentFunction(), zeroValue, addr));
         return true;
     }
 
