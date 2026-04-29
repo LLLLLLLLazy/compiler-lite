@@ -60,6 +60,11 @@ public:
         return storageSet.get(pointee);
     }
 
+    [[nodiscard]] int32_t getSize() const override
+    {
+        return 8;
+    }
+
     [[nodiscard]] std::string toString() const override
     {
         return pointeeType->toString() + "*";

@@ -11,6 +11,7 @@
 #include "GreedyRegAllocator.h"
 #include "ILocRiscV64.h"
 #include "Instruction.h"
+#include "LocalTempManager.h"
 
 class BasicBlock;
 class Value;
@@ -102,10 +103,12 @@ private:
 	/// @brief 生成64位加载指令（sd/ld）
 	/// @param reg 寄存器名
 	/// @param offset 栈偏移
-	void emitLoad64(const std::string & reg, int offset);
+	/// @param tmpReg 临时寄存器编号（用于大偏移地址计算）
+	void emitLoad64(const std::string & reg, int offset, int tmpReg);
 	/// @brief 生成栈指针调整指令
 	/// @param amount 调整量
-	void emitStackAdjust(int amount);
+	/// @param tmpReg 临时寄存器编号（用于大偏移地址计算）
+	void emitStackAdjust(int amount, int tmpReg);
 
 	/// @brief 获取Value分配的结果寄存器编号
 	/// @param val IR值
@@ -115,7 +118,8 @@ private:
 	/// @brief 将寄存器值存储到Value的目标位置
 	/// @param val 目标Value
 	/// @param srcReg 源寄存器编号
-	void storeResult(Value * val, int srcReg);
+	/// @param inst 当前IR指令（用于临时寄存器借用时的活跃性查询）
+	void storeResult(Value * val, int srcReg, Instruction * inst = nullptr);
 
 	/// @brief 生成基本块对应的标签名
 	/// @param bb 基本块
@@ -141,4 +145,7 @@ private:
 
 	/// @brief 是否输出线性IR（调试用）
 	bool showLinearIR = false;
+
+	/// @brief 动态临时寄存器管理器
+	LocalTempManager tempMgr;
 };

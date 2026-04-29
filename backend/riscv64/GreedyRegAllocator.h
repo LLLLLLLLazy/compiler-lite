@@ -5,15 +5,18 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "ILocRiscV64.h"
 #include "SpillStrategy.h"
 
 class Function;
+class Instruction;
 class InterferenceGraph;
 class LiveInterval;
 class Value;
@@ -100,6 +103,27 @@ public:
 		outgoingArgBytes = bytes;
 	}
 
+	/// @brief 获取可用寄存器池
+	/// @return 寄存器编号列表
+	const std::vector<int> & getAvailableRegs() const
+	{
+		return availableRegs;
+	}
+
+	/// @brief 获取指令编号映射（Instruction* -> 编号）
+	/// @return 指令编号映射
+	const std::map<class Instruction *, int> & getInstNumbering() const
+	{
+		return instNumbering;
+	}
+
+	/// @brief 获取虚拟寄存器活跃范围映射（Value* -> [start, end)）
+	/// @return 活跃范围映射
+	const std::unordered_map<class Value *, std::pair<int, int>> & getValueLiveRanges() const
+	{
+		return valueLiveRanges;
+	}
+
 	/// @brief 判断Value是否必须分配在栈上（如AllocaInst、全局变量等）
 	/// @param val 待判断的Value
 	/// @return 是否必须分配在栈上
@@ -180,4 +204,10 @@ private:
 
 	/// @brief 超出寄存器传递的调用参数占用字节数
 	int outgoingArgBytes = 0;
+
+	/// @brief 指令编号映射（Instruction* -> 编号），用于局部临时寄存器分配
+	std::map<class Instruction *, int> instNumbering;
+
+	/// @brief 虚拟寄存器活跃范围（Value* -> [start, end)），用于局部临时寄存器分配
+	std::unordered_map<class Value *, std::pair<int, int>> valueLiveRanges;
 };

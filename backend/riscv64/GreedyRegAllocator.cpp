@@ -53,6 +53,8 @@ void GreedyRegAllocator::allocate(Function * func)
 	allocationMap.clear();
 	spilledValues.clear();
 	intervalToIndex.clear();
+	instNumbering.clear();
+	valueLiveRanges.clear();
 	frameSize = 0;
 	outgoingArgBytes = 0;
 
@@ -87,6 +89,14 @@ void GreedyRegAllocator::allocate(Function * func)
 	runGreedy(intervals, analysis.getInterferenceGraph());
 	// 从活跃区间结果重建分配映射表
 	rebuildAllocationMap(intervals);
+
+	// 保存活跃性快照，供指令选择阶段的动态临时寄存器管理使用
+	instNumbering = analysis.getInstNumbering();
+	for (auto * interval : intervals) {
+		if (interval != nullptr && interval->getVReg() != nullptr) {
+			valueLiveRanges[interval->getVReg()] = {interval->getStart(), interval->getEnd()};
+		}
+	}
 }
 
 /// @brief 获取虚拟寄存器分配的物理寄存器编号
@@ -301,11 +311,12 @@ void GreedyRegAllocator::markSpilled(LiveInterval * interval)
 /// @param func 当前函数
 /// @return 可用寄存器编号列表
 ///
-/// 默认使用callee-saved寄存器s1-s11（编号9, 18-27）
-/// 若函数不含调用指令，还可使用caller-saved寄存器a0-a7和t0-t5
+/// 默认使用callee-saved寄存器s1-s11（编号9, 18-27）。
+/// t0-t6保留给指令选择阶段作为scratch寄存器，避免临时寄存器覆盖全局分配值。
+/// a0-a7承载形参，若作为分配目标会让prologue里的形参搬运产生覆盖，因此避开。
 std::vector<int> GreedyRegAllocator::buildRegisterPool(Function * func) const
 {
-	const bool hasCall = functionHasCall(func);
+	(void) func;
 
 	// callee-saved寄存器：s1-s11，在函数调用后仍保持值
 	std::vector<int> regs = {
@@ -321,11 +332,6 @@ std::vector<int> GreedyRegAllocator::buildRegisterPool(Function * func) const
 		26, // s10
 		27, // s11
 	};
-
-	// 无函数调用时，caller-saved寄存器也可使用
-	if (!hasCall) {
-		regs.insert(regs.end(), {10, 11, 12, 13, 14, 15, 16, 17, 28, 29, 30, 31});
-	}
 
 	return regs;
 }
