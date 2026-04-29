@@ -167,10 +167,21 @@ private:
 	/// @return 可用寄存器编号列表
 	std::vector<int> buildRegisterPool(Function * func) const;
 
-	/// @brief 判断函数是否包含函数调用
-	/// @param func 待判断的函数
-	/// @return 是否包含调用
-	bool functionHasCall(Function * func) const;
+	/// @brief 判断物理寄存器是否为调用者保存寄存器
+	/// @param reg 物理寄存器编号
+	/// @return 是否会被普通函数调用 clobber
+	static bool isCallerSavedReg(int reg);
+
+	/// @brief 判断活跃区间是否覆盖任一函数调用点
+	/// @param interval 活跃区间
+	/// @return 是否在调用点需要保持值
+	bool intervalCrossesCall(LiveInterval * interval) const;
+
+	/// @brief 判断某物理寄存器能否分配给指定活跃区间
+	/// @param interval 活跃区间
+	/// @param reg 物理寄存器编号
+	/// @return 是否可分配
+	bool canAssignReg(LiveInterval * interval, int reg) const;
 
 	/// @brief 获取活跃区间在排序列表中的索引
 	/// @param interval 活跃区间
@@ -198,6 +209,9 @@ private:
 
 	/// @brief 活跃区间到排序列表索引的映射
 	std::unordered_map<LiveInterval *, int> intervalToIndex;
+
+	/// @brief 当前函数中CallInst对应的指令编号列表
+	std::vector<int> callInstNumbers;
 
 	/// @brief 栈帧大小
 	int frameSize = 0;

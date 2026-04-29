@@ -3,8 +3,8 @@
 /// @brief 动态临时寄存器管理器，用于指令选择阶段的scratch寄存器分配
 ///
 /// 指令选择在翻译单条IR指令时需要临时寄存器（如加载左右操作数、计算地址等）。
-/// t0-t6由本管理器专用，按单条IR指令内的借用/归还关系动态分配，
-/// 避免硬编码某个固定scratch导致同一指令内部互相覆盖。
+/// 当t0-t6/a0-a7也参与全局寄存器分配时，临时寄存器必须避开当前指令
+/// 仍然活跃的全局分配值。
 ///
 #pragma once
 
@@ -23,7 +23,7 @@ class Value;
 /// @brief 动态临时寄存器管理器
 ///
 /// 在指令选择过程中管理临时寄存器的借用与归还：
-/// - borrow(): 从t0-t6中查找当前尚未借出的物理寄存器
+/// - borrow(): 从可分配寄存器池中查找当前尚未借出且不承载live值的物理寄存器
 /// - release(): 归还借用的寄存器
 ///
 /// 所有借用必须在同一条IR指令的翻译结束前归还（即不能跨translate_*调用）。
@@ -32,7 +32,7 @@ class LocalTempManager {
 
 public:
 	/// @brief 构造函数
-	/// @param pool 全局可用物理寄存器池（保留参数用于接口兼容；scratch固定为t0-t6）
+	/// @param pool 全局可用物理寄存器池
 	/// @param allocMap 全局寄存器分配映射（Value* -> RegAllocInfo）
 	/// @param instNumbering 指令编号映射（Instruction* -> 编号）
 	/// @param valueLiveRanges 虚拟寄存器活跃范围（Value* -> [start, end)）
@@ -48,6 +48,12 @@ public:
 	/// @return 物理寄存器编号
 	int borrow(Instruction * inst, int excludeReg = -1);
 
+	/// @brief 在当前IR指令的源操作数已经消费后借用临时寄存器
+	/// @param inst 当前正在翻译的IR指令
+	/// @param excludeReg 排除的物理寄存器编号
+	/// @return 物理寄存器编号
+	int borrowAfterUses(Instruction * inst, int excludeReg = -1);
+
 	/// @brief 归还借用的寄存器
 	/// @param reg 物理寄存器编号
 	void release(int reg);
@@ -57,9 +63,33 @@ public:
 	bool allReleased() const { return borrowed.empty(); }
 
 private:
-	/// @brief scratch物理寄存器池（t0-t6）
+	/// @brief 查询当前指令编号
+	/// @param inst 当前IR指令
+	/// @return 指令编号，找不到则返回-1
+	int currentInstNum(Instruction * inst) const;
+
+	/// @brief 判断物理寄存器在某条IR指令处是否承载live值
+	/// @param reg 物理寄存器编号
+	/// @param instNum 指令编号
+	/// @param afterUses 是否允许复用最后一次使用在当前指令的寄存器
+	/// @return 是否不可作为临时寄存器借用
+	bool isLiveAllocatedReg(int reg, int instNum, bool afterUses) const;
+
+	/// @brief 临时寄存器借用的通用实现
+	int borrowImpl(Instruction * inst, int excludeReg, bool afterUses);
+
+	/// @brief scratch物理寄存器池
 	std::vector<int> pool;
 
 	/// @brief 当前被借出的寄存器集合
 	std::unordered_set<int> borrowed;
+
+	/// @brief 全局寄存器分配映射
+	const std::unordered_map<Value *, RegAllocInfo> & allocMap;
+
+	/// @brief 指令编号映射
+	const std::map<Instruction *, int> & instNumbering;
+
+	/// @brief 虚拟寄存器活跃范围
+	const std::unordered_map<Value *, std::pair<int, int>> & valueLiveRanges;
 };

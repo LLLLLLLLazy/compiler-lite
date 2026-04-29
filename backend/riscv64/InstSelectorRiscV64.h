@@ -46,6 +46,11 @@ public:
 	}
 
 private:
+	struct OperandReg {
+		int reg = -1;
+		bool borrowed = false;
+	};
+
 	/// @brief 指令翻译处理函数类型
 	typedef void (InstSelectorRiscV64::*translate_handler)(Instruction *);
 
@@ -114,6 +119,17 @@ private:
 	/// @param val IR值
 	/// @return 物理寄存器编号
 	int getResultReg(Value * val) const;
+
+	/// @brief 获取只读操作数所在寄存器，必要时借用临时寄存器加载
+	/// @param val 操作数
+	/// @param inst 当前IR指令
+	/// @param excludeReg 借用临时寄存器时需要排除的寄存器
+	/// @param preferredReg 可直接承载该操作数的首选寄存器
+	/// @return 操作数寄存器及是否需要释放
+	OperandReg loadOperand(Value * val, Instruction * inst, int excludeReg = -1, int preferredReg = -1);
+
+	/// @brief 释放通过loadOperand借用的临时寄存器
+	void releaseOperand(const OperandReg & operand);
 
 	/// @brief 将寄存器值存储到Value的目标位置
 	/// @param val 目标Value
