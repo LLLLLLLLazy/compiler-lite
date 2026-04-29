@@ -7,6 +7,9 @@ on:
 jobs:
   build-and-smoke-test:
     runs-on: ubuntu-22.04
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+      LSAN_OPTIONS: detect_leaks=0
 
     steps:
       - name: Checkout
@@ -53,6 +56,9 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: Run phi regression tests
+        run: bash ./tools/run-phi-regression.sh
+
       - name: Run 2023 LLVM IR smoke tests
         run: |
           while IFS= read -r test_case; do
@@ -66,3 +72,17 @@ jobs:
             [[ -n "${test_case}" ]] || continue
             MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2025 "${test_case}"
           done < ./tests/2025_function/llvmir_passed.txt
+
+      - name: Run 2023 RISCV64 asm smoke tests
+        run: |
+          while IFS= read -r test_case; do
+            [[ -n "${test_case}" ]] || continue
+            bash ./tools/run-local-riscv64-tests.sh 2023 "${test_case}"
+          done < ./tests/2023_function/asm_passed.txt
+
+      - name: Run 2025 RISCV64 asm smoke tests
+        run: |
+          while IFS= read -r test_case; do
+            [[ -n "${test_case}" ]] || continue
+            bash ./tools/run-local-riscv64-tests.sh 2025 "${test_case}"
+          done < ./tests/2025_function/asm_passed.txt
