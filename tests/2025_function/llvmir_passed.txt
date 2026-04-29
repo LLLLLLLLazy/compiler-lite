@@ -27,6 +27,7 @@
 2025_func_021_if_test2
 2025_func_022_if_test3
 2025_func_023_if_test4
+2025_func_024_array_only
 2025_func_024_if_test5
 2025_func_025_scope3
 2025_func_025_while_if
@@ -57,6 +58,9 @@
 2025_func_048_assign_complex_expr
 2025_func_049_if_complex_expr
 2025_func_052_scope
+2025_func_059_sort_test5
+2025_func_061_sort_test7
+2025_func_062_percolation
 2025_func_063_big_int_mul
 2025_func_066_exgcd
 2025_func_067_reverse_output

@@ -12,7 +12,7 @@ PhiInst::PhiInst(Function * func, Type * _type) : Instruction(func, IRInstOperat
 
 void PhiInst::addIncoming(Value * value, BasicBlock * block)
 {
-    incoming.push_back({value, block});
+    incoming.push_back({block});
     addOperand(value);
 }
 
@@ -28,6 +28,16 @@ void PhiInst::removeIncomingBlock(BasicBlock * block)
     }
 }
 
+Value * PhiInst::getIncomingValue(int32_t i) const
+{
+    return const_cast<PhiInst *>(this)->getOperand(i);
+}
+
+PhiInst::Incoming PhiInst::getIncoming(int32_t i) const
+{
+    return {getIncomingValue(i), getIncomingBlock(i)};
+}
+
 void PhiInst::toString(std::string & str)
 {
     str = getIRName() + " = phi " + getType()->toString() + " ";
@@ -35,7 +45,7 @@ void PhiInst::toString(std::string & str)
         if (i > 0) {
             str += ", ";
         }
-        Value * val = getOperand(i);
+        Value * val = getIncomingValue(i);
         str += "[ " + val->getIRName() + ", " + incoming[i].block->getIRName() + " ]";
     }
 }

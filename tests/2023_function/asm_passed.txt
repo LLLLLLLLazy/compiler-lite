@@ -39,6 +39,8 @@
 2023_func_48_assign_complex_expr
 2023_func_49_if_complex_expr
 2023_func_52_scope
+2023_func_61_sort_test7
+2023_func_62_percolation
 2023_func_67_reverse_output
 2023_func_71_full_conn
 2023_func_72_hanoi

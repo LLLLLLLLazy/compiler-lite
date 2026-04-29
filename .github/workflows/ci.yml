@@ -7,9 +7,6 @@ on:
 jobs:
   build-and-smoke-test:
     runs-on: ubuntu-22.04
-    env:
-      ASAN_OPTIONS: detect_leaks=0
-      LSAN_OPTIONS: detect_leaks=0
 
     steps:
       - name: Checkout
