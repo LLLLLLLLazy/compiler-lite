@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <unordered_set>
 
 #include "AllocaInst.h"
 #include "LoopInfo.h"
@@ -20,6 +21,7 @@
 #include "ConstInt.h"
 #include "CopyInst.h"
 #include "Function.h"
+#include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "ICmpInst.h"
 #include "Instruction.h"
@@ -31,6 +33,41 @@
 #include "User.h"
 #include "Value.h"
 #include "ZExtInst.h"
+
+namespace {
+
+using ValueSet = std::unordered_set<Value *>;
+
+std::vector<Value *> instructionUses(Instruction * inst)
+{
+	std::vector<Value *> uses;
+	if (inst == nullptr) {
+		return uses;
+	}
+
+	uses.reserve(inst->getOperandsNum());
+	for (Value * operand : inst->getOperandsValue()) {
+		uses.push_back(operand);
+	}
+	return uses;
+}
+
+Value * instructionDef(Instruction * inst)
+{
+	if (inst == nullptr) {
+		return nullptr;
+	}
+
+	if (auto * copy = dynamic_cast<CopyInst *>(inst)) {
+		if (copy->getDst() != nullptr) {
+			return copy->getDst();
+		}
+	}
+
+	return inst->hasResultValue() ? static_cast<Value *>(inst) : nullptr;
+}
+
+} // namespace
 
 /// @brief 构造函数
 /// @param func 待分析的函数
@@ -132,11 +169,18 @@ LiveInterval * LiveIntervalAnalysis::getOrCreateInterval(Value * val)
 /// 4. 对于每条指令：
 ///    - 源操作数为使用点，更新对应活跃区间的使用位置
 ///    - 结果值为定义点，更新对应活跃区间的定义位置
-/// 5. 活跃区间使用半开区间 [def, lastUse+1) 表示
+/// 5. 基于CFG求解基本块live-in/live-out，为跨回边和跨块copy补充存活段
 ///
 void LiveIntervalAnalysis::computeLiveIntervals()
 {
 	nextInstNum = 0;
+
+	std::unordered_map<BasicBlock *, int> blockFirstInst;
+	std::unordered_map<BasicBlock *, int> blockLastInst;
+	std::unordered_map<BasicBlock *, ValueSet> blockUse;
+	std::unordered_map<BasicBlock *, ValueSet> blockDef;
+	std::unordered_map<BasicBlock *, ValueSet> liveIn;
+	std::unordered_map<BasicBlock *, ValueSet> liveOut;
 
 	// 处理函数形参：形参在函数入口处定义，活跃区间起点为0
 	auto & params = func->getParams();
@@ -155,189 +199,77 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 			int instNum = nextInstNum++;
 			instNumbering[inst] = instNum;
 
-			// 处理源操作数（使用点）
-			// 通过遍历指令的操作数来识别使用点
-			auto op = inst->getOp();
+			if (blockFirstInst.find(bb) == blockFirstInst.end()) {
+				blockFirstInst[bb] = instNum;
+			}
+			blockLastInst[bb] = instNum;
 
-			switch (op) {
-			case IRInstOperator::IRINST_OP_ADD_I:
-			case IRInstOperator::IRINST_OP_SUB_I:
-			case IRInstOperator::IRINST_OP_MUL_I:
-			case IRInstOperator::IRINST_OP_DIV_I:
-			case IRInstOperator::IRINST_OP_MOD_I: {
-				// BinaryInst: lhs和rhs为使用点
-				auto * binary = dynamic_cast<BinaryInst *>(inst);
-				if (binary) {
-					Value * lhs = binary->getLHS();
-					if (needsInterval(lhs)) {
-						getOrCreateInterval(lhs)->addUsePosition(instNum);
-					}
-					Value * rhs = binary->getRHS();
-					if (needsInterval(rhs)) {
-						getOrCreateInterval(rhs)->addUsePosition(instNum);
-					}
+			for (Value * usedValue : instructionUses(inst)) {
+				if (!needsInterval(usedValue)) {
+					continue;
 				}
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_LT_I:
-			case IRInstOperator::IRINST_OP_GT_I:
-			case IRInstOperator::IRINST_OP_LE_I:
-			case IRInstOperator::IRINST_OP_GE_I:
-			case IRInstOperator::IRINST_OP_EQ_I:
-			case IRInstOperator::IRINST_OP_NE_I: {
-				// ICmpInst: lhs和rhs为使用点
-				auto * icmp = dynamic_cast<ICmpInst *>(inst);
-				if (icmp) {
-					Value * lhs = icmp->getLHS();
-					if (needsInterval(lhs)) {
-						getOrCreateInterval(lhs)->addUsePosition(instNum);
-					}
-					Value * rhs = icmp->getRHS();
-					if (needsInterval(rhs)) {
-						getOrCreateInterval(rhs)->addUsePosition(instNum);
-					}
+				getOrCreateInterval(usedValue)->addUsePosition(instNum);
+				if (blockDef[bb].find(usedValue) == blockDef[bb].end()) {
+					blockUse[bb].insert(usedValue);
 				}
-				break;
 			}
 
-			case IRInstOperator::IRINST_OP_ALLOCA: {
-				// AllocaInst: 无源操作数，结果为定义点
-				// 定义点在下方统一处理
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_LOAD: {
-				// LoadInst: 指针操作数为使用点
-				auto * load = dynamic_cast<LoadInst *>(inst);
-				if (load) {
-					Value * ptr = load->getPointerOperand();
-					if (needsInterval(ptr)) {
-						getOrCreateInterval(ptr)->addUsePosition(instNum);
-					}
-				}
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_STORE: {
-				// StoreInst: 值操作数和指针操作数均为使用点
-				auto * store = dynamic_cast<StoreInst *>(inst);
-				if (store) {
-					Value * val = store->getValueOperand();
-					if (needsInterval(val)) {
-						getOrCreateInterval(val)->addUsePosition(instNum);
-					}
-					Value * ptr = store->getPointerOperand();
-					if (needsInterval(ptr)) {
-						getOrCreateInterval(ptr)->addUsePosition(instNum);
-					}
-				}
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_BR: {
-				// BranchInst: 无条件跳转，无源操作数
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_COND_BR: {
-				// CondBranchInst: 条件值为使用点
-				auto * condBr = dynamic_cast<CondBranchInst *>(inst);
-				if (condBr) {
-					Value * cond = condBr->getCondition();
-					if (needsInterval(cond)) {
-						getOrCreateInterval(cond)->addUsePosition(instNum);
-					}
-				}
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_RET: {
-				// ReturnInst: 返回值为使用点
-				auto * ret = dynamic_cast<ReturnInst *>(inst);
-				if (ret && ret->hasReturnValue()) {
-					Value * retVal = ret->getReturnValue();
-					if (needsInterval(retVal)) {
-						getOrCreateInterval(retVal)->addUsePosition(instNum);
-					}
-				}
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_CALL: {
-				// CallInst: 所有实参为使用点
-				auto * call = dynamic_cast<CallInst *>(inst);
-				if (call) {
-					for (int32_t i = 0; i < call->getArgCount(); ++i) {
-						Value * arg = call->getArg(i);
-						if (needsInterval(arg)) {
-							getOrCreateInterval(arg)->addUsePosition(instNum);
-						}
-					}
-				}
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_PHI: {
-				// PhiInst: 各incoming的value为使用点
-				auto * phi = dynamic_cast<PhiInst *>(inst);
-				if (phi) {
-					for (int32_t i = 0; i < phi->getIncomingCount(); ++i) {
-						Value * incomingVal = phi->getIncoming(i).value;
-						if (needsInterval(incomingVal)) {
-							getOrCreateInterval(incomingVal)->addUsePosition(instNum);
-						}
-					}
-				}
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_ZEXT: {
-				// ZExtInst: 源操作数为使用点
-				auto * zext = dynamic_cast<ZExtInst *>(inst);
-				if (zext) {
-					Value * src = zext->getSource();
-					if (needsInterval(src)) {
-						getOrCreateInterval(src)->addUsePosition(instNum);
-					}
-				}
-				break;
-			}
-
-			case IRInstOperator::IRINST_OP_COPY: {
-				// CopyInst: 源操作数为使用点
-				auto * copy = dynamic_cast<CopyInst *>(inst);
-				if (copy) {
-					Value * src = copy->getSource();
-					if (needsInterval(src)) {
-						getOrCreateInterval(src)->addUsePosition(instNum);
-					}
-				}
-				break;
-			}
-
-			default:
-				break;
-			}
-
-			// 处理定义点：如果指令有结果值，则该指令定义了一个虚拟寄存器
-			if (inst->hasResultValue()) {
-				LiveInterval * interval = getOrCreateInterval(inst);
+			if (Value * definedValue = instructionDef(inst); needsInterval(definedValue)) {
+				LiveInterval * interval = getOrCreateInterval(definedValue);
 				// 定义点：从当前指令编号开始
 				// 添加一个从定义点开始的子段，结束点暂时设为定义点+1
 				// 后续通过使用点来扩展区间
 				interval->addSegment(instNum, instNum + 1);
+				blockDef[bb].insert(definedValue);
+			}
+		}
+	}
+
+	// 基于CFG求解基本块级live-in/live-out集合，覆盖循环回边与PhiLowering
+	// 插入的跨前驱copy。后续区间扩展使用这些集合保守地添加整块存活段。
+	bool changed = true;
+	while (changed) {
+		changed = false;
+		auto & blocks = func->getBlocks();
+		for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
+			BasicBlock * bb = *it;
+			ValueSet newOut;
+			for (BasicBlock * succ : bb->getSuccessors()) {
+				auto succLiveIt = liveIn.find(succ);
+				if (succLiveIt != liveIn.end()) {
+					newOut.insert(succLiveIt->second.begin(), succLiveIt->second.end());
+				}
 			}
 
-			// 对于phi降级的CopyInst（有explicitDst），逻辑目标也需要处理
-			auto * copyInst = dynamic_cast<CopyInst *>(inst);
-			if (copyInst && copyInst->getDst()) {
-				Value * dst = copyInst->getDst();
-				if (needsInterval(dst)) {
-					// PhiLowering生成的逻辑目标在此处被定义（写入）
-					LiveInterval * interval = getOrCreateInterval(dst);
-					interval->addSegment(instNum, instNum + 1);
+			ValueSet newIn = blockUse[bb];
+			for (Value * value : newOut) {
+				if (blockDef[bb].find(value) == blockDef[bb].end()) {
+					newIn.insert(value);
 				}
+			}
+
+			if (newOut != liveOut[bb] || newIn != liveIn[bb]) {
+				liveOut[bb] = std::move(newOut);
+				liveIn[bb] = std::move(newIn);
+				changed = true;
+			}
+		}
+	}
+
+	for (auto * bb : func->getBlocks()) {
+		auto firstIt = blockFirstInst.find(bb);
+		auto lastIt = blockLastInst.find(bb);
+		if (firstIt == blockFirstInst.end() || lastIt == blockLastInst.end()) {
+			continue;
+		}
+
+		const int blockStart = firstIt->second;
+		const int blockEnd = lastIt->second + 1;
+		ValueSet blockLive = liveIn[bb];
+		blockLive.insert(liveOut[bb].begin(), liveOut[bb].end());
+		for (Value * value : blockLive) {
+			if (needsInterval(value)) {
+				getOrCreateInterval(value)->addSegment(blockStart, blockEnd);
 			}
 		}
 	}
@@ -368,6 +300,94 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 			// 定义点未设置（如形参，其定义点为0但通过addSegment(0,1)已设置）
 			// 对于形参，start已被设为0，需要从0延伸到最后使用点
 			interval->addSegment(0, lastUse + 1);
+		}
+	}
+
+	// 第三遍：循环感知的活跃区间扩展
+	// Mem2Reg 会将 alloca 提升为 SSA 值直接引用。对于来自循环外部的值
+	// （函数参数等），其 use 仅出现在循环头，但对应寄存器可能在循环体内
+	// 被 GEP 等操作覆盖。这里将这些"循环外定义、循环头使用"的值扩展到
+	// 循环体末尾，确保寄存器在循环内不会被错误复用。
+	// 循环内定义的值无需扩展——它们的定义点本身就在循环内，寄存器分配
+	// 已能正确处理。
+	if (loopInfo != nullptr) {
+		// 构建每个基本块中的指令编号范围
+		std::unordered_map<BasicBlock *, int> bbFirstInst;
+		std::unordered_map<BasicBlock *, int> bbLastInst;
+		for (auto & [inst, num] : instNumbering) {
+			BasicBlock * bb = inst->getParentBlock();
+			if (bb == nullptr) {
+				continue;
+			}
+			auto it = bbFirstInst.find(bb);
+			if (it == bbFirstInst.end()) {
+				bbFirstInst[bb] = num;
+				bbLastInst[bb] = num;
+			} else {
+				bbFirstInst[bb] = std::min(bbFirstInst[bb], num);
+				bbLastInst[bb] = std::max(bbLastInst[bb], num);
+			}
+		}
+
+		// 对每个循环，计算循环体块的编号范围
+		std::unordered_map<BasicBlock *, int> loopBodyMinInst;
+		std::unordered_map<BasicBlock *, int> loopBodyMaxInst;
+		for (auto * bb : func->getBlocks()) {
+			if (!loopInfo->isLoopHeader(bb)) {
+				continue;
+			}
+			const auto * body = loopInfo->getLoopBody(bb);
+			if (body == nullptr) {
+				continue;
+			}
+			int minInst = std::numeric_limits<int>::max();
+			int maxInst = 0;
+			for (auto * bodyBB : *body) {
+				auto itFirst = bbFirstInst.find(bodyBB);
+				auto itLast = bbLastInst.find(bodyBB);
+				if (itFirst != bbFirstInst.end()) {
+					minInst = std::min(minInst, itFirst->second);
+				}
+				if (itLast != bbLastInst.end()) {
+					maxInst = std::max(maxInst, itLast->second);
+				}
+			}
+			loopBodyMinInst[bb] = minInst;
+			loopBodyMaxInst[bb] = maxInst;
+		}
+
+		// 扩展循环头中使用的、在循环外定义的值
+		for (auto * interval : intervals) {
+			int defPoint = interval->getStart();
+			if (defPoint >= std::numeric_limits<int>::max()) {
+				defPoint = 0; // 形参等隐式定义在0处
+			}
+
+			const auto & usePositions = interval->getUsePositions();
+			for (int usePos : usePositions) {
+				BasicBlock * useBB = nullptr;
+				for (auto & [inst, num] : instNumbering) {
+					if (num == usePos) {
+						useBB = inst->getParentBlock();
+						break;
+					}
+				}
+				if (useBB == nullptr || !loopInfo->isLoopHeader(useBB)) {
+					continue;
+				}
+
+				int bodyMin = loopBodyMinInst[useBB];
+				// 仅当值定义在循环体外部时，才需要扩展到循环体末尾
+				if (defPoint >= bodyMin) {
+					continue; // 值在循环体内定义，寄存器分配可正确处理
+				}
+
+				int maxInst = loopBodyMaxInst[useBB];
+				if (maxInst > interval->getEnd()) {
+					interval->addSegment(defPoint, maxInst + 1);
+				}
+				break;
+			}
 		}
 	}
 

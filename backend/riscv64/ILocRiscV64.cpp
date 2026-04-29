@@ -330,12 +330,18 @@ void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 	} else {
 		// 超出12位范围，使用lui+addi
 		// lui加载高20位，addi加载低12位
-		int32_t upper = static_cast<int32_t>((static_cast<int64_t>(constant) + 0x800) >> 12);
-		int32_t lower = constant - (upper << 12);
+		const int32_t v32 = static_cast<int32_t>(constant);
+		int32_t lo = v32 & 0xFFF;
+		int32_t hi = v32 - lo;
+		if (lo >= 2048) {
+			lo -= 4096;
+			hi += 4096;
+		}
+		const uint32_t luiImm = (static_cast<uint32_t>(hi >> 12)) & 0xFFFFF;
 
-		emit("lui", PlatformRiscV64::regName[rs_reg_no], std::to_string(upper));
+		emit("lui", PlatformRiscV64::regName[rs_reg_no], std::to_string(luiImm));
 		emit("addi", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[rs_reg_no],
-			 std::to_string(lower));
+			 std::to_string(lo));
 	}
 }
 

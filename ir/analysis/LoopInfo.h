@@ -36,6 +36,23 @@ public:
     /// @return 循环深度（0 = 不在任何循环内）
     int getLoopDepth(BasicBlock * bb) const;
 
+    /// 判断基本块是否为某个循环的header
+    bool isLoopHeader(BasicBlock * bb) const
+    {
+        return loopHeaders.find(bb) != loopHeaders.end();
+    }
+
+    /// 获取循环header对应的body基本块集合
+    const std::unordered_set<BasicBlock *> * getLoopBody(BasicBlock * header) const
+    {
+        for (const auto & loop : loops) {
+            if (loop.header == header) {
+                return &loop.body;
+            }
+        }
+        return nullptr;
+    }
+
     /// 将循环分析信息打印到 str（调试用）
     void print(std::string & str) const;
 
