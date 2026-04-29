@@ -127,7 +127,7 @@ void Module::insertGlobalValueDirectly(GlobalVariable * val)
 /// @param val 待插入的整型常量对象
 void Module::insertConstIntDirectly(ConstInt * val)
 {
-    constIntMap.emplace(val->getVal(), val);
+    constIntMap.emplace(ConstIntKey{val->getType(), val->getVal()}, val);
 }
 
 void Module::insertConstFloatDirectly(ConstFloat * val)
@@ -140,9 +140,26 @@ void Module::insertConstFloatDirectly(ConstFloat * val)
 /// @return 对应的常量对象
 ConstInt * Module::newConstInt(int32_t intVal)
 {
-    ConstInt * val = findConstInt(intVal);
+    return newConstInteger(IntegerType::getTypeInt(), intVal);
+}
+
+/// @brief 获取或创建布尔常量对象
+/// @param boolVal 布尔常量值
+/// @return 对应的常量对象
+ConstInt * Module::newConstBool(bool boolVal)
+{
+    return newConstInteger(IntegerType::getTypeBool(), boolVal ? 1 : 0);
+}
+
+/// @brief 获取或创建指定整数类型的常量对象
+/// @param type 整数类型
+/// @param intVal 常量值
+/// @return 对应的常量对象
+ConstInt * Module::newConstInteger(Type * type, int32_t intVal)
+{
+    ConstInt * val = findConstInteger(type, intVal);
     if (!val) {
-        val = new ConstInt(intVal);
+        val = new ConstInt(intVal, type);
         insertConstIntDirectly(val);
     }
 
@@ -168,7 +185,16 @@ ConstFloat * Module::newConstFloat(float floatVal)
 /// @return 查找到的常量对象，未找到时返回空指针
 ConstInt * Module::findConstInt(int32_t val)
 {
-    auto pIter = constIntMap.find(val);
+    return findConstInteger(IntegerType::getTypeInt(), val);
+}
+
+/// @brief 按类型和值查找整数常量对象
+/// @param type 整数类型
+/// @param val 常量值
+/// @return 查找到的常量对象，未找到时返回空指针
+ConstInt * Module::findConstInteger(Type * type, int32_t val)
+{
+    auto pIter = constIntMap.find(ConstIntKey{type, val});
     if (pIter != constIntMap.end()) {
         return pIter->second;
     }
