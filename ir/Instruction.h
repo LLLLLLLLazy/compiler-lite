@@ -25,6 +25,16 @@ enum class IRInstOperator : std::int8_t {
     IRINST_OP_GE_I,
     IRINST_OP_EQ_I,
     IRINST_OP_NE_I,
+    IRINST_OP_ADD_F,
+    IRINST_OP_SUB_F,
+    IRINST_OP_MUL_F,
+    IRINST_OP_DIV_F,
+    IRINST_OP_LT_F,
+    IRINST_OP_GT_F,
+    IRINST_OP_LE_F,
+    IRINST_OP_GE_F,
+    IRINST_OP_EQ_F,
+    IRINST_OP_NE_F,
 
     // 块结构 IR 操作码
     IRINST_OP_ALLOCA,    ///< 栈上分配指令，结果为指针
@@ -36,6 +46,8 @@ enum class IRInstOperator : std::int8_t {
     IRINST_OP_PHI,       ///< SSA 形式的 phi 指令
     IRINST_OP_CALL,      ///< 块结构 IR 的函数调用指令
     IRINST_OP_ZEXT,      ///< 零扩展指令，例如将 i1 扩展为 i32
+    IRINST_OP_SITOFP,    ///< i32 -> float
+    IRINST_OP_FPTOSI,    ///< float -> i32
     IRINST_OP_COPY,      ///< 值复制指令，供 PhiLoweringPass 消除 phi 时使用
     IRINST_OP_GEP,       ///< 元素地址计算指令
 

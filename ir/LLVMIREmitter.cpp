@@ -8,13 +8,44 @@
 
 #include "LLVMIREmitter.h"
 
+#include <cstring>
+#include <iomanip>
 #include <fstream>
+#include <sstream>
 
 #include "BasicBlock.h"
 #include "Function.h"
 #include "GlobalVariable.h"
 #include "Instruction.h"
 #include "Module.h"
+
+namespace {
+
+std::string formatFloatGlobalInit(float value)
+{
+    double asDouble = static_cast<double>(value);
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &asDouble, sizeof(bits));
+
+    std::ostringstream oss;
+    oss << "0x" << std::uppercase << std::hex << std::setw(16) << std::setfill('0') << bits;
+    return oss.str();
+}
+
+std::string formatGlobalInit(GlobalVariable * global)
+{
+    if (global->getType()->isArrayType()) {
+        return "zeroinitializer";
+    }
+
+    if (global->getType()->isFloatType()) {
+        return formatFloatGlobalInit(global->getInitFloatValue());
+    }
+
+    return std::to_string(global->getInitIntValue());
+}
+
+} // namespace
 
 /// @brief 构造 LLVM IR 文本发射器
 /// @param _module 待发射的模块
@@ -52,7 +83,7 @@ bool LLVMIREmitter::run()
 
     bool hasGlobal = false;
     for (auto * global : module->getGlobalVariables()) {
-        std::string initText = global->getType()->isArrayType() ? "zeroinitializer" : std::to_string(global->getInitIntValue());
+        std::string initText = formatGlobalInit(global);
         lines.emplace_back(global->getIRName() + " = global " + llvmType(global->getType()) + " " + initText);
         hasGlobal = true;
     }

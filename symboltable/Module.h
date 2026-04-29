@@ -6,9 +6,11 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
+#include "ConstFloat.h"
 #include "ConstInt.h"
 #include "Function.h"
 #include "GlobalVariable.h"
@@ -68,6 +70,9 @@ public:
     /// @brief 获取或创建整型常量对象
     ConstInt * newConstInt(int32_t intVal);
 
+    /// @brief 获取或创建浮点常量对象
+    ConstFloat * newConstFloat(float floatVal);
+
     /// @brief 创建新的变量值对象并插入当前作用域
     Value * newVarValue(Type * type, std::string name = "");
 
@@ -87,6 +92,9 @@ protected:
     /// @brief 按数值查找整型常量对象
     ConstInt * findConstInt(int32_t val);
 
+    /// @brief 按位模式查找浮点常量对象
+    ConstFloat * findConstFloat(std::uint32_t bits);
+
     /// @brief 创建并注册全局变量对象
     GlobalVariable * newGlobalVariable(Type * type, std::string name);
 
@@ -102,6 +110,9 @@ protected:
     /// @brief 直接把整型常量插入模块容器
     void insertConstIntDirectly(ConstInt * val);
 
+    /// @brief 直接把浮点常量插入模块容器
+    void insertConstFloatDirectly(ConstFloat * val);
+
 private:
     std::string name;
     ScopeStack * scopeStack = nullptr;
@@ -111,4 +122,5 @@ private:
     std::unordered_map<std::string, GlobalVariable *> globalVariableMap;
     std::vector<GlobalVariable *> globalVariableVector;
     std::unordered_map<int32_t, ConstInt *> constIntMap;
+    std::unordered_map<std::uint32_t, ConstFloat *> constFloatMap;
 };

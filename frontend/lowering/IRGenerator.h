@@ -88,6 +88,9 @@ private:
     /// @brief 计算整型常量表达式
     bool evaluateConstIntExpr(ast_node * node, int32_t & result);
 
+    /// @brief 计算数值型常量表达式（int/float 混合）
+    bool evaluateConstNumberExpr(ast_node * node, double & result);
+
     /// @brief 获取变量对象的地址（全局变量或局部栈槽）
     Value * getAddressOfVariable(Value * var);
 
@@ -124,6 +127,12 @@ private:
 
     /// @brief 将 i1 值扩展为 i32 值
     Value * ensureI32(Value * value);
+
+    /// @brief 将数值转换为 float 值
+    Value * ensureFloat(Value * value);
+
+    /// @brief 按目标类型执行必要的数值转换
+    Value * convertValueToType(Value * value, Type * targetType);
 
     /// @brief 计算全局变量初始化表达式的整型常量值
     bool evaluateGlobalIntConstExpr(ast_node * node, int32_t & result);
@@ -167,4 +176,5 @@ private:
     std::vector<BasicBlock *> continueTargets;
 
     std::vector<std::unordered_map<std::string, int32_t>> constBindings;
+    std::vector<std::unordered_map<std::string, double>> floatConstBindings;
 };
