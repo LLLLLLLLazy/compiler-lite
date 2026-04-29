@@ -23,6 +23,13 @@ public:
         BasicBlock * block;
     };
 
+private:
+    struct IncomingBlock {
+        BasicBlock * block;
+    };
+
+public:
+
     /// @param func     所在函数
     /// @param type     φ 值类型
     explicit PhiInst(Function * func, Type * type);
@@ -38,13 +45,17 @@ public:
         return static_cast<int32_t>(incoming.size());
     }
 
-    const Incoming & getIncoming(int32_t i) const
+    [[nodiscard]] Value * getIncomingValue(int32_t i) const;
+
+    [[nodiscard]] BasicBlock * getIncomingBlock(int32_t i) const
     {
-        return incoming[i];
+        return incoming[i].block;
     }
+
+    [[nodiscard]] Incoming getIncoming(int32_t i) const;
 
     void toString(std::string & str) override;
 
 private:
-    std::vector<Incoming> incoming;
+    std::vector<IncomingBlock> incoming;
 };

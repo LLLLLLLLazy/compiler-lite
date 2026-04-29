@@ -42,6 +42,9 @@
 2023_func_48_assign_complex_expr
 2023_func_49_if_complex_expr
 2023_func_52_scope
+2023_func_59_sort_test5
+2023_func_61_sort_test7
+2023_func_62_percolation
 2023_func_63_big_int_mul
 2023_func_66_exgcd
 2023_func_67_reverse_output
