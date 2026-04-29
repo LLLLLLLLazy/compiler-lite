@@ -142,6 +142,7 @@ set(IR_SRCS
 	ir/Types/IntegerType.cpp
 	ir/Types/FunctionType.h
 	ir/Types/PointerType.h
+	ir/Types/ArrayType.h
 	ir/Values/ConstInt.h
 	ir/Values/LocalVariable.h
 	ir/Values/GlobalVariable.h
@@ -170,6 +171,8 @@ set(IR_SRCS
 	ir/Instructions/ZExtInst.cpp
 	ir/Instructions/CopyInst.h
 	ir/Instructions/CopyInst.cpp
+	ir/Instructions/GetElementPtrInst.h
+	ir/Instructions/GetElementPtrInst.cpp
 	ir/Type.h
 	ir/analysis/DominatorTree.h
 	ir/analysis/DominatorTree.cpp

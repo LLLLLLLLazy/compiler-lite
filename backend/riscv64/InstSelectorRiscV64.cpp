@@ -20,10 +20,14 @@
 #include "CallInst.h"
 #include "CondBranchInst.h"
 #include "CopyInst.h"
+#include "GetElementPtrInst.h"
+#include "GlobalVariable.h"
 #include "ICmpInst.h"
 #include "LoadInst.h"
+#include "ArrayType.h"
 #include "PhiInst.h"
 #include "PlatformRiscV64.h"
+#include "PointerType.h"
 #include "ReturnInst.h"
 #include "StoreInst.h"
 #include "Value.h"
@@ -80,6 +84,7 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_PHI] = &InstSelectorRiscV64::translate_phi;
 	translatorHandlers[IRInstOperator::IRINST_OP_ZEXT] = &InstSelectorRiscV64::translate_zext;
 	translatorHandlers[IRInstOperator::IRINST_OP_COPY] = &InstSelectorRiscV64::translate_copy;
+	translatorHandlers[IRInstOperator::IRINST_OP_GEP] = &InstSelectorRiscV64::translate_gep;
 }
 
 /// @brief 执行指令选择主流程
@@ -161,7 +166,14 @@ void InstSelectorRiscV64::translate_load(Instruction * inst)
 	}
 
 	const int dstReg = getResultReg(inst);
-	iloc.load_var(dstReg, loadInst->getPointerOperand());
+	Value * ptrOp = loadInst->getPointerOperand();
+	if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
+		iloc.load_var(dstReg, ptrOp);
+	} else {
+		iloc.load_var(kTmp1, ptrOp);
+		iloc.inst(loadInst->getType()->isPointerType() ? "ld" : "lw", PlatformRiscV64::regName[dstReg],
+		          "0(" + PlatformRiscV64::regName[kTmp1] + ")");
+	}
 	storeResult(inst, dstReg);
 }
 
@@ -177,7 +189,51 @@ void InstSelectorRiscV64::translate_store(Instruction * inst)
 	}
 
 	iloc.load_var(kTmp1, storeInst->getValueOperand());
-	iloc.store_var(kTmp1, storeInst->getPointerOperand(), kTmp0);
+	Value * ptrOp = storeInst->getPointerOperand();
+	if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
+		iloc.store_var(kTmp1, ptrOp, kTmp0);
+	} else {
+		iloc.load_var(kTmp0, ptrOp);
+		iloc.inst(storeInst->getValueOperand()->getType()->isPointerType() ? "sd" : "sw",
+		          PlatformRiscV64::regName[kTmp1], "0(" + PlatformRiscV64::regName[kTmp0] + ")");
+	}
+}
+
+void InstSelectorRiscV64::translate_gep(Instruction * inst)
+{
+	auto * gepInst = dynamic_cast<GetElementPtrInst *>(inst);
+	if (gepInst == nullptr) {
+		return;
+	}
+
+	Value * basePtr = gepInst->getBasePointer();
+	if (dynamic_cast<AllocaInst *>(basePtr) != nullptr || dynamic_cast<GlobalVariable *>(basePtr) != nullptr) {
+		iloc.lea_var(kTmp1, basePtr);
+	} else {
+		iloc.load_var(kTmp1, basePtr);
+	}
+
+	iloc.load_var(kTmp2, gepInst->getIndexOperand());
+
+	auto * basePtrType = dynamic_cast<const PointerType *>(basePtr->getType());
+	Type * stepType = const_cast<Type *>(basePtrType->getPointeeType());
+	if (gepInst->isArrayDecayGEP()) {
+		auto * arrayType = dynamic_cast<ArrayType *>(stepType);
+		if (arrayType != nullptr) {
+			stepType = arrayType->getElementType();
+		}
+	}
+
+	const int elemSize = stepType->getSize();
+	if (elemSize != 1) {
+		iloc.load_imm(kTmp0, elemSize);
+		iloc.inst("mul", PlatformRiscV64::regName[kTmp2], PlatformRiscV64::regName[kTmp2],
+		          PlatformRiscV64::regName[kTmp0]);
+	}
+
+	iloc.inst("add", PlatformRiscV64::regName[kTmp1], PlatformRiscV64::regName[kTmp1],
+	          PlatformRiscV64::regName[kTmp2]);
+	storeResult(inst, kTmp1);
 }
 
 /// @brief 翻译add指令（加法）
@@ -355,7 +411,7 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 	// 超过8个寄存器参数的实参通过栈传递
 	for (int i = 8; i < call->getArgCount(); ++i) {
 		iloc.load_var(kTmp1, call->getArg(i));
-		iloc.store_base(kTmp1, RISCV64_SP_REG_NO, (i - 8) * 8, kTmp0);
+		iloc.store_base(kTmp1, RISCV64_SP_REG_NO, (i - 8) * 8, kTmp0, call->getArg(i)->getType()->isPointerType());
 	}
 
 	// 前8个参数通过a0-a7传递
@@ -438,7 +494,7 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 			}
 		} else if (it->second.hasStackSlot) {
 			// 分配在栈上：生成store指令将传入寄存器值存到栈槽
-			iloc.store_base(incomingReg, it->second.baseRegId, it->second.offset, kTmp0);
+			iloc.store_base(incomingReg, it->second.baseRegId, it->second.offset, kTmp0, param->getType()->isPointerType());
 		}
 	}
 }

@@ -37,6 +37,41 @@ ast_node * ensureStatementNode(ast_node * node)
 	return node ? node : makeEmptyStmtNode();
 }
 
+ast_node * makeDimsNode(const std::vector<ast_node *> & dims, bool firstDimOmitted = false)
+{
+	if (dims.empty() && !firstDimOmitted) {
+		return nullptr;
+	}
+
+	auto * node = ast_node::New(ast_operator_type::AST_OP_ARRAY_DIMS);
+	node->firstDimOmitted = firstDimOmitted;
+	for (auto * dim: dims) {
+		node->insert_son_node(dim);
+	}
+	return node;
+}
+
+ast_node * makeDeclSpecNode(ast_node * idNode, ast_node * dimsNode, ast_node * initNode, bool isConst)
+{
+	auto * node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, idNode, dimsNode, initNode);
+	node->isConst = isConst;
+	return node;
+}
+
+ast_node * materializeDeclNode(type_attr typeAttr, ast_node * specNode)
+{
+	auto * typeNode = ast_node::create_type_node(typeAttr);
+	auto * declNode = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, typeNode);
+	declNode->isConst = specNode->isConst;
+	for (auto * child: specNode->sons) {
+		declNode->insert_son_node(child);
+	}
+	specNode->sons.clear();
+	declNode->type = typeNode->type;
+	delete specNode;
+	return declNode;
+}
+
 }  // namespace
 
 /// @brief 构造函数
@@ -59,33 +94,33 @@ ast_node * MiniCCSTVisitor::run(MiniCParser::CompileUnitContext * root)
 /// @param ctx CST上下文
 std::any MiniCCSTVisitor::visitCompileUnit(MiniCParser::CompileUnitContext * ctx)
 {
-	// compileUnit: (funcDef | varDecl)* EOF
+	// compileUnit: (funcDef | decl)* EOF
 
 	// 请注意这里必须先遍历全局变量后遍历函数。肯定可以确保全局变量先声明后使用的规则，但有些情况却不能检查出。
 	// 事实上可能函数A后全局变量B后函数C，这时在函数A中是不能使用变量B的，需要报语义错误，但目前的处理不会。
 	// 因此在进行语义检查时，可能追加检查行号和列号，如果函数的行号/列号在全局变量的行号/列号的前面则需要报语义错误
 	// TODO 请追加实现。
 
-	ast_node * temp_node;
 	ast_node * compileUnitNode = ast_node::New(ast_operator_type::AST_OP_COMPILE_UNIT);
 
-	// 可能多个变量，因此必须循环遍历
-	for (auto varCtx: ctx->varDecl()) {
-
-		// 变量函数定义
-		temp_node = std::any_cast<ast_node *>(visitVarDecl(varCtx));
-		(void) compileUnitNode->insert_son_node(temp_node);
-	}
-
-	// 可能有多个函数，因此必须循环遍历
-	for (auto funcCtx: ctx->funcDef()) {
-
-		// 变量函数定义
-		temp_node = std::any_cast<ast_node *>(visitFuncDef(funcCtx));
-		(void) compileUnitNode->insert_son_node(temp_node);
+	for (auto * child: ctx->children) {
+		if (Instanceof(funcCtx, MiniCParser::FuncDefContext *, child)) {
+			compileUnitNode->insert_son_node(std::any_cast<ast_node *>(visitFuncDef(funcCtx)));
+		} else if (Instanceof(declCtx, MiniCParser::DeclContext *, child)) {
+			compileUnitNode->insert_son_node(std::any_cast<ast_node *>(visitDecl(declCtx)));
+		}
 	}
 
 	return compileUnitNode;
+}
+
+std::any MiniCCSTVisitor::visitDecl(MiniCParser::DeclContext * ctx)
+{
+	if (ctx->constDecl()) {
+		return visitConstDecl(ctx->constDecl());
+	}
+
+	return visitVarDecl(ctx->varDecl());
 }
 
 /// @brief 非终结运算符funcDef的遍历
@@ -149,10 +184,20 @@ std::any MiniCCSTVisitor::visitFormalParam(MiniCParser::FormalParamContext * ctx
 
 	int64_t lineNo = (int64_t) ctx->T_ID()->getSymbol()->getLine();
 	ast_node * idNode = ast_node::New(ctx->T_ID()->getText(), lineNo);
+	std::vector<ast_node *> dims;
+	bool firstDimOmitted = false;
+	if (ctx->formalParamDims()) {
+		firstDimOmitted = true;
+		for (auto * dimCtx: ctx->formalParamDims()->expr()) {
+			dims.push_back(std::any_cast<ast_node *>(visitExpr(dimCtx)));
+		}
+	}
+	ast_node * dimsNode = makeDimsNode(dims, firstDimOmitted);
 
-	ast_node * paramNode = ast_node::New(ast_operator_type::AST_OP_FUNC_FORMAL_PARAM, typeNode, idNode);
+	ast_node * paramNode = ast_node::New(ast_operator_type::AST_OP_FUNC_FORMAL_PARAM, typeNode, idNode, dimsNode);
 	paramNode->type = typeNode->type;
 	paramNode->name = idNode->name;
+	paramNode->firstDimOmitted = firstDimOmitted;
 
 	return paramNode;
 }
@@ -201,16 +246,32 @@ std::any MiniCCSTVisitor::visitBlockItemList(MiniCParser::BlockItemListContext *
 ///
 std::any MiniCCSTVisitor::visitBlockItem(MiniCParser::BlockItemContext * ctx)
 {
-	// 识别的文法产生式：blockItem : statement | varDecl
+	// 识别的文法产生式：blockItem : statement | decl
 	if (ctx->statement()) {
 		// 语句识别
 
 		return visitStatement(ctx->statement());
-	} else if (ctx->varDecl()) {
-		return visitVarDecl(ctx->varDecl());
+	} else if (ctx->decl()) {
+		return visitDecl(ctx->decl());
 	}
 
 	return nullptr;
+}
+
+std::any MiniCCSTVisitor::visitConstDecl(MiniCParser::ConstDeclContext * ctx)
+{
+	auto * stmtNode = ast_node::New(ast_operator_type::AST_OP_DECL_STMT);
+	stmtNode->isConst = true;
+
+	type_attr typeAttr = std::any_cast<type_attr>(visitBasicType(ctx->basicType()));
+	for (auto * defCtx: ctx->constDef()) {
+		auto * specNode = std::any_cast<ast_node *>(visitConstDef(defCtx));
+		auto * declNode = materializeDeclNode(typeAttr, specNode);
+		declNode->isConst = true;
+		stmtNode->insert_son_node(declNode);
+	}
+
+	return stmtNode;
 }
 
 /// @brief 非终结运算符statement中的遍历
@@ -586,14 +647,13 @@ std::any MiniCCSTVisitor::visitPrimaryExp(MiniCParser::PrimaryExpContext * ctx)
 
 std::any MiniCCSTVisitor::visitLVal(MiniCParser::LValContext * ctx)
 {
-	// 识别文法产生式：lVal: T_ID;
-	// 获取ID的名字
-	auto varId = ctx->T_ID()->getText();
-
-	// 获取行号
-	int64_t lineNo = (int64_t) ctx->T_ID()->getSymbol()->getLine();
-
-	return ast_node::New(varId, lineNo);
+	// 识别文法产生式：lVal: T_ID ('[' expr ']')*;
+	ast_node * node = ast_node::New(ctx->T_ID()->getText(), (int64_t) ctx->T_ID()->getSymbol()->getLine());
+	for (auto * exprCtx: ctx->expr()) {
+		auto * indexNode = std::any_cast<ast_node *>(visitExpr(exprCtx));
+		node = ast_node::New(ast_operator_type::AST_OP_ARRAY_SUBSCRIPT, node, indexNode);
+	}
+	return node;
 }
 
 std::any MiniCCSTVisitor::visitVarDecl(MiniCParser::VarDeclContext * ctx)
@@ -607,22 +667,8 @@ std::any MiniCCSTVisitor::visitVarDecl(MiniCParser::VarDeclContext * ctx)
 	type_attr typeAttr = std::any_cast<type_attr>(visitBasicType(ctx->basicType()));
 
 	for (auto & varCtx: ctx->varDef()) {
-		ast_node * var_node = std::any_cast<ast_node *>(visitVarDef(varCtx));
-
-		// 创建类型节点
-		ast_node * type_node = ast_node::create_type_node(typeAttr);
-		ast_node * decl_node = nullptr;
-
-		if (var_node->node_type == ast_operator_type::AST_OP_ASSIGN) {
-			decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, var_node->sons[0], var_node->sons[1]);
-			delete var_node;
-		} else {
-			decl_node = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, type_node, var_node);
-		}
-		decl_node->type = type_node->type;
-
-		// 插入到变量声明语句
-		(void) stmt_node->insert_son_node(decl_node);
+		ast_node * specNode = std::any_cast<ast_node *>(visitVarDef(varCtx));
+		stmt_node->insert_son_node(materializeDeclNode(typeAttr, specNode));
 	}
 
 	return stmt_node;
@@ -630,7 +676,7 @@ std::any MiniCCSTVisitor::visitVarDecl(MiniCParser::VarDeclContext * ctx)
 
 std::any MiniCCSTVisitor::visitVarDef(MiniCParser::VarDefContext * ctx)
 {
-	// varDef: T_ID | T_ID T_ASSIGN expr;
+	// varDef: T_ID arrayDefDims? (T_ASSIGN initVal)?;
 
 	auto varId = ctx->T_ID()->getText();
 
@@ -638,12 +684,49 @@ std::any MiniCCSTVisitor::visitVarDef(MiniCParser::VarDefContext * ctx)
 	int64_t lineNo = (int64_t) ctx->T_ID()->getSymbol()->getLine();
 
 	ast_node * idNode = ast_node::New(varId, lineNo);
-	if (!ctx->expr()) {
-		return idNode;
+	std::vector<ast_node *> dims;
+	if (ctx->arrayDefDims()) {
+		for (auto * dimCtx: ctx->arrayDefDims()->expr()) {
+			dims.push_back(std::any_cast<ast_node *>(visitExpr(dimCtx)));
+		}
+	}
+	ast_node * dimsNode = makeDimsNode(dims);
+	ast_node * initNode = nullptr;
+	if (ctx->initVal()) {
+		initNode = std::any_cast<ast_node *>(visitInitVal(ctx->initVal()));
 	}
 
-	auto exprNode = std::any_cast<ast_node *>(visitExpr(ctx->expr()));
-	return ast_node::New(ast_operator_type::AST_OP_ASSIGN, idNode, exprNode);
+	return makeDeclSpecNode(idNode, dimsNode, initNode, false);
+}
+
+std::any MiniCCSTVisitor::visitConstDef(MiniCParser::ConstDefContext * ctx)
+{
+	auto varId = ctx->T_ID()->getText();
+	int64_t lineNo = (int64_t) ctx->T_ID()->getSymbol()->getLine();
+
+	ast_node * idNode = ast_node::New(varId, lineNo);
+	std::vector<ast_node *> dims;
+	if (ctx->arrayDefDims()) {
+		for (auto * dimCtx: ctx->arrayDefDims()->expr()) {
+			dims.push_back(std::any_cast<ast_node *>(visitExpr(dimCtx)));
+		}
+	}
+	ast_node * dimsNode = makeDimsNode(dims);
+	ast_node * initNode = std::any_cast<ast_node *>(visitInitVal(ctx->initVal()));
+	return makeDeclSpecNode(idNode, dimsNode, initNode, true);
+}
+
+std::any MiniCCSTVisitor::visitInitVal(MiniCParser::InitValContext * ctx)
+{
+	if (ctx->expr()) {
+		return visitExpr(ctx->expr());
+	}
+
+	auto * initListNode = ast_node::New(ast_operator_type::AST_OP_INIT_LIST);
+	for (auto * childCtx: ctx->initVal()) {
+		initListNode->insert_son_node(std::any_cast<ast_node *>(visitInitVal(childCtx)));
+	}
+	return initListNode;
 }
 
 std::any MiniCCSTVisitor::visitBasicType(MiniCParser::BasicTypeContext * ctx)
