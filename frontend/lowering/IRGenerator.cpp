@@ -75,6 +75,15 @@ bool isArrayType(Type * type)
     return type != nullptr && type->isArrayType();
 }
 
+Type * getVariableValueType(Value * var)
+{
+    if (auto * globalVar = dynamic_cast<GlobalVariable *>(var)) {
+        return globalVar->getValueType();
+    }
+
+    return var != nullptr ? var->getType() : nullptr;
+}
+
 Type * getAddressPointeeType(Value * addr)
 {
     if (addr == nullptr) {
@@ -83,10 +92,6 @@ Type * getAddressPointeeType(Value * addr)
 
     if (auto * ptrType = dynamic_cast<PointerType *>(addr->getType())) {
         return const_cast<Type *>(ptrType->getPointeeType());
-    }
-
-    if (auto * globalVar = dynamic_cast<GlobalVariable *>(addr)) {
-        return globalVar->getType();
     }
 
     return nullptr;
@@ -740,7 +745,7 @@ Value * IRGenerator::visitLValueAddress(ast_node * node)
                 minic_log(LOG_ERROR, "变量(%s)未定义", baseNode->name.c_str());
                 return nullptr;
             }
-            if (baseVar->getType()->isArrayType()) {
+            if (Type * baseValueType = getVariableValueType(baseVar); baseValueType != nullptr && baseValueType->isArrayType()) {
                 basePtr = getAddressOfVariable(baseVar);
                 if (!basePtr) {
                     return nullptr;
@@ -1296,7 +1301,13 @@ Value * IRGenerator::visitLeafVarId(ast_node * node)
         return nullptr;
     }
 
-    if (var->getType()->isArrayType()) {
+    Type * valueType = getVariableValueType(var);
+    if (valueType == nullptr) {
+        minic_log(LOG_ERROR, "变量(%s)类型无效", node->name.c_str());
+        return nullptr;
+    }
+
+    if (valueType->isArrayType()) {
         Value * addr = getAddressOfVariable(var);
         if (!addr) {
             return nullptr;
@@ -1309,7 +1320,7 @@ Value * IRGenerator::visitLeafVarId(ast_node * node)
         return nullptr;
     }
 
-    auto * loadInst = new LoadInst(currentFunction(), addr, var->getType());
+    auto * loadInst = new LoadInst(currentFunction(), addr, valueType);
     emitToBlock(loadInst);
     return loadInst;
 }

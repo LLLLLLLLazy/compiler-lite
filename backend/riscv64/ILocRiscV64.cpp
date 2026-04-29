@@ -56,6 +56,19 @@ int alignTo(int value, int align)
 	return ((value + align - 1) / align) * align;
 }
 
+Type * memoryObjectType(Value * val)
+{
+	if (auto * allocaInst = dynamic_cast<AllocaInst *>(val)) {
+		return allocaInst->getAllocaType();
+	}
+
+	if (auto * globalVar = dynamic_cast<GlobalVariable *>(val)) {
+		return globalVar->getValueType();
+	}
+
+	return val != nullptr ? val->getType() : nullptr;
+}
+
 /// @brief 根据寄存器分配信息动态计算所需栈帧大小
 /// @param regAllocMap 寄存器分配映射表
 /// @return 16字节对齐的栈帧大小
@@ -408,10 +421,7 @@ void ILocRiscV64::mov_reg(int rs_reg_no, int src_reg_no)
 /// @param src_var 源操作数
 void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 {
-	Type * valueType = src_var->getType();
-	if (auto * allocaInst = dynamic_cast<AllocaInst *>(src_var)) {
-		valueType = allocaInst->getAllocaType();
-	}
+	Type * valueType = memoryObjectType(src_var);
 	const bool wide = valueType->isPointerType();
 	if (Instanceof(constVal, ConstInt *, src_var)) {
 		// 若src_var是常量，则直接加载常量值
@@ -467,10 +477,7 @@ void ILocRiscV64::lea_var(int rs_reg_no, Value * var)
 /// @param tmp_reg_no 第三方寄存器
 void ILocRiscV64::store_var(int src_reg_no, Value * dest_var, int tmp_reg_no)
 {
-	Type * valueType = dest_var->getType();
-	if (auto * allocaInst = dynamic_cast<AllocaInst *>(dest_var)) {
-		valueType = allocaInst->getAllocaType();
-	}
+	Type * valueType = memoryObjectType(dest_var);
 	const bool wide = valueType->isPointerType();
 	if (Instanceof(globalVar, GlobalVariable *, dest_var)) {
 		// 全局变量：la加载地址 + sw存储值

@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include "GlobalValue.h"
+#include "PointerType.h"
 
 class GlobalVariable : public GlobalValue {
 
@@ -19,9 +20,15 @@ public:
     };
 
 public:
-    explicit GlobalVariable(Type * _type, std::string _name) : GlobalValue(_type, std::move(_name))
+    explicit GlobalVariable(Type * _type, std::string _name)
+        : GlobalValue(const_cast<PointerType *>(PointerType::get(_type)), std::move(_name)), valueType(_type)
     {
         setAlignment(4);
+    }
+
+    [[nodiscard]] Type * getValueType() const
+    {
+        return valueType;
     }
 
     [[nodiscard]] bool isGlobalVarible() const override
@@ -70,10 +77,11 @@ public:
 
     void toDeclareString(std::string & str)
     {
-        str = "declare " + getType()->toString() + " " + getIRName();
+        str = "declare " + getValueType()->toString() + " " + getIRName();
     }
 
 private:
+    Type * valueType = nullptr;
     bool inBSSSection = true;
     int32_t initIntValue = 0;
     float initFloatValue = 0.0f;

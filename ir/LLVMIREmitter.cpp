@@ -34,11 +34,12 @@ std::string formatFloatGlobalInit(float value)
 
 std::string formatGlobalInit(GlobalVariable * global)
 {
-    if (global->getType()->isArrayType()) {
+    Type * valueType = global->getValueType();
+    if (valueType->isArrayType()) {
         return "zeroinitializer";
     }
 
-    if (global->getType()->isFloatType()) {
+    if (valueType->isFloatType()) {
         return formatFloatGlobalInit(global->getInitFloatValue());
     }
 
@@ -84,7 +85,7 @@ bool LLVMIREmitter::run()
     bool hasGlobal = false;
     for (auto * global : module->getGlobalVariables()) {
         std::string initText = formatGlobalInit(global);
-        lines.emplace_back(global->getIRName() + " = global " + llvmType(global->getType()) + " " + initText);
+        lines.emplace_back(global->getIRName() + " = global " + llvmType(global->getValueType()) + " " + initText);
         hasGlobal = true;
     }
 
