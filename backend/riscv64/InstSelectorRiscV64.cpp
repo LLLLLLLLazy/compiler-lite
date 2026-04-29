@@ -9,8 +9,10 @@
 ///
 #include "InstSelectorRiscV64.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <set>
 #include <vector>
 
 #include "AllocaInst.h"
@@ -45,6 +47,11 @@ const std::vector<std::string> & savedRegs()
 	};
 	return regs;
 }
+
+struct RegMove {
+	int src = -1;
+	int dst = -1;
+};
 
 } // namespace
 
@@ -178,11 +185,10 @@ void InstSelectorRiscV64::translate_load(Instruction * inst)
 	if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
 		iloc.load_var(dstReg, ptrOp);
 	} else {
-		int tmp = tempMgr.borrow(inst, dstReg);
-		iloc.load_var(tmp, ptrOp);
+		OperandReg ptr = loadOperand(ptrOp, inst, dstReg);
 		iloc.inst(loadInst->getType()->isPointerType() ? "ld" : "lw", PlatformRiscV64::regName[dstReg],
-		          "0(" + PlatformRiscV64::regName[tmp] + ")");
-		tempMgr.release(tmp);
+		          "0(" + PlatformRiscV64::regName[ptr.reg] + ")");
+		releaseOperand(ptr);
 	}
 	storeResult(inst, dstReg, inst);
 	if (dstBorrowed) {
@@ -201,21 +207,19 @@ void InstSelectorRiscV64::translate_store(Instruction * inst)
 		return;
 	}
 
-	int valTmp = tempMgr.borrow(inst);
-	iloc.load_var(valTmp, storeInst->getValueOperand());
+	OperandReg value = loadOperand(storeInst->getValueOperand(), inst);
 	Value * ptrOp = storeInst->getPointerOperand();
 	if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
-		int tmp = tempMgr.borrow(inst, valTmp);
-		iloc.store_var(valTmp, ptrOp, tmp);
+		int tmp = tempMgr.borrowAfterUses(inst, value.reg);
+		iloc.store_var(value.reg, ptrOp, tmp);
 		tempMgr.release(tmp);
 	} else {
-		int tmp = tempMgr.borrow(inst, valTmp);
-		iloc.load_var(tmp, ptrOp);
+		OperandReg ptr = loadOperand(ptrOp, inst, value.reg);
 		iloc.inst(storeInst->getValueOperand()->getType()->isPointerType() ? "sd" : "sw",
-		          PlatformRiscV64::regName[valTmp], "0(" + PlatformRiscV64::regName[tmp] + ")");
-		tempMgr.release(tmp);
+		          PlatformRiscV64::regName[value.reg], "0(" + PlatformRiscV64::regName[ptr.reg] + ")");
+		releaseOperand(ptr);
 	}
-	tempMgr.release(valTmp);
+	releaseOperand(value);
 }
 
 void InstSelectorRiscV64::translate_gep(Instruction * inst)
@@ -226,14 +230,23 @@ void InstSelectorRiscV64::translate_gep(Instruction * inst)
 	}
 
 	Value * basePtr = gepInst->getBasePointer();
-	int baseTmp = tempMgr.borrow(inst);
-	if (dynamic_cast<AllocaInst *>(basePtr) != nullptr || dynamic_cast<GlobalVariable *>(basePtr) != nullptr) {
-		iloc.lea_var(baseTmp, basePtr);
-	} else {
-		iloc.load_var(baseTmp, basePtr);
+	int dstReg = getResultReg(inst);
+	const bool dstBorrowed = (dstReg < 0);
+	if (dstBorrowed) {
+		dstReg = tempMgr.borrow(inst);
 	}
 
-	int idxTmp = tempMgr.borrow(inst, baseTmp);
+	if (dynamic_cast<AllocaInst *>(basePtr) != nullptr || dynamic_cast<GlobalVariable *>(basePtr) != nullptr) {
+		iloc.lea_var(dstReg, basePtr);
+	} else {
+		OperandReg base = loadOperand(basePtr, inst, dstReg);
+		if (base.reg != dstReg) {
+			iloc.mov_reg(dstReg, base.reg);
+		}
+		releaseOperand(base);
+	}
+
+	int idxTmp = tempMgr.borrow(inst, dstReg);
 	iloc.load_var(idxTmp, gepInst->getIndexOperand());
 
 	auto * basePtrType = dynamic_cast<const PointerType *>(basePtr->getType());
@@ -247,18 +260,20 @@ void InstSelectorRiscV64::translate_gep(Instruction * inst)
 
 	const int elemSize = stepType->getSize();
 	if (elemSize != 1) {
-		int mulTmp = tempMgr.borrow(inst, baseTmp);
+		int mulTmp = tempMgr.borrow(inst, dstReg);
 		iloc.load_imm(mulTmp, elemSize);
 		iloc.inst("mul", PlatformRiscV64::regName[idxTmp], PlatformRiscV64::regName[idxTmp],
 		          PlatformRiscV64::regName[mulTmp]);
 		tempMgr.release(mulTmp);
 	}
 
-	iloc.inst("add", PlatformRiscV64::regName[baseTmp], PlatformRiscV64::regName[baseTmp],
+	iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
 	          PlatformRiscV64::regName[idxTmp]);
 	tempMgr.release(idxTmp);
-	storeResult(inst, baseTmp, inst);
-	tempMgr.release(baseTmp);
+	storeResult(inst, dstReg, inst);
+	if (dstBorrowed) {
+		tempMgr.release(dstReg);
+	}
 }
 
 /// @brief 翻译add指令（加法）
@@ -309,21 +324,19 @@ void InstSelectorRiscV64::translate_binary(Instruction * inst, const std::string
 		dstReg = tempMgr.borrow(inst);
 	}
 
-	// 加载左右操作数到临时寄存器
-	int lhsTmp = tempMgr.borrow(inst, dstReg);
-	iloc.load_var(lhsTmp, binary->getLHS());
-	int rhsTmp = tempMgr.borrow(inst, dstReg);
-	iloc.load_var(rhsTmp, binary->getRHS());
+	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
+	OperandReg rhs = loadOperand(binary->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
 
 	// 执行运算
 	iloc.inst(op,
 		PlatformRiscV64::regName[dstReg],
-		PlatformRiscV64::regName[lhsTmp],
-		PlatformRiscV64::regName[rhsTmp]);
+		PlatformRiscV64::regName[lhs.reg],
+		PlatformRiscV64::regName[rhs.reg]);
 
 	// 运算完成后释放左右操作数的临时寄存器
-	tempMgr.release(rhsTmp);
-	tempMgr.release(lhsTmp);
+	releaseOperand(rhs);
+	releaseOperand(lhs);
 
 	storeResult(inst, dstReg, inst);
 	if (dstBorrowed) {
@@ -355,13 +368,12 @@ void InstSelectorRiscV64::translate_icmp(Instruction * inst)
 	}
 	const std::string dst = PlatformRiscV64::regName[dstReg];
 
-	int lhsTmp = tempMgr.borrow(inst, dstReg);
-	iloc.load_var(lhsTmp, icmp->getLHS());
-	int rhsTmp = tempMgr.borrow(inst, dstReg);
-	iloc.load_var(rhsTmp, icmp->getRHS());
+	OperandReg lhsOperand = loadOperand(icmp->getLHS(), inst, dstReg);
+	const int rhsPreferredReg = lhsOperand.reg != dstReg ? dstReg : -1;
+	OperandReg rhsOperand = loadOperand(icmp->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
 
-	const std::string lhs = PlatformRiscV64::regName[lhsTmp];
-	const std::string rhs = PlatformRiscV64::regName[rhsTmp];
+	const std::string lhs = PlatformRiscV64::regName[lhsOperand.reg];
+	const std::string rhs = PlatformRiscV64::regName[rhsOperand.reg];
 
 	switch (inst->getOp()) {
 		case IRInstOperator::IRINST_OP_LT_I:
@@ -390,8 +402,8 @@ void InstSelectorRiscV64::translate_icmp(Instruction * inst)
 			break;
 	}
 
-	tempMgr.release(rhsTmp);
-	tempMgr.release(lhsTmp);
+	releaseOperand(rhsOperand);
+	releaseOperand(lhsOperand);
 
 	storeResult(inst, dstReg, inst);
 	if (dstBorrowed) {
@@ -420,10 +432,9 @@ void InstSelectorRiscV64::translate_cond_br(Instruction * inst)
 		return;
 	}
 
-	int tmp = tempMgr.borrow(inst);
-	iloc.load_var(tmp, condBr->getCondition());
-	iloc.inst("bne", PlatformRiscV64::regName[tmp], "zero", blockLabel(condBr->getTrueDest()));
-	tempMgr.release(tmp);
+	OperandReg cond = loadOperand(condBr->getCondition(), inst);
+	iloc.inst("bne", PlatformRiscV64::regName[cond.reg], "zero", blockLabel(condBr->getTrueDest()));
+	releaseOperand(cond);
 	iloc.jump(blockLabel(condBr->getFalseDest()));
 }
 
@@ -460,12 +471,11 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 
 	// 超过8个寄存器参数的实参通过栈传递
 	for (int i = 8; i < call->getArgCount(); ++i) {
-		int valTmp = tempMgr.borrow(inst);
-		iloc.load_var(valTmp, call->getArg(i));
-		int tmp = tempMgr.borrow(inst, valTmp);
-		iloc.store_base(valTmp, RISCV64_SP_REG_NO, (i - 8) * 8, tmp, call->getArg(i)->getType()->isPointerType());
+		OperandReg value = loadOperand(call->getArg(i), inst);
+		int tmp = tempMgr.borrow(inst, value.reg);
+		iloc.store_base(value.reg, RISCV64_SP_REG_NO, (i - 8) * 8, tmp, call->getArg(i)->getType()->isPointerType());
 		tempMgr.release(tmp);
-		tempMgr.release(valTmp);
+		releaseOperand(value);
 	}
 
 	// 前8个参数通过a0-a7传递
@@ -508,10 +518,9 @@ void InstSelectorRiscV64::translate_zext(Instruction * inst)
 		dstReg = tempMgr.borrow(inst);
 	}
 
-	int tmp = tempMgr.borrow(inst, dstReg);
-	iloc.load_var(tmp, zext->getSource());
-	iloc.inst("andi", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[tmp], "1");
-	tempMgr.release(tmp);
+	OperandReg src = loadOperand(zext->getSource(), inst, -1, dstReg);
+	iloc.inst("andi", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[src.reg], "1");
+	releaseOperand(src);
 	storeResult(inst, dstReg, inst);
 	if (dstBorrowed) {
 		tempMgr.release(dstReg);
@@ -530,10 +539,9 @@ void InstSelectorRiscV64::translate_copy(Instruction * inst)
 	}
 
 	Value * dst = copy->getDst() != nullptr ? copy->getDst() : static_cast<Value *>(copy);
-	int tmp = tempMgr.borrow(inst);
-	iloc.load_var(tmp, copy->getSource());
-	storeResult(dst, tmp, inst);
-	tempMgr.release(tmp);
+	OperandReg src = loadOperand(copy->getSource(), inst);
+	storeResult(dst, src.reg, inst);
+	releaseOperand(src);
 }
 
 /// @brief 生成形参从a0-a7到分配寄存器/栈槽的移动指令
@@ -545,6 +553,31 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 	auto & params = func->getParams();
 	auto & allocMap = allocator.getAllocationMap();
 
+	std::set<int> blockedRegs;
+	std::vector<RegMove> regMoves;
+
+	for (int i = 0; i < static_cast<int>(params.size()) && i < 8; ++i) {
+		blockedRegs.insert(RISCV64_A0_REG_NO + i);
+	}
+	for (int i = 0; i < static_cast<int>(params.size()) && i < 8; ++i) {
+		auto * param = params[i];
+		auto it = allocMap.find(param);
+		if (it != allocMap.end() && it->second.hasReg()) {
+			blockedRegs.insert(it->second.regId);
+		}
+	}
+
+	int scratchReg = -1;
+	for (int reg : allocator.getAvailableRegs()) {
+		if (blockedRegs.find(reg) == blockedRegs.end()) {
+			scratchReg = reg;
+			break;
+		}
+	}
+	if (scratchReg < 0) {
+		scratchReg = RISCV64_TMP_REG_NO;
+	}
+
 	for (int i = 0; i < static_cast<int>(params.size()) && i < 8; ++i) {
 		auto * param = params[i];
 		auto it = allocMap.find(param);
@@ -554,15 +587,50 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 
 		const int incomingReg = RISCV64_A0_REG_NO + i;
 		if (it->second.hasReg()) {
-			// 分配了寄存器：若与传入寄存器不同则生成mv指令
 			if (it->second.regId != incomingReg) {
-				iloc.mov_reg(it->second.regId, incomingReg);
+				regMoves.push_back(RegMove{incomingReg, it->second.regId});
 			}
 		} else if (it->second.hasStackSlot) {
 			// 分配在栈上：生成store指令将传入寄存器值存到栈槽
-			int tmp = tempMgr.borrow(nullptr);
-			iloc.store_base(incomingReg, it->second.baseRegId, it->second.offset, tmp, param->getType()->isPointerType());
-			tempMgr.release(tmp);
+			iloc.store_base(incomingReg,
+				it->second.baseRegId,
+				it->second.offset,
+				scratchReg,
+				param->getType()->isPointerType());
+		}
+	}
+
+	while (!regMoves.empty()) {
+		bool progressed = false;
+		for (auto it = regMoves.begin(); it != regMoves.end(); ++it) {
+			bool dstIsStillSource = false;
+			for (const auto & move : regMoves) {
+				if (move.src == it->dst) {
+					dstIsStillSource = true;
+					break;
+				}
+			}
+
+			if (dstIsStillSource) {
+				continue;
+			}
+
+			iloc.mov_reg(it->dst, it->src);
+			regMoves.erase(it);
+			progressed = true;
+			break;
+		}
+
+		if (progressed) {
+			continue;
+		}
+
+		const int cycleSrc = regMoves.front().src;
+		iloc.mov_reg(scratchReg, cycleSrc);
+		for (auto & move : regMoves) {
+			if (move.src == cycleSrc) {
+				move.src = scratchReg;
+			}
 		}
 	}
 }
@@ -632,6 +700,39 @@ int InstSelectorRiscV64::getResultReg(Value * val) const
 	return -1;
 }
 
+/// @brief 获取只读操作数所在寄存器，必要时借用临时寄存器加载
+/// @param val 操作数
+/// @param inst 当前IR指令
+/// @param excludeReg 借用临时寄存器时需要排除的寄存器
+/// @param preferredReg 可直接承载该操作数的首选寄存器
+/// @return 操作数寄存器及是否需要释放
+InstSelectorRiscV64::OperandReg
+InstSelectorRiscV64::loadOperand(Value * val, Instruction * inst, int excludeReg, int preferredReg)
+{
+	auto & allocMap = allocator.getAllocationMap();
+	auto it = allocMap.find(val);
+	if (it != allocMap.end() && it->second.hasReg()) {
+		return OperandReg{it->second.regId, false};
+	}
+
+	if (preferredReg >= 0 && preferredReg != excludeReg) {
+		iloc.load_var(preferredReg, val);
+		return OperandReg{preferredReg, false};
+	}
+
+	int reg = tempMgr.borrow(inst, excludeReg);
+	iloc.load_var(reg, val);
+	return OperandReg{reg, true};
+}
+
+/// @brief 释放通过loadOperand借用的临时寄存器
+void InstSelectorRiscV64::releaseOperand(const OperandReg & operand)
+{
+	if (operand.borrowed) {
+		tempMgr.release(operand.reg);
+	}
+}
+
 /// @brief 将寄存器值存储到Value的目标位置
 /// @param val 目标Value
 /// @param srcReg 源寄存器编号
@@ -640,7 +741,16 @@ void InstSelectorRiscV64::storeResult(Value * val, int srcReg, Instruction * ins
 	if (val == nullptr) {
 		return;
 	}
-	int tmp = tempMgr.borrow(inst, srcReg);
+	auto & allocMap = allocator.getAllocationMap();
+	auto it = allocMap.find(val);
+	if (it != allocMap.end() && it->second.hasReg()) {
+		if (srcReg != it->second.regId) {
+			iloc.mov_reg(it->second.regId, srcReg);
+		}
+		return;
+	}
+
+	int tmp = tempMgr.borrowAfterUses(inst, srcReg);
 	iloc.store_var(srcReg, val, tmp);
 	tempMgr.release(tmp);
 }

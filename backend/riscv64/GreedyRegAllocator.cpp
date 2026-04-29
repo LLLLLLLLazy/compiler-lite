@@ -53,6 +53,7 @@ void GreedyRegAllocator::allocate(Function * func)
 	allocationMap.clear();
 	spilledValues.clear();
 	intervalToIndex.clear();
+	callInstNumbers.clear();
 	instNumbering.clear();
 	valueLiveRanges.clear();
 	frameSize = 0;
@@ -78,6 +79,12 @@ void GreedyRegAllocator::allocate(Function * func)
 	// 执行活跃区间分析
 	LiveIntervalAnalysis analysis(func, &loopInfo);
 	analysis.run();
+	instNumbering = analysis.getInstNumbering();
+	for (auto & [inst, num] : instNumbering) {
+		if (dynamic_cast<CallInst *>(inst) != nullptr) {
+			callInstNumbers.push_back(num);
+		}
+	}
 
 	// 建立活跃区间到索引的映射
 	auto & intervals = analysis.getIntervals();
@@ -91,7 +98,6 @@ void GreedyRegAllocator::allocate(Function * func)
 	rebuildAllocationMap(intervals);
 
 	// 保存活跃性快照，供指令选择阶段的动态临时寄存器管理使用
-	instNumbering = analysis.getInstNumbering();
 	for (auto * interval : intervals) {
 		if (interval != nullptr && interval->getVReg() != nullptr) {
 			valueLiveRanges[interval->getVReg()] = {interval->getStart(), interval->getEnd()};
@@ -227,6 +233,9 @@ bool GreedyRegAllocator::tryAssignFreeReg(LiveInterval * interval,
 	// 获取当前区间所有干涉邻居已占用的寄存器集合
 	std::set<int> usedRegs = graph->getInterferingRegs(node, intervals);
 	for (int reg: availableRegs) {
+		if (!canAssignReg(interval, reg)) {
+			continue;
+		}
 		if (usedRegs.find(reg) == usedRegs.end()) {
 			assignPhysicalReg(interval, reg);
 			return true;
@@ -260,6 +269,10 @@ bool GreedyRegAllocator::tryEvictAndAssign(LiveInterval * interval,
 	}
 
 	for (int reg: availableRegs) {
+		if (!canAssignReg(interval, reg)) {
+			continue;
+		}
+
 		std::vector<LiveInterval *> evictionCandidates;
 		bool canUseReg = true;
 
@@ -311,15 +324,31 @@ void GreedyRegAllocator::markSpilled(LiveInterval * interval)
 /// @param func 当前函数
 /// @return 可用寄存器编号列表
 ///
-/// 默认使用callee-saved寄存器s1-s11（编号9, 18-27）。
-/// t0-t6保留给指令选择阶段作为scratch寄存器，避免临时寄存器覆盖全局分配值。
-/// a0-a7承载形参，若作为分配目标会让prologue里的形参搬运产生覆盖，因此避开。
+/// 使用RISC-V ABI中可分配的GPR：
+/// - caller-saved: t0-t6, a0-a7
+/// - callee-saved: s1-s11
+///
+/// 保留寄存器：zero, ra, sp, gp, tp, s0/fp。
 std::vector<int> GreedyRegAllocator::buildRegisterPool(Function * func) const
 {
 	(void) func;
 
-	// callee-saved寄存器：s1-s11，在函数调用后仍保持值
 	std::vector<int> regs = {
+		5,  // t0
+		6,  // t1
+		7,  // t2
+		28, // t3
+		29, // t4
+		30, // t5
+		31, // t6
+		10, // a0
+		11, // a1
+		12, // a2
+		13, // a3
+		14, // a4
+		15, // a5
+		16, // a6
+		17, // a7
 		9,  // s1
 		18, // s2
 		19, // s3
@@ -336,19 +365,53 @@ std::vector<int> GreedyRegAllocator::buildRegisterPool(Function * func) const
 	return regs;
 }
 
-/// @brief 判断函数是否包含函数调用指令
-/// @param func 待判断的函数
-/// @return 是否包含调用
-bool GreedyRegAllocator::functionHasCall(Function * func) const
+/// @brief 判断物理寄存器是否为调用者保存寄存器
+/// @param reg 物理寄存器编号
+/// @return 是否会被普通函数调用 clobber
+bool GreedyRegAllocator::isCallerSavedReg(int reg)
 {
-	for (auto * bb: func->getBlocks()) {
-		for (auto * inst: bb->getInstructions()) {
-			if (dynamic_cast<CallInst *>(inst) != nullptr) {
+	return (reg >= 5 && reg <= 7) || (reg >= 10 && reg <= 17) || (reg >= 28 && reg <= 31);
+}
+
+/// @brief 判断活跃区间是否覆盖任一函数调用点
+/// @param interval 活跃区间
+/// @return 是否在调用点需要保持值
+bool GreedyRegAllocator::intervalCrossesCall(LiveInterval * interval) const
+{
+	if (interval == nullptr || callInstNumbers.empty()) {
+		return false;
+	}
+
+	Value * vreg = interval->getVReg();
+	for (int callNum : callInstNumbers) {
+		// call指令自身的返回值定义在调用完成之后，不与该调用的clobber冲突。
+		if (auto * inst = dynamic_cast<Instruction *>(vreg); inst != nullptr) {
+			auto it = instNumbering.find(inst);
+			if (it != instNumbering.end() && it->second == callNum && dynamic_cast<CallInst *>(inst) != nullptr) {
+				continue;
+			}
+		}
+
+		for (const auto & seg : interval->getSegments()) {
+			if (seg.start <= callNum && callNum < seg.end) {
 				return true;
 			}
 		}
 	}
+
 	return false;
+}
+
+/// @brief 判断某物理寄存器能否分配给指定活跃区间
+/// @param interval 活跃区间
+/// @param reg 物理寄存器编号
+/// @return 是否可分配
+bool GreedyRegAllocator::canAssignReg(LiveInterval * interval, int reg) const
+{
+	if (!isCallerSavedReg(reg)) {
+		return true;
+	}
+	return !intervalCrossesCall(interval);
 }
 
 /// @brief 获取活跃区间在排序列表中的索引
