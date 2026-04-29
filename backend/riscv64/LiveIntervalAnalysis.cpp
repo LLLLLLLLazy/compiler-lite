@@ -20,6 +20,7 @@
 #include "CallInst.h"
 #include "CondBranchInst.h"
 #include "ConstInt.h"
+#include "ConstFloat.h"
 #include "CopyInst.h"
 #include "Function.h"
 #include "GetElementPtrInst.h"
@@ -124,6 +125,9 @@ bool LiveIntervalAnalysis::needsInterval(Value * val)
 	}
 	// 常量不需要寄存器分配
 	if (dynamic_cast<ConstInt *>(val)) {
+		return false;
+	}
+	if (dynamic_cast<ConstFloat *>(val)) {
 		return false;
 	}
 	// 全局变量通过地址访问，不需要分配寄存器

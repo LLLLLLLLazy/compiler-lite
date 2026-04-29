@@ -147,7 +147,7 @@ run_asm_check() {
     local output=""
     local exit_code=0
 
-    if ! "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground 10 "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${testcase}.c compile NG [asm]"
         return 1
     fi
@@ -157,16 +157,16 @@ run_asm_check() {
         return 1
     fi
 
-    if ! "${ARM_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
+    if ! timeout --foreground 10 "${ARM_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
         echo "${testcase}.c link NG [asm]"
         return 1
     fi
 
     if [[ -f "${infile}" ]]; then
-        output="$(${QEMU_ARM_BIN} "${exe_file}" < "${infile}" 2>&1)"
+        output="$(timeout --foreground 10 ${QEMU_ARM_BIN} "${exe_file}" < "${infile}" 2>&1)"
         exit_code=$?
     else
-        output="$(${QEMU_ARM_BIN} "${exe_file}" 2>&1)"
+        output="$(timeout --foreground 10 ${QEMU_ARM_BIN} "${exe_file}" 2>&1)"
         exit_code=$?
     fi
 
@@ -192,7 +192,7 @@ run_llvmir_check() {
     local output=""
     local exit_code=0
 
-    if ! "${MINIC_BIN}" -S "${frontend_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground 10 "${MINIC_BIN}" -S "${frontend_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${testcase}.c compile NG [llvmir]"
         return 1
     fi
@@ -202,16 +202,16 @@ run_llvmir_check() {
         return 1
     fi
 
-    if ! "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
+    if ! timeout --foreground 10 "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
         echo "${testcase}.c link NG [llvmir]"
         return 1
     fi
 
     if [[ -f "${infile}" ]]; then
-        output="$("${exe_file}" < "${infile}" 2>&1)"
+        output="$(timeout --foreground 10 "${exe_file}" < "${infile}" 2>&1)"
         exit_code=$?
     else
-        output="$("${exe_file}" 2>&1)"
+        output="$(timeout --foreground 10 "${exe_file}" 2>&1)"
         exit_code=$?
     fi
 
@@ -234,7 +234,7 @@ run_ast_check() {
     local expected_png="${case_root}/${testcase}.png"
     local expected_svg="${case_root}/${testcase}.svg"
 
-    if ! "${MINIC_BIN}" -S "${frontend_args[@]}" -T -o "${astfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground 10 "${MINIC_BIN}" -S "${frontend_args[@]}" -T -o "${astfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${testcase}.c compile NG [ast]"
         return 1
     fi
