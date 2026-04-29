@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <unordered_map>
 
 #include "AllocaInst.h"
 #include "BasicBlock.h"
@@ -135,6 +136,13 @@ LiveInterval * LiveIntervalAnalysis::getOrCreateInterval(Value * val)
 void LiveIntervalAnalysis::computeLiveIntervals()
 {
 	nextInstNum = 0;
+	std::unordered_map<BasicBlock *, int> blockStartNums;
+	std::unordered_map<BasicBlock *, int> blockEndNums;
+	auto & blocks = func->getBlocks();
+	std::unordered_map<BasicBlock *, int> blockOrder;
+	for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
+		blockOrder[blocks[i]] = i;
+	}
 
 	// 处理函数形参：形参在函数入口处定义，活跃区间起点为0
 	auto & params = func->getParams();
@@ -149,6 +157,7 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 
 	// 按基本块顺序遍历指令
 	for (auto * bb : func->getBlocks()) {
+		const int blockStart = nextInstNum;
 		for (auto * inst : bb->getInstructions()) {
 			int instNum = nextInstNum++;
 			instNumbering[inst] = instNum;
@@ -338,6 +347,11 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 				}
 			}
 		}
+
+		if (nextInstNum > blockStart) {
+			blockStartNums[bb] = blockStart;
+			blockEndNums[bb] = nextInstNum;
+		}
 	}
 
 	// 第二遍：根据使用点扩展活跃区间
@@ -366,6 +380,43 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 			// 定义点未设置（如形参，其定义点为0但通过addSegment(0,1)已设置）
 			// 对于形参，start已被设为0，需要从0延伸到最后使用点
 			interval->addSegment(0, lastUse + 1);
+		}
+	}
+
+	// 线性编号本身不表达回边迭代。对所有“在循环内使用、且定义发生在循环外”的值，
+	// 保守地把活跃区间延长到循环头之后，避免循环不变量在一次迭代后被错误复用寄存器。
+	for (auto * bb : blocks) {
+		auto bbStartIt = blockStartNums.find(bb);
+		auto bbEndIt = blockEndNums.find(bb);
+		if (bbStartIt == blockStartNums.end() || bbEndIt == blockEndNums.end()) {
+			continue;
+		}
+
+		for (auto * succ : bb->getSuccessors()) {
+			auto succStartIt = blockStartNums.find(succ);
+			auto succOrderIt = blockOrder.find(succ);
+			auto bbOrderIt = blockOrder.find(bb);
+			if (succStartIt == blockStartNums.end() || succOrderIt == blockOrder.end() ||
+				bbOrderIt == blockOrder.end() || succOrderIt->second > bbOrderIt->second) {
+				continue;
+			}
+
+			const int loopStart = succStartIt->second;
+			for (int idx = succOrderIt->second; idx <= bbOrderIt->second; ++idx) {
+				BasicBlock * loopBB = blocks[idx];
+				for (auto * inst : loopBB->getInstructions()) {
+					for (auto * operand : inst->getOperandsValue()) {
+						if (!needsInterval(operand)) {
+							continue;
+						}
+
+						LiveInterval * interval = getOrCreateInterval(operand);
+						if (interval->getStart() < loopStart) {
+							interval->addSegment(loopStart, nextInstNum);
+						}
+					}
+				}
+			}
 		}
 	}
 

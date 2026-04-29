@@ -28,6 +28,7 @@
 #include "Module.h"
 #include "DominatorTree.h"
 #include "DominanceFrontier.h"
+#include "ConstProp.h"
 #include "DCE.h"
 #include "Mem2Reg.h"
 #include "PhiLowering.h"
@@ -84,7 +85,7 @@ static bool gFrontEndRecursiveDescentParsing = false;
 static bool gAsmAlsoShowIR = false;
 
 ///
-/// @brief 优化的级别，即-O后面的数字，默认为0
+/// @brief 优化级别：0表示关闭优化，1表示开启优化
 ///
 static int gOptLevel = 0;
 
@@ -132,7 +133,7 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -L, --llvmir               Output LLVM IR (.ll)\n";
 	std::cout << "  -A, --antlr4               Deprecated, now always use Antlr4\n";
 	std::cout << "  -D, --recursive-descent    Deprecated, now always use Antlr4\n";
-	std::cout << "  -O, --optimize=LEVEL       Set optimization level\n";
+	std::cout << "  -O, --optimize=LEVEL       Set optimization level (0: off, 1: on)\n";
 	std::cout << "  -t, --target=CPU           Specify target CPU architecture\n";
 	std::cout << "  -c, --asmir                Show IR instructions as comments in assembly output\n";
 	std::cout << "  --dom                      Output dominator tree and dominance frontier\n";
@@ -151,7 +152,7 @@ static int ArgsAnalysis(int argc, char * argv[])
 	// -T指定时输出AST，-I输出中间IR，不指定则默认输出汇编
 	// -A和-D已废弃，默认选用Antlr4进行词法语法分析，保留参数兼容性但不生效
 	// -o要求必须带有附加参数，指定输出的文件
-	// -O要求必须带有附加整数，指明优化的级别
+	// -O要求必须带有附加参数，仅支持0(关闭优化)和1(开启优化)
 	// -t要求必须带有目标CPU，指明目标CPU的汇编
 	// -c选项在输出汇编时有效，附带输出IR指令内容
 	const char options[] = "ho:STIADLO:t:cm";
@@ -195,8 +196,14 @@ lb_check:
 				gFrontEndRecursiveDescentParsing = true;
 				break;
 			case 'O':
-				// 优化级别分析，暂时没有用，如开启优化时请使用
-				gOptLevel = std::stoi(optarg);
+				// 仅支持两级：0关闭优化，1开启优化
+				if (std::string(optarg) == "0") {
+					gOptLevel = 0;
+				} else if (std::string(optarg) == "1") {
+					gOptLevel = 1;
+				} else {
+					return -1;
+				}
 				break;
 			case 't':
 				gCPUTarget = optarg;
@@ -359,20 +366,36 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
-		// 运行 mem2reg，将可提升的 alloca/load/store 转为 SSA 形式
-		for (auto * func : module->getFunctionList()) {
-			if (!func->isBuiltin() && !func->getBlocks().empty()) {
-				Mem2Reg mem2reg(func, module);
-				mem2reg.run();
+		if (gOptLevel > 0) {
+			// 运行 mem2reg，将可提升的 alloca/load/store 转为 SSA 形式
+			for (auto * func : module->getFunctionList()) {
+				if (!func->isBuiltin() && !func->getBlocks().empty()) {
+					Mem2Reg mem2reg(func, module);
+					mem2reg.run();
+				}
 			}
-		}
 
-		// 运行 DCE，删除死代码
-		for (auto * func : module->getFunctionList()) {
-			if (!func->isBuiltin() && !func->getBlocks().empty()) {
-				DCE dce(func);
-				dce.run();
-			}
+			// 优化循环
+			bool changed = false;
+			int32_t optRounds = 0;
+			do {
+				changed = false;
+				for (auto * func : module->getFunctionList()) {
+					if (!func->isBuiltin() && !func->getBlocks().empty()) {
+						ConstProp constProp(func, module);
+						changed = constProp.run() || changed;
+					}
+				}
+
+				for (auto * func : module->getFunctionList()) {
+					if (!func->isBuiltin() && !func->getBlocks().empty()) {
+						DCE dce(func);
+						dce.run();
+					}
+				}
+
+				++optRounds;
+			} while (changed && optRounds < 8);
 		}
 
 		// LLVM IR输出路径（使用-L参数时）

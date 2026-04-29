@@ -1,6 +1,6 @@
 ///
 /// @file ConstInt.h
-/// @brief int类型的常量
+/// @brief 整数常量
 ///
 
 #pragma once
@@ -13,7 +13,7 @@
 class ConstInt : public Constant {
 
 public:
-    explicit ConstInt(int32_t val) : Constant(IntegerType::getTypeInt())
+    explicit ConstInt(int32_t val, Type * type = IntegerType::getTypeInt()) : Constant(type)
     {
         name = std::to_string(val);
         intVal = val;
