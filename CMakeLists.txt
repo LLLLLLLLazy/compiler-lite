@@ -107,6 +107,8 @@ set(BACKEND_SRCS
 	backend/riscv64/LiveInterval.h
 	backend/riscv64/LiveIntervalAnalysis.cpp
 	backend/riscv64/LiveIntervalAnalysis.h
+	backend/riscv64/LocalTempManager.cpp
+	backend/riscv64/LocalTempManager.h
 	backend/riscv64/InterferenceGraph.cpp
 	backend/riscv64/InterferenceGraph.h
 	backend/riscv64/SpillManager.cpp
