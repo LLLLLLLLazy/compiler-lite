@@ -49,6 +49,8 @@ int stackSlotSize(Value * val)
 	if (auto * allocaInst = dynamic_cast<AllocaInst *>(val)) {
 		// AllocaInst按其分配类型的大小计算
 		size = allocaInst->getAllocaType()->getSize();
+	} else if (auto * globalVar = dynamic_cast<GlobalVariable *>(val)) {
+		size = globalVar->getValueType()->getSize();
 	} else if (val != nullptr && val->getType() != nullptr && val->getType()->getSize() > 0) {
 		// 其他Value按其类型大小计算
 		size = val->getType()->getSize();
@@ -97,7 +99,7 @@ void CodeGeneratorRiscV64::genDataSection()
 	for (auto * var: module->getGlobalVariables()) {
 		// BSS段变量使用.comm伪指令
 		if (var->isInBSSSection()) {
-			std::fprintf(fp, ".comm %s, %d, %d\n", var->getName().c_str(), var->getType()->getSize(),
+			std::fprintf(fp, ".comm %s, %d, %d\n", var->getName().c_str(), var->getValueType()->getSize(),
 				var->getAlignment());
 			continue;
 		}
@@ -107,7 +109,7 @@ void CodeGeneratorRiscV64::genDataSection()
 		std::fprintf(fp, ".data\n");
 		std::fprintf(fp, ".align %d\n", var->getAlignment());
 		std::fprintf(fp, ".type %s, %%object\n", var->getName().c_str());
-		std::fprintf(fp, ".size %s, %d\n", var->getName().c_str(), var->getType()->getSize());
+		std::fprintf(fp, ".size %s, %d\n", var->getName().c_str(), var->getValueType()->getSize());
 		std::fprintf(fp, "%s:\n", var->getName().c_str());
 		std::fprintf(fp, ".word %d\n", var->getInitIntValue());
 		emittedDataSection = true;
