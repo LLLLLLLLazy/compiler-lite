@@ -12,6 +12,12 @@
 User::User(Type * _type) : Value(_type)
 {}
 
+/// @brief 析构函数，负责释放所有操作数 Use 边
+User::~User()
+{
+    clearOperands();
+}
+
 /// @brief 设置指定位置的操作数值
 /// @param pos 操作数位置
 /// @param val 新的操作数值

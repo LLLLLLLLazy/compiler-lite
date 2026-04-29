@@ -78,6 +78,18 @@ LiveIntervalAnalysis::LiveIntervalAnalysis(Function * func, LoopInfo * loopInfo)
 	: func(func), interferenceGraph(nullptr), nextInstNum(0), loopInfo(loopInfo)
 {}
 
+/// @brief 析构函数，释放活跃区间和干涉图
+LiveIntervalAnalysis::~LiveIntervalAnalysis()
+{
+	for (auto * interval : intervals) {
+		delete interval;
+	}
+	intervals.clear();
+	valueToInterval.clear();
+	delete interferenceGraph;
+	interferenceGraph = nullptr;
+}
+
 /// @brief 执行完整的活跃区间分析流程
 void LiveIntervalAnalysis::run()
 {

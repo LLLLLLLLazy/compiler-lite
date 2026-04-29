@@ -89,6 +89,7 @@ void PhiLowering::run()
         for (auto * phi : phis) {
             phi->clearOperands(); // 从 use-def 链中摘除
             insts.remove(phi);
+            func->adoptDetachedValue(phi);
             toDelete.push_back(phi);
         }
     }

@@ -53,6 +53,9 @@ public:
     /// @brief 创建并返回一个新的基本块，并追加到 blocks 列表中
     BasicBlock * newBasicBlock();
 
+    /// @brief 接管不再挂在基本块上的临时 IR 值所有权
+    void adoptDetachedValue(Value * value);
+
     /// @brief 返回入口基本块
     BasicBlock * getEntryBlock() const
     {
@@ -82,6 +85,7 @@ private:
     std::vector<FormalParam *> params;
     bool builtIn = false;
     std::vector<LocalVariable *> varsVector;
+    std::vector<Value *> detachedValues;
     BasicBlock * entryBlock = nullptr;
     std::vector<BasicBlock *> blocks;
 };

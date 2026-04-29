@@ -33,6 +33,9 @@ public:
 	/// @param loopInfo 循环分析结果（可选），用于计算循环深度加权的溢出权重
 	explicit LiveIntervalAnalysis(Function * func, LoopInfo * loopInfo = nullptr);
 
+	/// @brief 析构函数，释放活跃区间和干涉图
+	~LiveIntervalAnalysis();
+
 	/// @brief 执行完整的活跃区间分析流程
 	/// 依次调用 computeLiveIntervals() 和 buildInterferenceGraph()
 	void run();
