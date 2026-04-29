@@ -52,9 +52,8 @@ bool LLVMIREmitter::run()
 
     bool hasGlobal = false;
     for (auto * global : module->getGlobalVariables()) {
-        lines.emplace_back(
-            global->getIRName() + " = global " + llvmType(global->getType()) + " " +
-            std::to_string(global->getInitIntValue()));
+        std::string initText = global->getType()->isArrayType() ? "zeroinitializer" : std::to_string(global->getInitIntValue());
+        lines.emplace_back(global->getIRName() + " = global " + llvmType(global->getType()) + " " + initText);
         hasGlobal = true;
     }
 
@@ -202,4 +201,3 @@ std::string LLVMIREmitter::escapeString(const std::string & text) const
 
     return escaped;
 }
-

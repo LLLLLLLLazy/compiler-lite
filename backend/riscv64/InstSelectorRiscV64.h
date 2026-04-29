@@ -88,6 +88,8 @@ private:
 	void translate_zext(Instruction * inst);
 	/// @brief 翻译copy指令（寄存器复制）
 	void translate_copy(Instruction * inst);
+	/// @brief 翻译元素地址计算指令
+	void translate_gep(Instruction * inst);
 	/// @brief 翻译二元运算指令的通用实现
 	/// @param inst IR指令
 	/// @param op RISC-V汇编操作码（如"add", "sub"）

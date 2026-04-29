@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "ILocRiscV64.h"
+#include "AllocaInst.h"
 #include "Common.h"
 #include "Function.h"
 #include "PlatformRiscV64.h"
@@ -351,21 +352,22 @@ void ILocRiscV64::load_symbol(int rs_reg_no, std::string name)
 /// @param rs_reg_no 结果寄存器
 /// @param base_reg_no 基址寄存器
 /// @param offset 偏移
-void ILocRiscV64::load_base(int rs_reg_no, int base_reg_no, int offset)
+void ILocRiscV64::load_base(int rs_reg_no, int base_reg_no, int offset, bool wide)
 {
 	std::string rsReg = PlatformRiscV64::regName[rs_reg_no];
 	std::string base = PlatformRiscV64::regName[base_reg_no];
+	const char * loadOp = wide ? "ld" : "lw";
 
 	if (PlatformRiscV64::isDisp(offset)) {
 		// 有效的偏移常量，RISCV64内存寻址格式: offset(base)
-		// lw rs, offset(base)
+		// lw/ld rs, offset(base)
 		std::string mem = std::to_string(offset) + "(" + base + ")";
-		emit("lw", rsReg, mem);
+		emit(loadOp, rsReg, mem);
 	} else {
 		// 偏移超出12位范围，先加载偏移到寄存器，再用add计算地址
 		load_imm(rs_reg_no, offset);
 		emit("add", rsReg, base, rsReg);
-		emit("lw", rsReg, "0(" + rsReg + ")");
+		emit(loadOp, rsReg, "0(" + rsReg + ")");
 	}
 }
 
@@ -374,21 +376,22 @@ void ILocRiscV64::load_base(int rs_reg_no, int base_reg_no, int offset)
 /// @param base_reg_no 基址寄存器
 /// @param disp 偏移
 /// @param tmp_reg_no 可能需要临时寄存器编号
-void ILocRiscV64::store_base(int src_reg_no, int base_reg_no, int disp, int tmp_reg_no)
+void ILocRiscV64::store_base(int src_reg_no, int base_reg_no, int disp, int tmp_reg_no, bool wide)
 {
 	std::string src = PlatformRiscV64::regName[src_reg_no];
 	std::string base = PlatformRiscV64::regName[base_reg_no];
+	const char * storeOp = wide ? "sd" : "sw";
 
 	if (PlatformRiscV64::isDisp(disp)) {
 		// 有效的偏移常量，RISCV64内存寻址格式: offset(base)
-		// sw src, offset(base)
+		// sw/sd src, offset(base)
 		std::string mem = std::to_string(disp) + "(" + base + ")";
-		emit("sw", src, mem);
+		emit(storeOp, src, mem);
 	} else {
 		// 偏移超出12位范围，先加载偏移到临时寄存器，再用add计算地址
 		load_imm(tmp_reg_no, disp);
 		emit("add", PlatformRiscV64::regName[tmp_reg_no], base, PlatformRiscV64::regName[tmp_reg_no]);
-		emit("sw", src, "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+		emit(storeOp, src, "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
 	}
 }
 
@@ -405,6 +408,11 @@ void ILocRiscV64::mov_reg(int rs_reg_no, int src_reg_no)
 /// @param src_var 源操作数
 void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 {
+	Type * valueType = src_var->getType();
+	if (auto * allocaInst = dynamic_cast<AllocaInst *>(src_var)) {
+		valueType = allocaInst->getAllocaType();
+	}
+	const bool wide = valueType->isPointerType();
 	if (Instanceof(constVal, ConstInt *, src_var)) {
 		// 若src_var是常量，则直接加载常量值
 		load_imm(rs_reg_no, constVal->getVal());
@@ -412,7 +420,7 @@ void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 	} else if (Instanceof(globalVar, GlobalVariable *, src_var)) {
 		// 全局变量：la加载地址 + lw加载值
 		load_symbol(rs_reg_no, globalVar->getName());
-		emit("lw", PlatformRiscV64::regName[rs_reg_no], "0(" + PlatformRiscV64::regName[rs_reg_no] + ")");
+		emit(wide ? "ld" : "lw", PlatformRiscV64::regName[rs_reg_no], "0(" + PlatformRiscV64::regName[rs_reg_no] + ")");
 
 	} else {
 		// 局部变量/临时变量/形参：通过regAllocMap查找分配信息
@@ -426,7 +434,7 @@ void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 			}
 		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
 			// 在栈上分配了空间，从栈加载
-			load_base(rs_reg_no, it->second.baseRegId, it->second.offset);
+			load_base(rs_reg_no, it->second.baseRegId, it->second.offset, wide);
 		} else {
 			// 未找到分配信息，可能是AllocaInst的结果（指针值）
 			// 指针值需要通过栈地址加载
@@ -459,10 +467,15 @@ void ILocRiscV64::lea_var(int rs_reg_no, Value * var)
 /// @param tmp_reg_no 第三方寄存器
 void ILocRiscV64::store_var(int src_reg_no, Value * dest_var, int tmp_reg_no)
 {
+	Type * valueType = dest_var->getType();
+	if (auto * allocaInst = dynamic_cast<AllocaInst *>(dest_var)) {
+		valueType = allocaInst->getAllocaType();
+	}
+	const bool wide = valueType->isPointerType();
 	if (Instanceof(globalVar, GlobalVariable *, dest_var)) {
 		// 全局变量：la加载地址 + sw存储值
 		load_symbol(tmp_reg_no, globalVar->getName());
-		emit("sw", PlatformRiscV64::regName[src_reg_no], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+		emit(wide ? "sd" : "sw", PlatformRiscV64::regName[src_reg_no], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
 
 	} else {
 		// 局部变量/临时变量/形参：通过regAllocMap查找分配信息
@@ -475,7 +488,7 @@ void ILocRiscV64::store_var(int src_reg_no, Value * dest_var, int tmp_reg_no)
 			}
 		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
 			// 在栈上分配了空间，存储到栈
-			store_base(src_reg_no, it->second.baseRegId, it->second.offset, tmp_reg_no);
+			store_base(src_reg_no, it->second.baseRegId, it->second.offset, tmp_reg_no, wide);
 		} else {
 			minic_log(LOG_ERROR, "ILocRiscV64::store_var: 未找到变量分配信息");
 		}

@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "AllocaInst.h"
+#include "ArrayType.h"
 #include "BasicBlock.h"
 #include "BinaryInst.h"
 #include "BranchInst.h"
@@ -22,13 +23,54 @@
 #include "CondBranchInst.h"
 #include "ConstInt.h"
 #include "FormalParam.h"
+#include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "ICmpInst.h"
 #include "IntegerType.h"
 #include "LoadInst.h"
+#include "PointerType.h"
 #include "ReturnInst.h"
 #include "StoreInst.h"
 #include "ZExtInst.h"
+
+namespace {
+
+ast_node * getDeclDimsNode(ast_node * declNode)
+{
+    for (std::size_t i = 2; i < declNode->sons.size(); ++i) {
+        if (declNode->sons[i] && declNode->sons[i]->node_type == ast_operator_type::AST_OP_ARRAY_DIMS) {
+            return declNode->sons[i];
+        }
+    }
+    return nullptr;
+}
+
+ast_node * getDeclInitNode(ast_node * declNode)
+{
+    for (std::size_t i = 2; i < declNode->sons.size(); ++i) {
+        if (declNode->sons[i] && declNode->sons[i]->node_type != ast_operator_type::AST_OP_ARRAY_DIMS) {
+            return declNode->sons[i];
+        }
+    }
+    return nullptr;
+}
+
+ast_node * getParamDimsNode(ast_node * paramNode)
+{
+    for (std::size_t i = 2; i < paramNode->sons.size(); ++i) {
+        if (paramNode->sons[i] && paramNode->sons[i]->node_type == ast_operator_type::AST_OP_ARRAY_DIMS) {
+            return paramNode->sons[i];
+        }
+    }
+    return nullptr;
+}
+
+bool isArrayType(Type * type)
+{
+    return type != nullptr && type->isArrayType();
+}
+
+} // namespace
 
 /// @brief 构造 AST 到结构化 IR 的生成器
 IRGenerator::IRGenerator(ast_node * _root, Module * _module) : root(_root), module(_module)
@@ -46,6 +88,9 @@ bool IRGenerator::run()
         minic_log(LOG_ERROR, "IRGenerator 只支持从编译单元根节点启动");
         return false;
     }
+
+    constBindings.clear();
+    constBindings.emplace_back();
 
     if (!declareCompileUnit(root)) {
         return false;
@@ -73,7 +118,11 @@ bool IRGenerator::declareCompileUnit(ast_node * node)
             if (paramNode->sons.size() < 2) {
                 continue;
             }
-            params.push_back(new FormalParam(paramNode->sons[0]->type, paramNode->sons[1]->name));
+            Type * paramType = buildDeclaredType(paramNode, true);
+            if (!paramType) {
+                return false;
+            }
+            params.push_back(new FormalParam(paramType, paramNode->sons[1]->name));
         }
 
         if (!module->newFunction(nameNode->name, typeNode->type, params)) {
@@ -166,6 +215,7 @@ bool IRGenerator::visitFuncDef(ast_node * node)
 
     module->setCurrentFunction(func);
     module->enterScope();
+    constBindings.emplace_back();
 
     // 重置当前函数的块级 IR 生成状态
     varAllocaMap.clear();
@@ -185,6 +235,7 @@ bool IRGenerator::visitFuncDef(ast_node * node)
         // 为形参名在作用域栈中创建一个局部变量条目
         Value * paramLocal = module->newVarValue(param->getType(), param->getName());
         if (!paramLocal) {
+            constBindings.pop_back();
             module->leaveScope();
             module->setCurrentFunction(nullptr);
             return false;
@@ -200,6 +251,7 @@ bool IRGenerator::visitFuncDef(ast_node * node)
     // 遍历函数体
     blockNode->needScope = false;
     if (!visitBlock(blockNode)) {
+        constBindings.pop_back();
         module->leaveScope();
         module->setCurrentFunction(nullptr);
         return false;
@@ -214,6 +266,7 @@ bool IRGenerator::visitFuncDef(ast_node * node)
         }
     }
 
+    constBindings.pop_back();
     module->leaveScope();
     module->setCurrentFunction(nullptr);
     return true;
@@ -226,11 +279,13 @@ bool IRGenerator::visitBlock(ast_node * node)
 {
     if (node->needScope) {
         module->enterScope();
+        constBindings.emplace_back();
     }
 
     for (auto son : node->sons) {
         if (!visitStatement(son)) {
             if (node->needScope) {
+                constBindings.pop_back();
                 module->leaveScope();
             }
             return false;
@@ -238,6 +293,7 @@ bool IRGenerator::visitBlock(ast_node * node)
     }
 
     if (node->needScope) {
+        constBindings.pop_back();
         module->leaveScope();
     }
 
@@ -443,32 +499,27 @@ bool IRGenerator::visitContinue(ast_node * node)
 /// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitAssign(ast_node * node)
 {
-    Value * var = module->findVarValue(node->sons[0]->name);
-    if (!var) {
-        minic_log(LOG_ERROR, "变量(%s)未定义", node->sons[0]->name.c_str());
+    Value * addr = visitLValueAddress(node->sons[0]);
+    if (!addr) {
         return false;
     }
-
     Value * rhs = visitExpr(node->sons[1]);
     if (!rhs) {
         return false;
     }
 
-    if (var->getType()->isInt32Type() && rhs->getType()->isInt1Byte()) {
+    auto * ptrType = dynamic_cast<const PointerType *>(addr->getType());
+    if (ptrType == nullptr) {
+        minic_log(LOG_ERROR, "赋值目标不是地址类型");
+        return false;
+    }
+
+    Type * pointeeType = const_cast<Type *>(ptrType->getPointeeType());
+    if (pointeeType->isInt32Type() && rhs->getType()->isInt1Byte()) {
         rhs = ensureI32(rhs);
     }
 
-    auto * globalVar = dynamic_cast<GlobalVariable *>(var);
-    if (globalVar) {
-        emitToBlock(new StoreInst(currentFunction(), rhs, globalVar));
-    } else {
-        AllocaInst * slot = getOrCreateVarSlot(var);
-        if (!slot) {
-            return false;
-        }
-        emitToBlock(new StoreInst(currentFunction(), rhs, slot));
-    }
-
+    emitToBlock(new StoreInst(currentFunction(), rhs, addr));
     return true;
 }
 
@@ -490,8 +541,12 @@ bool IRGenerator::visitDeclStmt(ast_node * node)
 /// @return true 表示生成成功，false 表示生成失败
 bool IRGenerator::visitVarDecl(ast_node * node)
 {
-    Type * declType = node->sons[0]->type;
+    Type * declType = buildDeclaredType(node, false);
+    if (!declType) {
+        return false;
+    }
     std::string varName = node->sons[1]->name;
+    ast_node * initNode = getDeclInitNode(node);
 
     if (module->getCurrentFunction()) {
         Value * varValue = module->newVarValue(declType, varName);
@@ -502,15 +557,22 @@ bool IRGenerator::visitVarDecl(ast_node * node)
         AllocaInst * slot = emitAlloca(declType);
         varAllocaMap[varValue] = slot;
 
-        if (node->sons.size() >= 3) {
-            Value * initValue = visitExpr(node->sons[2]);
-            if (!initValue) {
+        if (node->isConst && !initNode) {
+            minic_log(LOG_ERROR, "const 变量(%s)必须初始化", varName.c_str());
+            return false;
+        }
+
+        if (initNode) {
+            if (!emitInitializer(slot, declType, initNode)) {
                 return false;
             }
-            if (declType->isInt32Type() && initValue->getType()->isInt1Byte()) {
-                initValue = ensureI32(initValue);
+        }
+
+        if (node->isConst && declType->isInt32Type()) {
+            int32_t constValue = 0;
+            if (evaluateConstIntExpr(initNode, constValue)) {
+                constBindings.back()[varName] = constValue;
             }
-            emitToBlock(new StoreInst(currentFunction(), initValue, slot));
         }
 
         return true;
@@ -523,23 +585,306 @@ bool IRGenerator::visitVarDecl(ast_node * node)
         return false;
     }
 
-    if (node->sons.size() >= 3) {
+    if (node->isConst && !initNode) {
+        minic_log(LOG_ERROR, "全局 const 变量(%s)必须初始化", varName.c_str());
+        return false;
+    }
+
+    if (declType->isArrayType()) {
+        if (initNode && !(initNode->node_type == ast_operator_type::AST_OP_INIT_LIST && initNode->sons.empty())) {
+            minic_log(LOG_ERROR, "当前仅支持零初始化的全局数组(%s)", varName.c_str());
+            return false;
+        }
+        return true;
+    }
+
+    if (initNode) {
         int32_t initValue = 0;
-        if (!evaluateGlobalIntConstExpr(node->sons[2], initValue)) {
+        if (!evaluateConstIntExpr(initNode, initValue)) {
             minic_log(LOG_ERROR, "全局变量(%s)只支持常量初始化", varName.c_str());
             return false;
         }
         globalVar->setInitIntValue(initValue);
     }
 
+    if (node->isConst && declType->isInt32Type()) {
+        int32_t constValue = 0;
+        if (evaluateConstIntExpr(initNode, constValue)) {
+            constBindings.front()[varName] = constValue;
+        }
+    }
+
     return true;
 }
 
-/// @brief 计算全局整型常量初始化表达式的值
+Type * IRGenerator::buildDeclaredType(ast_node * declNode, bool forParam)
+{
+    if (!declNode || declNode->sons.empty()) {
+        return nullptr;
+    }
+
+    Type * type = declNode->sons[0]->type;
+    ast_node * dimsNode = nullptr;
+    if (declNode->node_type == ast_operator_type::AST_OP_FUNC_FORMAL_PARAM) {
+        dimsNode = getParamDimsNode(declNode);
+    } else {
+        dimsNode = getDeclDimsNode(declNode);
+    }
+
+    if (!dimsNode) {
+        return type;
+    }
+
+    for (auto it = dimsNode->sons.rbegin(); it != dimsNode->sons.rend(); ++it) {
+        int32_t dimValue = 0;
+        if (!evaluateConstIntExpr(*it, dimValue) || dimValue <= 0) {
+            minic_log(LOG_ERROR, "数组维度必须是正整数常量");
+            return nullptr;
+        }
+        type = ArrayType::get(type, dimValue);
+    }
+
+    if (forParam && dimsNode->firstDimOmitted) {
+        return const_cast<PointerType *>(PointerType::get(type));
+    }
+
+    return type;
+}
+
+Value * IRGenerator::getAddressOfVariable(Value * var)
+{
+    if (auto * globalVar = dynamic_cast<GlobalVariable *>(var)) {
+        return globalVar;
+    }
+
+    return getOrCreateVarSlot(var);
+}
+
+Value * IRGenerator::visitLValueAddress(ast_node * node)
+{
+    if (!node) {
+        return nullptr;
+    }
+
+    if (node->node_type == ast_operator_type::AST_OP_LEAF_VAR_ID) {
+        Value * var = module->findVarValue(node->name);
+        if (!var) {
+            minic_log(LOG_ERROR, "变量(%s)未定义", node->name.c_str());
+            return nullptr;
+        }
+        return getAddressOfVariable(var);
+    }
+
+    if (node->node_type == ast_operator_type::AST_OP_ARRAY_SUBSCRIPT) {
+        ast_node * baseNode = node->sons[0];
+        ast_node * indexNode = node->sons[1];
+
+        Value * basePtr = nullptr;
+        bool baseIsObjectAddress = false;
+        if (baseNode->node_type == ast_operator_type::AST_OP_LEAF_VAR_ID) {
+            Value * baseVar = module->findVarValue(baseNode->name);
+            if (!baseVar) {
+                minic_log(LOG_ERROR, "变量(%s)未定义", baseNode->name.c_str());
+                return nullptr;
+            }
+            if (baseVar->getType()->isArrayType()) {
+                basePtr = getAddressOfVariable(baseVar);
+                if (!basePtr) {
+                    return nullptr;
+                }
+                baseIsObjectAddress = true;
+            } else {
+                basePtr = visitExpr(baseNode);
+            }
+        } else {
+            Value * baseAddr = visitLValueAddress(baseNode);
+            if (!baseAddr) {
+                return nullptr;
+            }
+            basePtr = baseAddr;
+            auto * ptrType = dynamic_cast<const PointerType *>(basePtr->getType());
+            if (ptrType == nullptr || !isArrayType(const_cast<Type *>(ptrType->getPointeeType()))) {
+                basePtr = visitExpr(baseNode);
+            } else {
+                baseIsObjectAddress = true;
+            }
+        }
+
+        if (!basePtr) {
+            return nullptr;
+        }
+
+        Value * indexValue = visitExpr(indexNode);
+        if (!indexValue) {
+            return nullptr;
+        }
+        indexValue = ensureI32(indexValue);
+
+        auto * ptrType = dynamic_cast<const PointerType *>(basePtr->getType());
+        if (ptrType == nullptr) {
+            minic_log(LOG_ERROR, "数组下标基对象不是指针");
+            return nullptr;
+        }
+
+        if (baseIsObjectAddress) {
+            return emitGEP(basePtr, indexValue, true);
+        }
+
+        return emitGEP(basePtr, indexValue, false);
+    }
+
+    minic_log(LOG_ERROR, "不支持的左值节点类型: %d", static_cast<int>(node->node_type));
+    return nullptr;
+}
+
+Value * IRGenerator::emitGEP(Value * basePtr, Value * index, bool decayArray)
+{
+    auto * ptrType = dynamic_cast<const PointerType *>(basePtr->getType());
+    if (ptrType == nullptr) {
+        minic_log(LOG_ERROR, "GEP 基对象不是指针");
+        return nullptr;
+    }
+
+    Type * resultPointee = const_cast<Type *>(ptrType->getPointeeType());
+    if (decayArray) {
+        auto * arrayType = dynamic_cast<ArrayType *>(resultPointee);
+        if (arrayType == nullptr) {
+            minic_log(LOG_ERROR, "数组退化/索引要求数组地址");
+            return nullptr;
+        }
+        resultPointee = arrayType->getElementType();
+    }
+
+    auto * resultType = const_cast<PointerType *>(PointerType::get(resultPointee));
+    auto * gepInst = new GetElementPtrInst(currentFunction(), basePtr, index, resultType, decayArray);
+    emitToBlock(gepInst);
+    return gepInst;
+}
+
+std::size_t IRGenerator::countScalarSlots(Type * type) const
+{
+    auto * arrayType = dynamic_cast<ArrayType *>(type);
+    if (arrayType == nullptr) {
+        return 1;
+    }
+
+    return static_cast<std::size_t>(arrayType->getNumElements()) * countScalarSlots(arrayType->getElementType());
+}
+
+bool IRGenerator::emitZeroInitializer(Value * addr, Type * type)
+{
+    auto * arrayType = dynamic_cast<ArrayType *>(type);
+    if (arrayType == nullptr) {
+        emitToBlock(new StoreInst(currentFunction(), module->newConstInt(0), addr));
+        return true;
+    }
+
+    for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
+        Value * elemAddr = emitGEP(addr, module->newConstInt(i), true);
+        if (!elemAddr || !emitZeroInitializer(elemAddr, arrayType->getElementType())) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool IRGenerator::emitArrayInitializer(
+    Value * addr, Type * type, const std::vector<ast_node *> & items, std::size_t begin, std::size_t end)
+{
+    auto * arrayType = dynamic_cast<ArrayType *>(type);
+    if (arrayType == nullptr) {
+        if (begin >= end) {
+            return emitZeroInitializer(addr, type);
+        }
+        return emitInitializer(addr, type, items[begin]);
+    }
+
+    std::size_t cursor = begin;
+    Type * elemType = arrayType->getElementType();
+    std::size_t subScalarCount = countScalarSlots(elemType);
+
+    for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
+        Value * elemAddr = emitGEP(addr, module->newConstInt(i), true);
+        if (!elemAddr) {
+            return false;
+        }
+
+        if (cursor >= end) {
+            if (!emitZeroInitializer(elemAddr, elemType)) {
+                return false;
+            }
+            continue;
+        }
+
+        ast_node * item = items[cursor];
+        if (dynamic_cast<ArrayType *>(elemType) != nullptr && item->node_type != ast_operator_type::AST_OP_INIT_LIST) {
+            std::size_t take = 0;
+            while (cursor + take < end &&
+                   items[cursor + take]->node_type != ast_operator_type::AST_OP_INIT_LIST &&
+                   take < subScalarCount) {
+                ++take;
+            }
+            if (!emitArrayInitializer(elemAddr, elemType, items, cursor, cursor + take)) {
+                return false;
+            }
+            cursor += take;
+            continue;
+        }
+
+        if (!emitInitializer(elemAddr, elemType, item)) {
+            return false;
+        }
+        ++cursor;
+    }
+
+    return true;
+}
+
+bool IRGenerator::emitInitializer(Value * addr, Type * type, ast_node * initNode)
+{
+    auto * arrayType = dynamic_cast<ArrayType *>(type);
+    if (arrayType != nullptr) {
+        if (initNode == nullptr) {
+            return emitZeroInitializer(addr, type);
+        }
+
+        if (initNode->node_type == ast_operator_type::AST_OP_INIT_LIST) {
+            return emitArrayInitializer(addr, type, initNode->sons, 0, initNode->sons.size());
+        }
+
+        std::vector<ast_node *> singleItem{initNode};
+        return emitArrayInitializer(addr, type, singleItem, 0, 1);
+    }
+
+    if (initNode == nullptr) {
+        return emitZeroInitializer(addr, type);
+    }
+
+    ast_node * scalarInit = initNode;
+    if (scalarInit->node_type == ast_operator_type::AST_OP_INIT_LIST) {
+        if (scalarInit->sons.empty()) {
+            return emitZeroInitializer(addr, type);
+        }
+        scalarInit = scalarInit->sons[0];
+    }
+
+    Value * initValue = visitExpr(scalarInit);
+    if (!initValue) {
+        return false;
+    }
+    if (type->isInt32Type() && initValue->getType()->isInt1Byte()) {
+        initValue = ensureI32(initValue);
+    }
+    emitToBlock(new StoreInst(currentFunction(), initValue, addr));
+    return true;
+}
+
+/// @brief 计算整型常量表达式的值
 /// @param node 常量表达式节点
 /// @param result 输出的计算结果
 /// @return true 表示计算成功，false 表示表达式不合法
-bool IRGenerator::evaluateGlobalIntConstExpr(ast_node * node, int32_t & result)
+bool IRGenerator::evaluateConstIntExpr(ast_node * node, int32_t & result)
 {
     if (!node) {
         return false;
@@ -550,9 +895,19 @@ bool IRGenerator::evaluateGlobalIntConstExpr(ast_node * node, int32_t & result)
             result = static_cast<int32_t>(node->integer_val);
             return true;
 
+        case ast_operator_type::AST_OP_LEAF_VAR_ID:
+            for (auto it = constBindings.rbegin(); it != constBindings.rend(); ++it) {
+                auto found = it->find(node->name);
+                if (found != it->end()) {
+                    result = found->second;
+                    return true;
+                }
+            }
+            return false;
+
         case ast_operator_type::AST_OP_NEG: {
             int32_t operand = 0;
-            if (!evaluateGlobalIntConstExpr(node->sons[0], operand)) {
+            if (!evaluateConstIntExpr(node->sons[0], operand)) {
                 return false;
             }
             result = -operand;
@@ -561,7 +916,7 @@ bool IRGenerator::evaluateGlobalIntConstExpr(ast_node * node, int32_t & result)
 
         case ast_operator_type::AST_OP_NOT: {
             int32_t operand = 0;
-            if (!evaluateGlobalIntConstExpr(node->sons[0], operand)) {
+            if (!evaluateConstIntExpr(node->sons[0], operand)) {
                 return false;
             }
             result = !operand;
@@ -583,8 +938,8 @@ bool IRGenerator::evaluateGlobalIntConstExpr(ast_node * node, int32_t & result)
         case ast_operator_type::AST_OP_LOR: {
             int32_t lhs = 0;
             int32_t rhs = 0;
-            if (!evaluateGlobalIntConstExpr(node->sons[0], lhs) ||
-                !evaluateGlobalIntConstExpr(node->sons[1], rhs)) {
+            if (!evaluateConstIntExpr(node->sons[0], lhs) ||
+                !evaluateConstIntExpr(node->sons[1], rhs)) {
                 return false;
             }
 
@@ -659,6 +1014,24 @@ Value * IRGenerator::visitExpr(ast_node * node)
 
         case ast_operator_type::AST_OP_LEAF_VAR_ID:
             return visitLeafVarId(node);
+
+        case ast_operator_type::AST_OP_ARRAY_SUBSCRIPT: {
+            Value * addr = visitLValueAddress(node);
+            if (!addr) {
+                return nullptr;
+            }
+            auto * ptrType = dynamic_cast<const PointerType *>(addr->getType());
+            if (ptrType == nullptr) {
+                minic_log(LOG_ERROR, "数组下标不是有效地址");
+                return nullptr;
+            }
+            if (isArrayType(const_cast<Type *>(ptrType->getPointeeType()))) {
+                return emitGEP(addr, module->newConstInt(0), true);
+            }
+            auto * loadInst = new LoadInst(currentFunction(), addr, const_cast<Type *>(ptrType->getPointeeType()));
+            emitToBlock(loadInst);
+            return loadInst;
+        }
 
         case ast_operator_type::AST_OP_FUNC_CALL:
             return visitFuncCall(node);
@@ -818,25 +1191,33 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
 /// @return 变量加载后的值，失败时返回空指针
 Value * IRGenerator::visitLeafVarId(ast_node * node)
 {
+    for (auto it = constBindings.rbegin(); it != constBindings.rend(); ++it) {
+        auto found = it->find(node->name);
+        if (found != it->end()) {
+            return module->newConstInt(found->second);
+        }
+    }
+
     Value * var = module->findVarValue(node->name);
     if (!var) {
         minic_log(LOG_ERROR, "变量(%s)未定义", node->name.c_str());
         return nullptr;
     }
 
-    auto * globalVar = dynamic_cast<GlobalVariable *>(var);
-    if (globalVar) {
-        auto * loadInst = new LoadInst(currentFunction(), globalVar, globalVar->getType());
-        emitToBlock(loadInst);
-        return loadInst;
+    if (var->getType()->isArrayType()) {
+        Value * addr = getAddressOfVariable(var);
+        if (!addr) {
+            return nullptr;
+        }
+        return emitGEP(addr, module->newConstInt(0), true);
     }
 
-    AllocaInst * slot = getOrCreateVarSlot(var);
-    if (!slot) {
+    Value * addr = getAddressOfVariable(var);
+    if (!addr) {
         return nullptr;
     }
 
-    auto * loadInst = new LoadInst(currentFunction(), slot, slot->getAllocaType());
+    auto * loadInst = new LoadInst(currentFunction(), addr, var->getType());
     emitToBlock(loadInst);
     return loadInst;
 }
