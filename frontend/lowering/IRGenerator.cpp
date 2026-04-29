@@ -75,6 +75,23 @@ bool isArrayType(Type * type)
     return type != nullptr && type->isArrayType();
 }
 
+Type * getAddressPointeeType(Value * addr)
+{
+    if (addr == nullptr) {
+        return nullptr;
+    }
+
+    if (auto * ptrType = dynamic_cast<PointerType *>(addr->getType())) {
+        return const_cast<Type *>(ptrType->getPointeeType());
+    }
+
+    if (auto * globalVar = dynamic_cast<GlobalVariable *>(addr)) {
+        return globalVar->getType();
+    }
+
+    return nullptr;
+}
+
 } // namespace
 
 /// @brief 构造 AST 到结构化 IR 的生成器
@@ -525,13 +542,12 @@ bool IRGenerator::visitAssign(ast_node * node)
         return false;
     }
 
-    auto * ptrType = dynamic_cast<const PointerType *>(addr->getType());
-    if (ptrType == nullptr) {
+    Type * pointeeType = getAddressPointeeType(addr);
+    if (pointeeType == nullptr) {
         minic_log(LOG_ERROR, "赋值目标不是地址类型");
         return false;
     }
 
-    Type * pointeeType = const_cast<Type *>(ptrType->getPointeeType());
     rhs = convertValueToType(rhs, pointeeType);
     if (!rhs) {
         return false;
@@ -739,8 +755,8 @@ Value * IRGenerator::visitLValueAddress(ast_node * node)
                 return nullptr;
             }
             basePtr = baseAddr;
-            auto * ptrType = dynamic_cast<const PointerType *>(basePtr->getType());
-            if (ptrType == nullptr || !isArrayType(const_cast<Type *>(ptrType->getPointeeType()))) {
+            Type * pointeeType = getAddressPointeeType(basePtr);
+            if (pointeeType == nullptr || !isArrayType(pointeeType)) {
                 basePtr = visitExpr(baseNode);
             } else {
                 baseIsObjectAddress = true;
@@ -757,8 +773,8 @@ Value * IRGenerator::visitLValueAddress(ast_node * node)
         }
         indexValue = ensureI32(indexValue);
 
-        auto * ptrType = dynamic_cast<const PointerType *>(basePtr->getType());
-        if (ptrType == nullptr) {
+        Type * pointeeType = getAddressPointeeType(basePtr);
+        if (pointeeType == nullptr) {
             minic_log(LOG_ERROR, "数组下标基对象不是指针");
             return nullptr;
         }
@@ -776,13 +792,12 @@ Value * IRGenerator::visitLValueAddress(ast_node * node)
 
 Value * IRGenerator::emitGEP(Value * basePtr, Value * index, bool decayArray)
 {
-    auto * ptrType = dynamic_cast<const PointerType *>(basePtr->getType());
-    if (ptrType == nullptr) {
+    Type * resultPointee = getAddressPointeeType(basePtr);
+    if (resultPointee == nullptr) {
         minic_log(LOG_ERROR, "GEP 基对象不是指针");
         return nullptr;
     }
 
-    Type * resultPointee = const_cast<Type *>(ptrType->getPointeeType());
     if (decayArray) {
         auto * arrayType = dynamic_cast<ArrayType *>(resultPointee);
         if (arrayType == nullptr) {
@@ -1086,15 +1101,15 @@ Value * IRGenerator::visitExpr(ast_node * node)
             if (!addr) {
                 return nullptr;
             }
-            auto * ptrType = dynamic_cast<const PointerType *>(addr->getType());
-            if (ptrType == nullptr) {
+            Type * pointeeType = getAddressPointeeType(addr);
+            if (pointeeType == nullptr) {
                 minic_log(LOG_ERROR, "数组下标不是有效地址");
                 return nullptr;
             }
-            if (isArrayType(const_cast<Type *>(ptrType->getPointeeType()))) {
+            if (isArrayType(pointeeType)) {
                 return emitGEP(addr, module->newConstInt(0), true);
             }
-            auto * loadInst = new LoadInst(currentFunction(), addr, const_cast<Type *>(ptrType->getPointeeType()));
+            auto * loadInst = new LoadInst(currentFunction(), addr, pointeeType);
             emitToBlock(loadInst);
             return loadInst;
         }
