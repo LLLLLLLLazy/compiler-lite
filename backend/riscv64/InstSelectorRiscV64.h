@@ -78,8 +78,20 @@ private:
 	void translate_div(Instruction * inst);
 	/// @brief 翻译mod指令（取模）
 	void translate_mod(Instruction * inst);
-	/// @brief 翻译icmp指令（整数比较）
+	/// @brief 翻译icmp/fcmp指令（整数/浮点比较）
 	void translate_icmp(Instruction * inst);
+	/// @brief 翻译浮点加法
+	void translate_fadd(Instruction * inst);
+	/// @brief 翻译浮点减法
+	void translate_fsub(Instruction * inst);
+	/// @brief 翻译浮点乘法
+	void translate_fmul(Instruction * inst);
+	/// @brief 翻译浮点除法
+	void translate_fdiv(Instruction * inst);
+	/// @brief 翻译int→float转换
+	void translate_sitofp(Instruction * inst);
+	/// @brief 翻译float→int转换
+	void translate_fptosi(Instruction * inst);
 	/// @brief 翻译br指令（无条件跳转）
 	void translate_br(Instruction * inst);
 	/// @brief 翻译cond_br指令（条件跳转）
@@ -100,6 +112,10 @@ private:
 	/// @param inst IR指令
 	/// @param op RISC-V汇编操作码（如"add", "sub"）
 	void translate_binary(Instruction * inst, const std::string & op);
+	/// @brief 翻译浮点二元运算的通用实现
+	/// @param inst IR指令
+	/// @param op RISC-V浮点汇编操作码（如"fadd.s", "fsub.s"）
+	void translate_fbinary(Instruction * inst, const std::string & op);
 
 	/// @brief 生成形参从a0-a7到分配寄存器的移动指令
 	void emitFormalParamMoves();

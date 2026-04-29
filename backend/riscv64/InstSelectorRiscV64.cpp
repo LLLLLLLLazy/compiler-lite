@@ -22,6 +22,7 @@
 #include "CallInst.h"
 #include "CondBranchInst.h"
 #include "CopyInst.h"
+#include "FPToSIInst.h"
 #include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "ICmpInst.h"
@@ -31,6 +32,7 @@
 #include "PlatformRiscV64.h"
 #include "PointerType.h"
 #include "ReturnInst.h"
+#include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "Value.h"
 #include "ZExtInst.h"
@@ -88,6 +90,21 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_ZEXT] = &InstSelectorRiscV64::translate_zext;
 	translatorHandlers[IRInstOperator::IRINST_OP_COPY] = &InstSelectorRiscV64::translate_copy;
 	translatorHandlers[IRInstOperator::IRINST_OP_GEP] = &InstSelectorRiscV64::translate_gep;
+	// 浮点运算
+	translatorHandlers[IRInstOperator::IRINST_OP_ADD_F] = &InstSelectorRiscV64::translate_fadd;
+	translatorHandlers[IRInstOperator::IRINST_OP_SUB_F] = &InstSelectorRiscV64::translate_fsub;
+	translatorHandlers[IRInstOperator::IRINST_OP_MUL_F] = &InstSelectorRiscV64::translate_fmul;
+	translatorHandlers[IRInstOperator::IRINST_OP_DIV_F] = &InstSelectorRiscV64::translate_fdiv;
+	// 浮点比较 (复用 ICmpInst，通过translate_icmp分发)
+	translatorHandlers[IRInstOperator::IRINST_OP_LT_F] = &InstSelectorRiscV64::translate_icmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_GT_F] = &InstSelectorRiscV64::translate_icmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_LE_F] = &InstSelectorRiscV64::translate_icmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_GE_F] = &InstSelectorRiscV64::translate_icmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_EQ_F] = &InstSelectorRiscV64::translate_icmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_NE_F] = &InstSelectorRiscV64::translate_icmp;
+	// 类型转换
+	translatorHandlers[IRInstOperator::IRINST_OP_SITOFP] = &InstSelectorRiscV64::translate_sitofp;
+	translatorHandlers[IRInstOperator::IRINST_OP_FPTOSI] = &InstSelectorRiscV64::translate_fptosi;
 }
 
 /// @brief 执行指令选择主流程
@@ -306,6 +323,122 @@ void InstSelectorRiscV64::translate_mod(Instruction * inst)
 	translate_binary(inst, "rem");
 }
 
+/// @brief 翻译浮点二元运算的通用实现
+///
+/// 整数寄存器中存储的是float的IEEE 754位模式，
+/// 需要通过fmv.w.x移到FP寄存器，执行FP运算，再fmv.x.w移回整数寄存器
+void InstSelectorRiscV64::translate_fbinary(Instruction * inst, const std::string & op)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	if (binary == nullptr) {
+		return;
+	}
+
+	int dstReg = getResultReg(inst);
+	const bool dstBorrowed = (dstReg < 0);
+	if (dstBorrowed) {
+		dstReg = tempMgr.borrow(inst);
+	}
+
+	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
+	OperandReg rhs = loadOperand(binary->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
+
+	// 将操作数从整数寄存器移到FP寄存器
+	iloc.inst("fmv.w.x", "ft0", PlatformRiscV64::regName[lhs.reg]);
+	iloc.inst("fmv.w.x", "ft1", PlatformRiscV64::regName[rhs.reg]);
+	// 执行FP运算
+	iloc.inst(op, "ft0", "ft0", "ft1");
+	// 将结果从FP寄存器移回整数寄存器
+	iloc.inst("fmv.x.w", PlatformRiscV64::regName[dstReg], "ft0");
+
+	releaseOperand(rhs);
+	releaseOperand(lhs);
+
+	storeResult(inst, dstReg, inst);
+	if (dstBorrowed) {
+		tempMgr.release(dstReg);
+	}
+}
+
+/// @brief 翻译浮点加法
+void InstSelectorRiscV64::translate_fadd(Instruction * inst)
+{
+	translate_fbinary(inst, "fadd.s");
+}
+
+/// @brief 翻译浮点减法
+void InstSelectorRiscV64::translate_fsub(Instruction * inst)
+{
+	translate_fbinary(inst, "fsub.s");
+}
+
+/// @brief 翻译浮点乘法
+void InstSelectorRiscV64::translate_fmul(Instruction * inst)
+{
+	translate_fbinary(inst, "fmul.s");
+}
+
+/// @brief 翻译浮点除法
+void InstSelectorRiscV64::translate_fdiv(Instruction * inst)
+{
+	translate_fbinary(inst, "fdiv.s");
+}
+
+/// @brief 翻译int→float转换 (sitofp)
+///
+/// 使用fcvt.s.w将整数转为单精度浮点
+void InstSelectorRiscV64::translate_sitofp(Instruction * inst)
+{
+	auto * sitofp = dynamic_cast<SIToFPInst *>(inst);
+	if (sitofp == nullptr) {
+		return;
+	}
+
+	int dstReg = getResultReg(inst);
+	const bool dstBorrowed = (dstReg < 0);
+	if (dstBorrowed) {
+		dstReg = tempMgr.borrow(inst);
+	}
+
+	OperandReg src = loadOperand(sitofp->getSource(), inst, dstReg);
+	iloc.inst("fcvt.s.w", "ft0", PlatformRiscV64::regName[src.reg]);
+	iloc.inst("fmv.x.w", PlatformRiscV64::regName[dstReg], "ft0");
+	releaseOperand(src);
+
+	storeResult(inst, dstReg, inst);
+	if (dstBorrowed) {
+		tempMgr.release(dstReg);
+	}
+}
+
+/// @brief 翻译float→int转换 (fptosi)
+///
+/// 使用fcvt.w.s将单精度浮点转为整数（向零舍入）
+void InstSelectorRiscV64::translate_fptosi(Instruction * inst)
+{
+	auto * fptosi = dynamic_cast<FPToSIInst *>(inst);
+	if (fptosi == nullptr) {
+		return;
+	}
+
+	int dstReg = getResultReg(inst);
+	const bool dstBorrowed = (dstReg < 0);
+	if (dstBorrowed) {
+		dstReg = tempMgr.borrow(inst);
+	}
+
+	OperandReg src = loadOperand(fptosi->getSource(), inst, dstReg);
+	iloc.inst("fmv.w.x", "ft0", PlatformRiscV64::regName[src.reg]);
+	iloc.inst("fcvt.w.s", PlatformRiscV64::regName[dstReg], "ft0", "rtz");
+	releaseOperand(src);
+
+	storeResult(inst, dstReg, inst);
+	if (dstBorrowed) {
+		tempMgr.release(dstReg);
+	}
+}
+
 /// @brief 翻译二元运算指令的通用实现
 /// @param inst IR指令
 /// @param op RISC-V汇编操作码
@@ -344,22 +477,21 @@ void InstSelectorRiscV64::translate_binary(Instruction * inst, const std::string
 	}
 }
 
-/// @brief 翻译icmp指令（整数比较）
+/// @brief 翻译icmp/fcmp指令（整数/浮点比较）
 /// @param inst IR指令
 ///
-/// 根据比较操作码生成对应的RISC-V比较指令：
-/// - lt: slt dst, lhs, rhs
-/// - gt: slt dst, rhs, lhs
-/// - le: slt dst, rhs, lhs; xori dst, dst, 1
-/// - ge: slt dst, lhs, rhs; xori dst, dst, 1
-/// - eq: sub dst, lhs, rhs; seqz dst, dst
-/// - ne: sub dst, lhs, rhs; snez dst, dst
+/// 整数比较生成RISC-V整数比较指令，浮点比较生成F扩展比较指令：
+/// 整数: slt/xori/sub+seqz/snez
+/// 浮点: 先将操作数从整数寄存器移至FP寄存器(fmv.w.x)，再用flt.s/fle.s/feq.s
 void InstSelectorRiscV64::translate_icmp(Instruction * inst)
 {
 	auto * icmp = dynamic_cast<ICmpInst *>(inst);
 	if (icmp == nullptr) {
 		return;
 	}
+
+	bool isFloat =
+		icmp->getLHS()->getType()->isFloatType() || icmp->getRHS()->getType()->isFloatType();
 
 	int dstReg = getResultReg(inst);
 	const bool dstBorrowed = (dstReg < 0);
@@ -375,31 +507,61 @@ void InstSelectorRiscV64::translate_icmp(Instruction * inst)
 	const std::string lhs = PlatformRiscV64::regName[lhsOperand.reg];
 	const std::string rhs = PlatformRiscV64::regName[rhsOperand.reg];
 
-	switch (inst->getOp()) {
-		case IRInstOperator::IRINST_OP_LT_I:
-			iloc.inst("slt", dst, lhs, rhs);
-			break;
-		case IRInstOperator::IRINST_OP_GT_I:
-			iloc.inst("slt", dst, rhs, lhs);
-			break;
-		case IRInstOperator::IRINST_OP_LE_I:
-			iloc.inst("slt", dst, rhs, lhs);
-			iloc.inst("xori", dst, dst, "1");
-			break;
-		case IRInstOperator::IRINST_OP_GE_I:
-			iloc.inst("slt", dst, lhs, rhs);
-			iloc.inst("xori", dst, dst, "1");
-			break;
-		case IRInstOperator::IRINST_OP_EQ_I:
-			iloc.inst("sub", dst, lhs, rhs);
-			iloc.inst("seqz", dst, dst);
-			break;
-		case IRInstOperator::IRINST_OP_NE_I:
-			iloc.inst("sub", dst, lhs, rhs);
-			iloc.inst("snez", dst, dst);
-			break;
-		default:
-			break;
+	if (isFloat) {
+		// 将操作数从整数寄存器移到FP寄存器
+		iloc.inst("fmv.w.x", "ft0", lhs);
+		iloc.inst("fmv.w.x", "ft1", rhs);
+
+		switch (inst->getOp()) {
+			case IRInstOperator::IRINST_OP_LT_F:
+				iloc.inst("flt.s", dst, "ft0", "ft1");
+				break;
+			case IRInstOperator::IRINST_OP_GT_F:
+				iloc.inst("flt.s", dst, "ft1", "ft0");
+				break;
+			case IRInstOperator::IRINST_OP_LE_F:
+				iloc.inst("fle.s", dst, "ft0", "ft1");
+				break;
+			case IRInstOperator::IRINST_OP_GE_F:
+				iloc.inst("fle.s", dst, "ft1", "ft0");
+				break;
+			case IRInstOperator::IRINST_OP_EQ_F:
+				iloc.inst("feq.s", dst, "ft0", "ft1");
+				break;
+			case IRInstOperator::IRINST_OP_NE_F:
+				iloc.inst("feq.s", dst, "ft0", "ft1");
+				iloc.inst("xori", dst, dst, "1");
+				break;
+			default:
+				break;
+		}
+	} else {
+		switch (inst->getOp()) {
+			case IRInstOperator::IRINST_OP_LT_I:
+				iloc.inst("slt", dst, lhs, rhs);
+				break;
+			case IRInstOperator::IRINST_OP_GT_I:
+				iloc.inst("slt", dst, rhs, lhs);
+				break;
+			case IRInstOperator::IRINST_OP_LE_I:
+				iloc.inst("slt", dst, rhs, lhs);
+				iloc.inst("xori", dst, dst, "1");
+				break;
+			case IRInstOperator::IRINST_OP_GE_I:
+				iloc.inst("slt", dst, lhs, rhs);
+				iloc.inst("xori", dst, dst, "1");
+				break;
+			case IRInstOperator::IRINST_OP_EQ_I:
+				iloc.inst("sub", dst, lhs, rhs);
+				iloc.inst("seqz", dst, dst);
+				break;
+			case IRInstOperator::IRINST_OP_NE_I:
+				iloc.inst("sub", dst, lhs, rhs);
+				iloc.inst("snez", dst, dst);
+				break;
+			default:
+				break;
+		}
 	}
 
 	releaseOperand(rhsOperand);
@@ -446,8 +608,15 @@ void InstSelectorRiscV64::translate_ret(Instruction * inst)
 {
 	auto * ret = dynamic_cast<ReturnInst *>(inst);
 	if (ret != nullptr && ret->hasReturnValue()) {
-		// 将返回值加载到a0
-		iloc.load_var(RISCV64_A0_REG_NO, ret->getReturnValue());
+		Value *retVal = ret->getReturnValue();
+		Type *retType = retVal->getType();
+		if (retType->isFloatType()) {
+			// float返回值：加载到a0，再移至fa0
+			iloc.load_var(RISCV64_A0_REG_NO, retVal);
+			iloc.inst("fmv.w.x", "fa0", PlatformRiscV64::regName[RISCV64_A0_REG_NO]);
+		} else {
+			iloc.load_var(RISCV64_A0_REG_NO, retVal);
+		}
 	}
 
 	// 生成函数epilogue：恢复callee-saved寄存器，恢复栈指针，返回
@@ -478,16 +647,32 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 		releaseOperand(value);
 	}
 
-	// 前8个参数通过a0-a7传递
+	// 前8个参数通过a0-a7传递（float类型通过fa0-fa7传递）
 	for (int i = 0; i < call->getArgCount() && i < 8; ++i) {
-		iloc.load_var(RISCV64_A0_REG_NO + i, call->getArg(i));
+		Value *arg = call->getArg(i);
+		Type *argType = arg->getType();
+		if (auto *alloca = dynamic_cast<AllocaInst *>(arg)) {
+			argType = alloca->getAllocaType();
+		}
+		if (argType->isFloatType()) {
+			// float参数：加载到临时整数寄存器，再移至FP参数寄存器
+			OperandReg val = loadOperand(arg, inst);
+			iloc.inst("fmv.w.x", "fa" + std::to_string(i), PlatformRiscV64::regName[val.reg]);
+			releaseOperand(val);
+		} else {
+			iloc.load_var(RISCV64_A0_REG_NO + i, arg);
+		}
 	}
 
 	// 生成call指令
 	iloc.call_fun(call->getCallee()->getName());
 
-	// 若有返回值，将a0存储到结果位置
+	// 若有返回值，将a0（或fa0→a0）存储到结果位置
 	if (call->hasResultValue()) {
+		if (call->getType()->isFloatType()) {
+			// float返回值从fa0移至a0整数寄存器
+			iloc.inst("fmv.x.w", PlatformRiscV64::regName[RISCV64_A0_REG_NO], "fa0");
+		}
 		storeResult(call, RISCV64_A0_REG_NO, inst);
 	}
 }
@@ -585,18 +770,33 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 			continue;
 		}
 
+		const bool isFloat = param->getType()->isFloatType();
 		const int incomingReg = RISCV64_A0_REG_NO + i;
-		if (it->second.hasReg()) {
-			if (it->second.regId != incomingReg) {
-				regMoves.push_back(RegMove{incomingReg, it->second.regId});
+		const std::string incomingFPReg = "fa" + std::to_string(i);
+
+		if (isFloat) {
+			// float参数从fa0-fa7传入
+			if (it->second.hasReg()) {
+				iloc.inst("fmv.x.w", PlatformRiscV64::regName[it->second.regId], incomingFPReg);
+				blockedRegs.insert(it->second.regId);
+			} else if (it->second.hasStackSlot) {
+				iloc.inst("fmv.x.w", PlatformRiscV64::regName[scratchReg], incomingFPReg);
+				iloc.store_base(scratchReg, it->second.baseRegId, it->second.offset, scratchReg,
+					false);
 			}
-		} else if (it->second.hasStackSlot) {
-			// 分配在栈上：生成store指令将传入寄存器值存到栈槽
-			iloc.store_base(incomingReg,
-				it->second.baseRegId,
-				it->second.offset,
-				scratchReg,
-				param->getType()->isPointerType());
+		} else {
+			if (it->second.hasReg()) {
+				if (it->second.regId != incomingReg) {
+					regMoves.push_back(RegMove{incomingReg, it->second.regId});
+				}
+			} else if (it->second.hasStackSlot) {
+				// 分配在栈上：生成store指令将传入寄存器值存到栈槽
+				iloc.store_base(incomingReg,
+					it->second.baseRegId,
+					it->second.offset,
+					scratchReg,
+					param->getType()->isPointerType());
+			}
 		}
 	}
 

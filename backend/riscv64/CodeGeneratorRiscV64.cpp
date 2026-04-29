@@ -11,7 +11,9 @@
 #include "CodeGeneratorRiscV64.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "AllocaInst.h"
@@ -111,7 +113,14 @@ void CodeGeneratorRiscV64::genDataSection()
 		std::fprintf(fp, ".type %s, %%object\n", var->getName().c_str());
 		std::fprintf(fp, ".size %s, %d\n", var->getName().c_str(), var->getValueType()->getSize());
 		std::fprintf(fp, "%s:\n", var->getName().c_str());
-		std::fprintf(fp, ".word %d\n", var->getInitIntValue());
+		if (var->getInitKind() == GlobalVariable::InitKind::Float) {
+			float fval = var->getInitFloatValue();
+			std::uint32_t bits = 0;
+			std::memcpy(&bits, &fval, sizeof(bits));
+			std::fprintf(fp, ".word %u\n", bits);
+		} else {
+			std::fprintf(fp, ".word %d\n", var->getInitIntValue());
+		}
 		emittedDataSection = true;
 	}
 

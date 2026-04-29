@@ -16,6 +16,7 @@
 #include "PlatformRiscV64.h"
 #include "Module.h"
 #include "ConstInt.h"
+#include "ConstFloat.h"
 #include "GlobalVariable.h"
 
 namespace {
@@ -432,6 +433,11 @@ void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 	if (Instanceof(constVal, ConstInt *, src_var)) {
 		// 若src_var是常量，则直接加载常量值
 		load_imm(rs_reg_no, constVal->getVal());
+
+	} else if (Instanceof(constVal, ConstFloat *, src_var)) {
+		// float常量：加载IEEE 754位模式作为立即数
+		std::uint32_t bits = constVal->getBitPattern();
+		load_imm(rs_reg_no, static_cast<int32_t>(bits));
 
 	} else if (Instanceof(globalVar, GlobalVariable *, src_var)) {
 		// 全局变量：la加载地址 + lw加载值
