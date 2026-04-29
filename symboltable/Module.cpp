@@ -6,9 +6,11 @@
 #include "Module.h"
 
 #include <cstdio>
+#include <cstring>
 
 #include "Common.h"
 #include "FunctionType.h"
+#include "FloatType.h"
 #include "IntegerType.h"
 #include "PointerType.h"
 #include "ScopeStack.h"
@@ -26,9 +28,16 @@ Module::Module(std::string _name) : name(std::move(_name))
     (void) newFunction("putch", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt(), ""}}, true);
     (void) newFunction("getch", IntegerType::getTypeInt(), {}, true);
     auto * intPtrType = const_cast<PointerType *>(PointerType::get(IntegerType::getTypeInt()));
+    auto * floatType = FloatType::getTypeFloat();
+    auto * floatPtrType = const_cast<PointerType *>(PointerType::get(floatType));
     (void) newFunction("getarray", IntegerType::getTypeInt(), {new FormalParam{intPtrType, ""}}, true);
     (void) newFunction(
         "putarray", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt(), ""}, new FormalParam{intPtrType, ""}}, true);
+    (void) newFunction("getfloat", floatType, {}, true);
+    (void) newFunction("putfloat", VoidType::getType(), {new FormalParam{floatType, ""}}, true);
+    (void) newFunction("getfarray", IntegerType::getTypeInt(), {new FormalParam{floatPtrType, ""}}, true);
+    (void) newFunction(
+        "putfarray", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt(), ""}, new FormalParam{floatPtrType, ""}}, true);
 }
 
 /// @brief 进入一层新的作用域
@@ -121,6 +130,11 @@ void Module::insertConstIntDirectly(ConstInt * val)
     constIntMap.emplace(val->getVal(), val);
 }
 
+void Module::insertConstFloatDirectly(ConstFloat * val)
+{
+    constFloatMap.emplace(val->getBitPattern(), val);
+}
+
 /// @brief 获取或创建整型常量对象
 /// @param intVal 整型常量值
 /// @return 对应的常量对象
@@ -135,6 +149,20 @@ ConstInt * Module::newConstInt(int32_t intVal)
     return val;
 }
 
+ConstFloat * Module::newConstFloat(float floatVal)
+{
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &floatVal, sizeof(bits));
+
+    ConstFloat * val = findConstFloat(bits);
+    if (!val) {
+        val = new ConstFloat(floatVal);
+        insertConstFloatDirectly(val);
+    }
+
+    return val;
+}
+
 /// @brief 按数值查找整型常量对象
 /// @param val 常量值
 /// @return 查找到的常量对象，未找到时返回空指针
@@ -142,6 +170,16 @@ ConstInt * Module::findConstInt(int32_t val)
 {
     auto pIter = constIntMap.find(val);
     if (pIter != constIntMap.end()) {
+        return pIter->second;
+    }
+
+    return nullptr;
+}
+
+ConstFloat * Module::findConstFloat(std::uint32_t bits)
+{
+    auto pIter = constFloatMap.find(bits);
+    if (pIter != constFloatMap.end()) {
         return pIter->second;
     }
 
@@ -229,6 +267,11 @@ void Module::Delete()
         delete constInt;
     }
     constIntMap.clear();
+
+    for (auto & [_, constFloat]: constFloatMap) {
+        delete constFloat;
+    }
+    constFloatMap.clear();
 
     delete scopeStack;
     scopeStack = nullptr;

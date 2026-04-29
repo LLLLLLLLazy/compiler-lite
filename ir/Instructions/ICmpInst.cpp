@@ -31,14 +31,26 @@ const char * ICmpInst::predToLLVMName(IRInstOperator op)
             return "eq";
         case IRInstOperator::IRINST_OP_NE_I:
             return "ne";
+        case IRInstOperator::IRINST_OP_EQ_F:
+            return "oeq";
+        case IRInstOperator::IRINST_OP_NE_F:
+            return "one";
         case IRInstOperator::IRINST_OP_LT_I:
             return "slt";
+        case IRInstOperator::IRINST_OP_LT_F:
+            return "olt";
         case IRInstOperator::IRINST_OP_GT_I:
             return "sgt";
+        case IRInstOperator::IRINST_OP_GT_F:
+            return "ogt";
         case IRInstOperator::IRINST_OP_LE_I:
             return "sle";
+        case IRInstOperator::IRINST_OP_LE_F:
+            return "ole";
         case IRInstOperator::IRINST_OP_GE_I:
             return "sge";
+        case IRInstOperator::IRINST_OP_GE_F:
+            return "oge";
         default:
             return "???";
     }
@@ -46,6 +58,8 @@ const char * ICmpInst::predToLLVMName(IRInstOperator op)
 
 void ICmpInst::toString(std::string & str)
 {
-    str = getIRName() + " = icmp " + predToLLVMName(op) + " " + getLHS()->getType()->toString() + " " +
+    bool isFloatCmp = getLHS()->getType()->isFloatType() || getRHS()->getType()->isFloatType();
+    str = getIRName() + " = " + (isFloatCmp ? "fcmp " : "icmp ") + predToLLVMName(op) + " " +
+          getLHS()->getType()->toString() + " " +
           getLHS()->getIRName() + ", " + getRHS()->getIRName();
 }

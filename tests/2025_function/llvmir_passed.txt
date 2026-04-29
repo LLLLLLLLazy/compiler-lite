@@ -34,6 +34,7 @@
 2025_func_027_scope5
 2025_func_027_while_test2
 2025_func_029_break
+2025_func_029_long_line
 2025_func_030_continue
 2025_func_030_many_dimensions
 2025_func_031_while_if_test1
@@ -42,12 +43,14 @@
 2025_func_033_multi_branch
 2025_func_033_while_if_test3
 2025_func_034_multi_loop
+2025_func_035_math
 2025_func_035_op_priority1
 2025_func_036_op_priority2
 2025_func_037_op_priority3
 2025_func_039_op_priority5
 2025_func_040_unary_op
 2025_func_041_unary_op2
+2025_func_042_empty_stmt
 2025_func_045_comment1
 2025_func_046_hex_defn
 2025_func_047_hex_oct_add
@@ -71,3 +74,4 @@
 2025_func_091_many_locals2
 2025_func_092_register_alloc
 2025_func_093_nested_calls
+2025_func_095_float

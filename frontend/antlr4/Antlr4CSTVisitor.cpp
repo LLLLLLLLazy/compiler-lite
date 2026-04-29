@@ -157,6 +157,9 @@ std::any MiniCCSTVisitor::visitFuncType(MiniCParser::FuncTypeContext * ctx)
 	if (ctx->T_INT()) {
 		attr.type = BasicType::TYPE_INT;
 		attr.lineno = (int64_t) ctx->T_INT()->getSymbol()->getLine();
+	} else if (ctx->T_FLOAT()) {
+		attr.type = BasicType::TYPE_FLOAT;
+		attr.lineno = (int64_t) ctx->T_FLOAT()->getSymbol()->getLine();
 	} else if (ctx->T_VOID()) {
 		attr.type = BasicType::TYPE_VOID;
 		attr.lineno = (int64_t) ctx->T_VOID()->getSymbol()->getLine();
@@ -621,11 +624,15 @@ std::any MiniCCSTVisitor::visitUnaryOp(MiniCParser::UnaryOpContext * ctx)
 
 std::any MiniCCSTVisitor::visitPrimaryExp(MiniCParser::PrimaryExpContext * ctx)
 {
-	// 识别文法产生式 primaryExp: T_L_PAREN expr T_R_PAREN | T_DIGIT | lVal;
+	// 识别文法产生式 primaryExp: T_L_PAREN expr T_R_PAREN | T_FLOAT_LITERAL | T_DIGIT | lVal;
 
 	ast_node * node = nullptr;
 
-	if (ctx->T_DIGIT()) {
+	if (ctx->T_FLOAT_LITERAL()) {
+		double val = stod(ctx->T_FLOAT_LITERAL()->getText(), nullptr);
+		int64_t lineNo = (int64_t) ctx->T_FLOAT_LITERAL()->getSymbol()->getLine();
+		node = ast_node::New(digit_real_attr{val, lineNo});
+	} else if (ctx->T_DIGIT()) {
 		// 无符号整型字面量
 		// 识别 primaryExp: T_DIGIT
 
@@ -731,11 +738,14 @@ std::any MiniCCSTVisitor::visitInitVal(MiniCParser::InitValContext * ctx)
 
 std::any MiniCCSTVisitor::visitBasicType(MiniCParser::BasicTypeContext * ctx)
 {
-	// basicType: T_INT;
+	// basicType: T_INT | T_FLOAT;
 	type_attr attr{BasicType::TYPE_VOID, -1};
 	if (ctx->T_INT()) {
 		attr.type = BasicType::TYPE_INT;
 		attr.lineno = (int64_t) ctx->T_INT()->getSymbol()->getLine();
+	} else if (ctx->T_FLOAT()) {
+		attr.type = BasicType::TYPE_FLOAT;
+		attr.lineno = (int64_t) ctx->T_FLOAT()->getSymbol()->getLine();
 	}
 
 	return attr;

@@ -16,11 +16,11 @@ compileUnit: (funcDef | decl)* EOF;
 // 声明
 decl: constDecl | varDecl;
 
-// 函数定义，支持 void/int 返回类型
+// 函数定义，支持 void/int/float 返回类型
 funcDef: funcType T_ID T_L_PAREN formalParamList? T_R_PAREN block;
 
 // 函数返回类型
-funcType: T_INT | T_VOID;
+funcType: T_INT | T_FLOAT | T_VOID;
 
 // 形参列表
 formalParamList: formalParam (T_COMMA formalParam)*;
@@ -50,7 +50,7 @@ varDecl: basicType varDef (T_COMMA varDef)* T_SEMICOLON;
 constDef: T_ID arrayDefDims? T_ASSIGN initVal;
 
 // 基本类型
-basicType: T_INT;
+basicType: T_INT | T_FLOAT;
 
 // 变量定义
 varDef: T_ID arrayDefDims? (T_ASSIGN initVal)?;
@@ -111,8 +111,8 @@ unaryExp: primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN | unaryOp unaryEx
 // 单目运算符
 unaryOp: T_ADD | T_SUB | T_NOT;
 
-// 基本表达式：括号表达式、整数、左值表达式
-primaryExp: T_L_PAREN expr T_R_PAREN | T_DIGIT | lVal;
+// 基本表达式：括号表达式、数字字面量、左值表达式
+primaryExp: T_L_PAREN expr T_R_PAREN | T_FLOAT_LITERAL | T_DIGIT | lVal;
 
 // 实参列表
 realParamList: expr (T_COMMA expr)*;
@@ -158,9 +158,14 @@ T_CONTINUE: 'continue';
 T_RETURN: 'return';
 T_CONST: 'const';
 T_INT: 'int';
+T_FLOAT: 'float';
 T_VOID: 'void';
 
 T_ID: [a-zA-Z_][a-zA-Z0-9_]*;
+T_FLOAT_LITERAL:
+	(([0-9]+ '.' [0-9]* | '.' [0-9]+) ([eE] [+-]? [0-9]+)?
+	| [0-9]+ [eE] [+-]? [0-9]+
+	| '0' [xX] ([0-9a-fA-F]+ ('.' [0-9a-fA-F]*)? | '.' [0-9a-fA-F]+) [pP] [+-]? [0-9]+);
 T_DIGIT: '0' [xX] [0-9a-fA-F]+ | '0' [0-7]* | [1-9][0-9]*;
 
 LINE_COMMENT: '//' ~[\r\n]* -> skip;
