@@ -365,6 +365,11 @@ void Mem2Reg::cleanup(const std::vector<AllocaInst *> & allocas)
     while (it != entryInsts.end()) {
         if (auto * alloca = dynamic_cast<AllocaInst *>(*it)) {
             if (allocaSet.count(alloca)) {
+                if (!alloca->getUseList().empty()) {
+                    ++it;
+                    continue;
+                }
+
                 alloca->clearOperands();
                 auto next = std::next(it);
                 entryInsts.erase(it);

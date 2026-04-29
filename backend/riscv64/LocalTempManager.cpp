@@ -5,6 +5,7 @@
 #include "LocalTempManager.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 
 #include "Instruction.h"
@@ -55,24 +56,59 @@ LocalTempManager::LocalTempManager(
 	  valueLiveRanges(_valueLiveRanges)
 {}
 
+LocalTempManager::Lease::Lease(Lease && other) noexcept
+	: owner(other.owner), regId(other.regId)
+{
+	other.owner = nullptr;
+	other.regId = -1;
+}
+
+LocalTempManager::Lease & LocalTempManager::Lease::operator=(Lease && other) noexcept
+{
+	if (this == &other) {
+		return *this;
+	}
+
+	release();
+	owner = other.owner;
+	regId = other.regId;
+	other.owner = nullptr;
+	other.regId = -1;
+	return *this;
+}
+
+LocalTempManager::Lease::~Lease()
+{
+	release();
+}
+
+void LocalTempManager::Lease::release()
+{
+	if (owner != nullptr && regId >= 0) {
+		owner->release(regId);
+		owner = nullptr;
+		regId = -1;
+	}
+}
+
 /// @brief 为当前指令借用一个空闲物理寄存器
 /// @param inst 当前正在翻译的IR指令
 /// @param excludeReg 排除的物理寄存器编号（如dstReg）
 /// @return 物理寄存器编号
 ///
 /// 遍历scratch寄存器池，找到第一个当前尚未借出且不承载live值的寄存器。
-int LocalTempManager::borrow(Instruction * inst, int excludeReg)
+LocalTempManager::Lease LocalTempManager::borrow(Instruction * inst, int excludeReg)
 {
-	return borrowImpl(inst, excludeReg, false);
+	return Lease(this, borrowImpl(inst, excludeReg, false));
 }
 
 /// @brief 在当前IR指令的源操作数已经消费后借用临时寄存器
 /// @param inst 当前正在翻译的IR指令
 /// @param excludeReg 排除的物理寄存器编号
 /// @return 物理寄存器编号
-int LocalTempManager::borrowAfterUses(Instruction * inst, int excludeReg)
+LocalTempManager::Lease LocalTempManager::borrowAfterUses(Instruction * inst, int excludeReg)
 {
-	return borrowImpl(inst, excludeReg, true);
+	return Lease(this, borrowImpl(inst, excludeReg, true));
 }
 
 /// @brief 临时寄存器借用的通用实现
@@ -97,9 +133,8 @@ int LocalTempManager::borrowImpl(Instruction * inst, int excludeReg, bool afterU
 		return reg;
 	}
 
-	// 极端情况：所有寄存器都被借出或排除，不应发生
 	std::fprintf(stderr, "LocalTempManager: 无可用的临时寄存器！\n");
-	return excludeReg >= 0 ? excludeReg : pool[0];
+	std::abort();
 }
 
 /// @brief 归还借用的寄存器
