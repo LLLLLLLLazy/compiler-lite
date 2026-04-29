@@ -38,9 +38,10 @@ public:
         return static_cast<int32_t>(incoming.size());
     }
 
-    const Incoming & getIncoming(int32_t i) const
+    Incoming getIncoming(int32_t i) const
     {
-        return incoming[i];
+        // 从 operands 获取 value 以保证与 replaceAllUseWith 同步
+        return {const_cast<PhiInst *>(this)->getOperand(i), incoming[i].block};
     }
 
     void toString(std::string & str) override;

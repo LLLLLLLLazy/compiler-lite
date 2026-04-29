@@ -152,7 +152,7 @@ run_riscv64_check() {
 	local output=""
 	local exit_code=0
 
-	if ! "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
+	if ! timeout --foreground 10 "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
 		echo "${testcase}.c compile NG [riscv64]"
 		return 1
 	fi
@@ -163,7 +163,7 @@ run_riscv64_check() {
 	fi
 
 	if [[ "${TEST_MODE}" == "assemble" ]]; then
-		if ! "${RISCV64_GCC_BIN}" -c -o "${objfile}" "${asmfile}" >/dev/null 2>&1; then
+		if ! timeout --foreground 10 "${RISCV64_GCC_BIN}" -c -o "${objfile}" "${asmfile}" >/dev/null 2>&1; then
 			echo "${testcase}.c assemble NG [riscv64]"
 			return 1
 		fi
@@ -172,16 +172,16 @@ run_riscv64_check() {
 		return 0
 	fi
 
-	if ! "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${STD_C}" >/dev/null 2>&1; then
+	if ! timeout --foreground 10 "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${STD_C}" >/dev/null 2>&1; then
 		echo "${testcase}.c link NG [riscv64]"
 		return 1
 	fi
 
 	if [[ -f "${infile}" ]]; then
-		output="$("${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" 2>&1)"
+		output="$(timeout --foreground 10 "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" 2>&1)"
 		exit_code=$?
 	else
-		output="$("${QEMU_RISCV64_BIN}" "${exe_file}" 2>&1)"
+		output="$(timeout --foreground 10 "${QEMU_RISCV64_BIN}" "${exe_file}" 2>&1)"
 		exit_code=$?
 	fi
 
