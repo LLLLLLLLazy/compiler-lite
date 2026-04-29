@@ -769,6 +769,6 @@ std::any MiniCCSTVisitor::visitExpressionStatement(MiniCParser::ExpressionStatem
 		// 空语句
 
 		// 直接返回空指针，需要再把语句加入到语句块时要注意判断，空语句不要加入
-		return nullptr;
+		return static_cast<ast_node *>(nullptr);
 	}
 }
