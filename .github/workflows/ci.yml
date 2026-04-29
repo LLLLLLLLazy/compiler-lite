@@ -58,6 +58,13 @@ jobs:
             MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2023 "${test_case}"
           done < ./tests/2023_function/llvmir_passed.txt
 
+      - name: Run 2025 LLVM IR smoke tests
+        run: |
+          while IFS= read -r test_case; do
+            [[ -n "${test_case}" ]] || continue
+            MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2025 "${test_case}"
+          done < ./tests/2025_function/llvmir_passed.txt
+
       - name: Run 2023 RISCV64 asm smoke tests
         run: |
           while IFS= read -r test_case; do
