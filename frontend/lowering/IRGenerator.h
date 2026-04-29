@@ -107,6 +107,9 @@ private:
     /// @brief 将对象全部清零
     bool emitZeroInitializer(Value * addr, Type * type);
 
+    /// @brief 用扁平循环对大数组执行运行时清零
+    bool emitFlatLoopZeroInitializer(Value * addr, Type * type);
+
     /// @brief 统计聚合对象包含的标量元素个数
     std::size_t countScalarSlots(Type * type) const;
 
