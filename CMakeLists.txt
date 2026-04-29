@@ -144,12 +144,15 @@ set(IR_SRCS
 	ir/Function.cpp
 	ir/Types/VoidType.h
 	ir/Types/VoidType.cpp
+	ir/Types/FloatType.h
+	ir/Types/FloatType.cpp
 	ir/Types/IntegerType.h
 	ir/Types/IntegerType.cpp
 	ir/Types/FunctionType.h
 	ir/Types/PointerType.h
 	ir/Types/ArrayType.h
 	ir/Values/ConstInt.h
+	ir/Values/ConstFloat.h
 	ir/Values/LocalVariable.h
 	ir/Values/GlobalVariable.h
 	ir/Values/FormalParam.h
@@ -163,6 +166,10 @@ set(IR_SRCS
 	ir/Instructions/BinaryInst.cpp
 	ir/Instructions/ICmpInst.h
 	ir/Instructions/ICmpInst.cpp
+	ir/Instructions/SIToFPInst.h
+	ir/Instructions/SIToFPInst.cpp
+	ir/Instructions/FPToSIInst.h
+	ir/Instructions/FPToSIInst.cpp
 	ir/Instructions/CallInst.h
 	ir/Instructions/CallInst.cpp
 	ir/Instructions/BranchInst.h
@@ -186,6 +193,8 @@ set(IR_SRCS
 	ir/analysis/DominanceFrontier.cpp
 	ir/analysis/LoopInfo.h
 	ir/analysis/LoopInfo.cpp
+	ir/passes/ConstProp.h
+	ir/passes/ConstProp.cpp
 	ir/passes/DCE.h
 	ir/passes/DCE.cpp
 	ir/passes/Mem2Reg.h

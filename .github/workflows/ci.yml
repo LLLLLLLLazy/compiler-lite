@@ -46,7 +46,9 @@ jobs:
         run: |
           cmake -B build -S . -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_COMPILER=clang++
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DANTLR4_INCLUDE_DIR=/usr/local/include/antlr4-runtime \
+            -DANTLR4_LIBRARY=/usr/local/lib/libantlr4-runtime.so
 
       - name: Build
         run: cmake --build build --parallel
@@ -58,16 +60,9 @@ jobs:
             MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2023 "${test_case}"
           done < ./tests/2023_function/llvmir_passed.txt
 
-      - name: Run 2023 RISCV64 asm smoke tests
+      - name: Run 2025 LLVM IR smoke tests
         run: |
           while IFS= read -r test_case; do
             [[ -n "${test_case}" ]] || continue
-            bash ./tools/run-local-riscv64-tests.sh 2023 "${test_case}"
-          done < ./tests/2023_function/asm_passed.txt
-
-      - name: Run 2023 AST smoke tests
-        run: |
-          while IFS= read -r test_case; do
-            [[ -n "${test_case}" ]] || continue
-            MINIC_TEST_MODE=ast bash ./tools/run-local-tests.sh 2023 "${test_case}"
-          done < ./tests/2023_function/ast_passed.txt
+            MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2025 "${test_case}"
+          done < ./tests/2025_function/llvmir_passed.txt

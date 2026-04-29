@@ -37,6 +37,14 @@ const char * BinaryInst::opToLLVMName(IRInstOperator op)
             return "sdiv";
         case IRInstOperator::IRINST_OP_MOD_I:
             return "srem";
+        case IRInstOperator::IRINST_OP_ADD_F:
+            return "fadd";
+        case IRInstOperator::IRINST_OP_SUB_F:
+            return "fsub";
+        case IRInstOperator::IRINST_OP_MUL_F:
+            return "fmul";
+        case IRInstOperator::IRINST_OP_DIV_F:
+            return "fdiv";
         default:
             return "???";
     }

@@ -35,6 +35,7 @@ void PhiInst::toString(std::string & str)
         if (i > 0) {
             str += ", ";
         }
-        str += "[ " + incoming[i].value->getIRName() + ", " + incoming[i].block->getIRName() + " ]";
+        Value * val = getOperand(i);
+        str += "[ " + val->getIRName() + ", " + incoming[i].block->getIRName() + " ]";
     }
 }
