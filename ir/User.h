@@ -18,6 +18,9 @@ public:
     /// @brief 构造一个可使用其他 Value 的 User 对象
     explicit User(Type * _type);
 
+    /// @brief 析构函数
+    ~User() override;
+
     /// @brief 获取操作数 Use 列表
     std::vector<Use *> & getOperands();
 

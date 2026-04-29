@@ -19,6 +19,10 @@ BasicBlock::BasicBlock(Function * _parent) : Value(VoidType::getType()), parent(
 /// @brief 析构基本块并释放其中的指令
 BasicBlock::~BasicBlock()
 {
+	for (auto * inst : insts) {
+		inst->clearOperands();
+	}
+
     for (auto * inst : insts) {
         delete inst;
     }

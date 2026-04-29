@@ -25,6 +25,7 @@ Function::Function(std::string _name, FunctionType * _type, bool _builtin)
 Function::~Function()
 {
     Delete();
+    delete static_cast<FunctionType *>(getType());
 }
 
 /// @brief 获取函数返回值类型
@@ -102,9 +103,30 @@ BasicBlock * Function::newBasicBlock()
     return bb;
 }
 
+void Function::adoptDetachedValue(Value * value)
+{
+    if (value) {
+        detachedValues.push_back(value);
+    }
+}
+
 /// @brief 释放函数拥有的形参、局部变量和基本块资源
 void Function::Delete()
 {
+    // 先在函数级统一拆除所有指令的操作数边，避免跨基本块 def-use 在销毁时访问已释放值
+    for (auto * bb: blocks) {
+        for (auto * inst: bb->getInstructions()) {
+            inst->clearOperands();
+        }
+    }
+
+    // 再删除基本块与指令，使其在析构时不会再触碰其他 Value 的 use 链
+    for (auto * bb: blocks) {
+        delete bb;
+    }
+    blocks.clear();
+    entryBlock = nullptr;
+
     for (auto & param: params) {
         delete param;
     }
@@ -115,11 +137,10 @@ void Function::Delete()
     }
     varsVector.clear();
 
-    for (auto * bb: blocks) {
-        delete bb;
+    for (auto * value: detachedValues) {
+        delete value;
     }
-    blocks.clear();
-    entryBlock = nullptr;
+    detachedValues.clear();
 }
 
 /// @brief 重新为函数中的参数、基本块和指令命名 IR 名称
