@@ -203,7 +203,6 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 
 	// 按基本块顺序遍历指令
 	for (auto * bb : func->getBlocks()) {
-		const int blockStart = nextInstNum;
 		for (auto * inst : bb->getInstructions()) {
 			int instNum = nextInstNum++;
 			instNumbering[inst] = instNum;
