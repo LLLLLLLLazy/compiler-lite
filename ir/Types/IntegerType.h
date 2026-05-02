@@ -1,18 +1,6 @@
 ///
 /// @file IntegerType.h
-/// @brief 整型类型类，可描述1位的bool类型或32位的int类型
-///
-/// @author zenglj (zenglj@live.com)
-/// @version 1.0
-/// @date 2024-09-29
-///
-/// @copyright Copyright (c) 2024
-///
-/// @par 修改日志:
-/// <table>
-/// <tr><th>Date       <th>Version <th>Author  <th>Description
-/// <tr><td>2024-09-29 <td>1.0     <td>zenglj  <td>新建
-/// </table>
+/// @brief 整型类型类，可描述1位的i1类型或32位的int类型
 ///
 
 #pragma once
@@ -28,13 +16,13 @@ public:
 	/// @brief 获取类型，全局只有一份
 	/// @return VoidType*
 	///
-	static IntegerType * getTypeBool();
+	static IntegerType * getTypeInt1();
 
 	///
 	/// @brief 获取类型，全局只有一份
 	/// @return VoidType*
 	///
-	static IntegerType * getTypeInt();
+	static IntegerType * getTypeInt32();
 
 	///
 	/// @brief 获取类型的IR标识符
@@ -55,11 +43,11 @@ public:
 	}
 
 	///
-	/// @brief 是否是布尔类型，也就是1位整数类型
+	/// @brief 是否是 i1 类型，也就是 1 位整数类型
 	/// @return true
 	/// @return false
 	///
-	[[nodiscard]] bool isInt1Byte() const override
+	[[nodiscard]] bool isInt1Type() const override
 	{
 		return bitWidth == 1;
 	}

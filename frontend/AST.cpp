@@ -39,7 +39,7 @@ ast_node::ast_node(Type * _type) : ast_node(ast_operator_type::AST_OP_LEAF_TYPE,
 /// @brief 针对无符号整数字面量的构造函数
 /// @param attr 无符号整数字面量
 ast_node::ast_node(digit_int_attr attr)
-	: ast_node(ast_operator_type::AST_OP_LEAF_LITERAL_UINT, IntegerType::getTypeInt(), attr.lineno)
+	: ast_node(ast_operator_type::AST_OP_LEAF_LITERAL_UINT, IntegerType::getTypeInt32(), attr.lineno)
 {
 	integer_val = attr.val;
 }
@@ -226,7 +226,7 @@ ast_node * ast_node::create_func_def(type_attr & type, var_id_attr & id, ast_nod
 Type * ast_node::typeAttr2Type(type_attr & attr)
 {
 	if (attr.type == BasicType::TYPE_INT) {
-		return IntegerType::getTypeInt();
+		return IntegerType::getTypeInt32();
 	} else if (attr.type == BasicType::TYPE_FLOAT) {
 		return FloatType::getTypeFloat();
 	} else {

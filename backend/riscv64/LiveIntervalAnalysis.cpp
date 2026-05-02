@@ -19,7 +19,7 @@
 #include "BinaryInst.h"
 #include "CallInst.h"
 #include "CondBranchInst.h"
-#include "ConstInt.h"
+#include "ConstInteger.h"
 #include "ConstFloat.h"
 #include "CopyInst.h"
 #include "Function.h"
@@ -124,7 +124,7 @@ const std::map<Instruction *, int> & LiveIntervalAnalysis::getInstNumbering() co
 /// @brief 判断Value是否需要活跃区间分析
 ///
 /// 以下Value不需要分配虚拟寄存器，因此不需要活跃区间：
-/// - ConstInt：整数常量，直接使用立即数编码
+/// - ConstInteger：整数类型常量，直接使用立即数编码
 /// - GlobalVariable：全局变量，通过la伪指令加载地址
 /// - RegVariable：物理寄存器，已分配
 /// - Function：函数对象，不是变量
@@ -136,7 +136,7 @@ bool LiveIntervalAnalysis::needsInterval(Value * val)
 		return false;
 	}
 	// 常量不需要寄存器分配
-	if (dynamic_cast<ConstInt *>(val)) {
+	if (dynamic_cast<ConstInteger *>(val)) {
 		return false;
 	}
 	if (dynamic_cast<ConstFloat *>(val)) {

@@ -125,7 +125,7 @@ private:
     /// @brief 生成逻辑非表达式对应的 IR
     Value * emitNot(ast_node * node);
 
-    /// @brief 将任意整型值规约为布尔值
+    /// @brief 将任意整型值规约为 i1 值
     Value * emitBoolize(Value * value);
 
     /// @brief 将 i1 值扩展为 i32 值

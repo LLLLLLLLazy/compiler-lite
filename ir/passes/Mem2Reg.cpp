@@ -20,7 +20,7 @@
 
 #include "AllocaInst.h"
 #include "BasicBlock.h"
-#include "ConstInt.h"
+#include "ConstInteger.h"
 #include "DominanceFrontier.h"
 #include "DominatorTree.h"
 #include "Function.h"
@@ -265,7 +265,7 @@ void Mem2Reg::rename(
                 if (it != reachingDefs.end()) {
                     // 若尚无定义，则默认以常量 0 作为初值
                     Value * reaching =
-                        it->second.empty() ? static_cast<Value *>(mod->newConstInt(0)) : it->second.back();
+                        it->second.empty() ? static_cast<Value *>(mod->newConstInt32(0)) : it->second.back();
                     load->replaceAllUseWith(reaching);
                     load->setDead(true);
                 }
@@ -302,7 +302,7 @@ void Mem2Reg::rename(
             AllocaInst * alloca = it->second;
             auto defIt = reachingDefs.find(alloca);
             Value * reaching = (defIt == reachingDefs.end() || defIt->second.empty())
-                                    ? static_cast<Value *>(mod->newConstInt(0))
+                                    ? static_cast<Value *>(mod->newConstInt32(0))
                                     : defIt->second.back();
             phi->addIncoming(reaching, bb);
         }

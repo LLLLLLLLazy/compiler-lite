@@ -101,11 +101,11 @@ public:
 	}
 
 	///
-	/// @brief 是否是布尔类型，也就是1位整数类型
+	/// @brief 是否是 i1 类型，也就是 1 位整数类型
 	/// @return true
 	/// @return false
 	///
-	[[nodiscard]] virtual bool isInt1Byte() const
+	[[nodiscard]] virtual bool isInt1Type() const
 	{
 		return false;
 	}

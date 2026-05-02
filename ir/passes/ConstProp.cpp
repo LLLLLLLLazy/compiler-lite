@@ -15,7 +15,7 @@
 #include "BinaryInst.h"
 #include "BranchInst.h"
 #include "CondBranchInst.h"
-#include "ConstInt.h"
+#include "ConstInteger.h"
 #include "Function.h"
 #include "ICmpInst.h"
 #include "Instruction.h"
@@ -193,8 +193,8 @@ private:
             return LatticeValue::getUnknown();
         }
 
-        if (auto * constInt = dynamic_cast<ConstInt *>(value)) {
-            return LatticeValue::getConstant(constInt->getVal());
+        if (auto * constInteger = dynamic_cast<ConstInteger *>(value)) {
+            return LatticeValue::getConstant(constInteger->getVal());
         }
 
         if (!dynamic_cast<Instruction *>(value)) {
@@ -616,18 +616,18 @@ private:
     /// @param type 目标常量类型
     /// @param value 常量的整数值
     /// @return 对应的 IR 常量对象
-    ConstInt * materializeConstant(Type * type, int32_t value) const
+    ConstInteger * materializeConstant(Type * type, int32_t value) const
     {
         if (!type || !type->isIntegerType()) {
             return nullptr;
         }
 
-        if (type->isInt1Byte()) {
-            return mod->newConstBool(value != 0);
+        if (type->isInt1Type()) {
+            return mod->newConstInt1(value != 0);
         }
 
         if (type->isInt32Type()) {
-            return mod->newConstInt(value);
+            return mod->newConstInt32(value);
         }
 
         return mod->newConstInteger(type, value);
@@ -668,7 +668,7 @@ private:
                     continue;
                 }
 
-                ConstInt * replacement = materializeConstant(inst->getType(), state.constant);
+                ConstInteger * replacement = materializeConstant(inst->getType(), state.constant);
                 if (!replacement) {
                     continue;
                 }

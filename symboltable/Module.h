@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "ConstFloat.h"
-#include "ConstInt.h"
+#include "ConstInteger.h"
 #include "Function.h"
 #include "GlobalVariable.h"
 #include "Type.h"
@@ -67,17 +67,17 @@ public:
         return funcVector;
     }
 
-    /// @brief 获取或创建整型常量对象
-    ConstInt * newConstInt(int32_t intVal);
+    /// @brief 获取或创建 i32 常量对象
+    ConstInteger * newConstInt32(int32_t intVal);
 
     /// @brief 获取或创建浮点常量对象
     ConstFloat * newConstFloat(float floatVal);
 
-    /// @brief 获取或创建布尔常量对象
-    ConstInt * newConstBool(bool boolVal);
+    /// @brief 获取或创建 i1 常量对象
+    ConstInteger * newConstInt1(int32_t int1Val);
 
     /// @brief 获取或创建指定整数类型的常量对象
-    ConstInt * newConstInteger(Type * type, int32_t intVal);
+    ConstInteger * newConstInteger(Type * type, int32_t intVal);
 
     /// @brief 创建新的变量值对象并插入当前作用域
     Value * newVarValue(Type * type, std::string name = "");
@@ -95,14 +95,14 @@ public:
     void renameIR();
 
 protected:
-    /// @brief 按数值查找整型常量对象
-    ConstInt * findConstInt(int32_t val);
+    /// @brief 按数值查找 i32 常量对象
+    ConstInteger * findConstInt32(int32_t val);
 
     /// @brief 按位模式查找浮点常量对象
     ConstFloat * findConstFloat(std::uint32_t bits);
 
     /// @brief 按类型和值查找整数常量对象
-    ConstInt * findConstInteger(Type * type, int32_t val);
+    ConstInteger * findConstInteger(Type * type, int32_t val);
 
     /// @brief 创建并注册全局变量对象
     GlobalVariable * newGlobalVariable(Type * type, std::string name);
@@ -116,25 +116,25 @@ protected:
     /// @brief 直接把全局变量插入模块容器
     void insertGlobalValueDirectly(GlobalVariable * val);
 
-    /// @brief 直接把整型常量插入模块容器
-    void insertConstIntDirectly(ConstInt * val);
+    /// @brief 直接把整数类型常量插入模块容器
+    void insertConstIntegerDirectly(ConstInteger * val);
 
     /// @brief 直接把浮点常量插入模块容器
     void insertConstFloatDirectly(ConstFloat * val);
 
 private:
-    struct ConstIntKey {
+    struct ConstIntegerKey {
         Type * type = nullptr;
         int32_t value = 0;
 
-        bool operator==(const ConstIntKey & other) const
+        bool operator==(const ConstIntegerKey & other) const
         {
             return type == other.type && value == other.value;
         }
     };
 
-    struct ConstIntKeyHash {
-        std::size_t operator()(const ConstIntKey & key) const
+    struct ConstIntegerKeyHash {
+        std::size_t operator()(const ConstIntegerKey & key) const
         {
             std::size_t typeHash = std::hash<Type *>{}(key.type);
             std::size_t valueHash = std::hash<int32_t>{}(key.value);
@@ -149,6 +149,6 @@ private:
     std::vector<Function *> funcVector;
     std::unordered_map<std::string, GlobalVariable *> globalVariableMap;
     std::vector<GlobalVariable *> globalVariableVector;
-    std::unordered_map<ConstIntKey, ConstInt *, ConstIntKeyHash> constIntMap;
+    std::unordered_map<ConstIntegerKey, ConstInteger *, ConstIntegerKeyHash> constIntegerMap;
     std::unordered_map<std::uint32_t, ConstFloat *> constFloatMap;
 };

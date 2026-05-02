@@ -23,7 +23,7 @@
 #include "CallInst.h"
 #include "Common.h"
 #include "CondBranchInst.h"
-#include "ConstInt.h"
+#include "ConstInteger.h"
 #include "FPToSIInst.h"
 #include "FormalParam.h"
 #include "GetElementPtrInst.h"
@@ -298,7 +298,7 @@ bool IRGenerator::visitFuncDef(ast_node * node)
         } else {
             Value * zeroValue = func->getReturnType()->isFloatType()
                                   ? static_cast<Value *>(module->newConstFloat(0.0f))
-                                  : static_cast<Value *>(module->newConstInt(0));
+                                  : static_cast<Value *>(module->newConstInt32(0));
             emitToBlock(new ReturnInst(func, zeroValue));
         }
     }
@@ -842,15 +842,15 @@ bool IRGenerator::emitFlatLoopZeroInitializer(Value * addr, Type * type)
     Type * scalarType = type;
     Value * scalarBaseAddr = addr;
     while (auto * arrayType = dynamic_cast<ArrayType *>(scalarType)) {
-        scalarBaseAddr = emitGEP(scalarBaseAddr, module->newConstInt(0), true);
+        scalarBaseAddr = emitGEP(scalarBaseAddr, module->newConstInt32(0), true);
         if (!scalarBaseAddr) {
             return false;
         }
         scalarType = arrayType->getElementType();
     }
 
-    auto * indexSlot = emitAlloca(IntegerType::getTypeInt());
-    emitToBlock(new StoreInst(currentFunction(), module->newConstInt(0), indexSlot));
+    auto * indexSlot = emitAlloca(IntegerType::getTypeInt32());
+    emitToBlock(new StoreInst(currentFunction(), module->newConstInt32(0), indexSlot));
 
     Function * func = currentFunction();
     BasicBlock * condBB = newBlock();
@@ -862,21 +862,21 @@ bool IRGenerator::emitFlatLoopZeroInitializer(Value * addr, Type * type)
     fromBB->linkSuccessor(condBB);
 
     switchToBlock(condBB);
-    auto * indexValue = new LoadInst(func, indexSlot, IntegerType::getTypeInt());
+    auto * indexValue = new LoadInst(func, indexSlot, IntegerType::getTypeInt32());
     emitToBlock(indexValue);
     auto * condValue = new ICmpInst(
         func,
         IRInstOperator::IRINST_OP_LT_I,
         indexValue,
-        module->newConstInt(static_cast<int32_t>(scalarCount)),
-        IntegerType::getTypeBool());
+        module->newConstInt32(static_cast<int32_t>(scalarCount)),
+        IntegerType::getTypeInt1());
     emitToBlock(condValue);
     emitToBlock(new CondBranchInst(func, condValue, bodyBB, exitBB));
     condBB->linkSuccessor(bodyBB);
     condBB->linkSuccessor(exitBB);
 
     switchToBlock(bodyBB);
-    auto * bodyIndex = new LoadInst(func, indexSlot, IntegerType::getTypeInt());
+    auto * bodyIndex = new LoadInst(func, indexSlot, IntegerType::getTypeInt32());
     emitToBlock(bodyIndex);
     Value * elemAddr = emitGEP(scalarBaseAddr, bodyIndex, false);
     if (!elemAddr) {
@@ -885,15 +885,15 @@ bool IRGenerator::emitFlatLoopZeroInitializer(Value * addr, Type * type)
 
     Value * zeroValue = scalarType->isFloatType()
                             ? static_cast<Value *>(module->newConstFloat(0.0f))
-                            : static_cast<Value *>(module->newConstInt(0));
+                            : static_cast<Value *>(module->newConstInt32(0));
     emitToBlock(new StoreInst(func, zeroValue, elemAddr));
 
     auto * nextIndex = new BinaryInst(
         func,
         IRInstOperator::IRINST_OP_ADD_I,
         bodyIndex,
-        module->newConstInt(1),
-        IntegerType::getTypeInt());
+        module->newConstInt32(1),
+        IntegerType::getTypeInt32());
     emitToBlock(nextIndex);
     emitToBlock(new StoreInst(func, nextIndex, indexSlot));
 
@@ -910,8 +910,8 @@ bool IRGenerator::emitZeroInitializer(Value * addr, Type * type)
     auto * arrayType = dynamic_cast<ArrayType *>(type);
     if (arrayType == nullptr) {
         Value * zeroValue = type->isFloatType()
-                                  ? static_cast<Value *>(module->newConstFloat(0.0f))
-                                  : static_cast<Value *>(module->newConstInt(0));
+                      ? static_cast<Value *>(module->newConstFloat(0.0f))
+                      : static_cast<Value *>(module->newConstInt32(0));
         emitToBlock(new StoreInst(currentFunction(), zeroValue, addr));
         return true;
     }
@@ -921,7 +921,7 @@ bool IRGenerator::emitZeroInitializer(Value * addr, Type * type)
     }
 
     for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
-        Value * elemAddr = emitGEP(addr, module->newConstInt(i), true);
+        Value * elemAddr = emitGEP(addr, module->newConstInt32(i), true);
         if (!elemAddr || !emitZeroInitializer(elemAddr, arrayType->getElementType())) {
             return false;
         }
@@ -946,7 +946,7 @@ bool IRGenerator::emitArrayInitializer(
     std::size_t subScalarCount = countScalarSlots(elemType);
 
     for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
-        Value * elemAddr = emitGEP(addr, module->newConstInt(i), true);
+        Value * elemAddr = emitGEP(addr, module->newConstInt32(i), true);
         if (!elemAddr) {
             return false;
         }
@@ -1174,7 +1174,7 @@ Value * IRGenerator::visitExpr(ast_node * node)
 
     switch (node->node_type) {
         case ast_operator_type::AST_OP_LEAF_LITERAL_UINT:
-            return module->newConstInt(static_cast<int32_t>(node->integer_val));
+            return module->newConstInt32(static_cast<int32_t>(node->integer_val));
 
         case ast_operator_type::AST_OP_LEAF_LITERAL_FLOAT:
             return module->newConstFloat(node->float_val);
@@ -1193,7 +1193,7 @@ Value * IRGenerator::visitExpr(ast_node * node)
                 return nullptr;
             }
             if (isArrayType(pointeeType)) {
-                return emitGEP(addr, module->newConstInt(0), true);
+                return emitGEP(addr, module->newConstInt32(0), true);
             }
             auto * loadInst = new LoadInst(currentFunction(), addr, pointeeType);
             emitToBlock(loadInst);
@@ -1234,8 +1234,8 @@ Value * IRGenerator::visitExpr(ast_node * node)
 
         case ast_operator_type::AST_OP_LAND: {
             Function * func = currentFunction();
-            AllocaInst * resultSlot = emitAlloca(IntegerType::getTypeInt());
-            emitToBlock(new StoreInst(func, module->newConstInt(0), resultSlot));
+            AllocaInst * resultSlot = emitAlloca(IntegerType::getTypeInt32());
+            emitToBlock(new StoreInst(func, module->newConstInt32(0), resultSlot));
 
             BasicBlock * rhsBB = newBlock();
             BasicBlock * endBB = newBlock();
@@ -1264,15 +1264,15 @@ Value * IRGenerator::visitExpr(ast_node * node)
             rhsEnd->linkSuccessor(endBB);
 
             switchToBlock(endBB);
-            auto * result = new LoadInst(func, resultSlot, IntegerType::getTypeInt());
+            auto * result = new LoadInst(func, resultSlot, IntegerType::getTypeInt32());
             emitToBlock(result);
             return result;
         }
 
         case ast_operator_type::AST_OP_LOR: {
             Function * func = currentFunction();
-            AllocaInst * resultSlot = emitAlloca(IntegerType::getTypeInt());
-            emitToBlock(new StoreInst(func, module->newConstInt(1), resultSlot));
+            AllocaInst * resultSlot = emitAlloca(IntegerType::getTypeInt32());
+            emitToBlock(new StoreInst(func, module->newConstInt32(1), resultSlot));
 
             BasicBlock * rhsBB = newBlock();
             BasicBlock * endBB = newBlock();
@@ -1301,7 +1301,7 @@ Value * IRGenerator::visitExpr(ast_node * node)
             rhsEnd->linkSuccessor(endBB);
 
             switchToBlock(endBB);
-            auto * result = new LoadInst(func, resultSlot, IntegerType::getTypeInt());
+            auto * result = new LoadInst(func, resultSlot, IntegerType::getTypeInt32());
             emitToBlock(result);
             return result;
         }
@@ -1351,7 +1351,7 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
     emitToBlock(callInst);
 
     if (calledFunc->getReturnType()->isVoidType()) {
-        return module->newConstInt(0);
+        return module->newConstInt32(0);
     }
 
     return callInst;
@@ -1365,7 +1365,7 @@ Value * IRGenerator::visitLeafVarId(ast_node * node)
     for (auto it = constBindings.rbegin(); it != constBindings.rend(); ++it) {
         auto found = it->find(node->name);
         if (found != it->end()) {
-            return module->newConstInt(found->second);
+            return module->newConstInt32(found->second);
         }
     }
 
@@ -1393,7 +1393,7 @@ Value * IRGenerator::visitLeafVarId(ast_node * node)
         if (!addr) {
             return nullptr;
         }
-        return emitGEP(addr, module->newConstInt(0), true);
+        return emitGEP(addr, module->newConstInt32(0), true);
     }
 
     Value * addr = getAddressOfVariable(var);
@@ -1422,7 +1422,7 @@ Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator op)
     }
 
     IRInstOperator actualOp = op;
-    Type * resultType = IntegerType::getTypeInt();
+    Type * resultType = IntegerType::getTypeInt32();
 
     if (lhs->getType()->isFloatType() || rhs->getType()->isFloatType()) {
         lhs = ensureFloat(lhs);
@@ -1503,7 +1503,7 @@ Value * IRGenerator::emitICmp(ast_node * node, IRInstOperator op)
         rhs = ensureI32(rhs);
     }
 
-    auto * inst = new ICmpInst(currentFunction(), actualOp, lhs, rhs, IntegerType::getTypeBool());
+    auto * inst = new ICmpInst(currentFunction(), actualOp, lhs, rhs, IntegerType::getTypeInt1());
     emitToBlock(inst);
     return inst;
 }
@@ -1528,7 +1528,7 @@ Value * IRGenerator::emitNeg(ast_node * node)
     operand = ensureI32(operand);
 
     auto * inst = new BinaryInst(currentFunction(), IRInstOperator::IRINST_OP_SUB_I,
-                                 module->newConstInt(0), operand, IntegerType::getTypeInt());
+                                 module->newConstInt32(0), operand, IntegerType::getTypeInt32());
     emitToBlock(inst);
     return inst;
 }
@@ -1545,27 +1545,27 @@ Value * IRGenerator::emitNot(ast_node * node)
     operand = ensureI32(operand);
 
     auto * inst = new ICmpInst(currentFunction(), IRInstOperator::IRINST_OP_EQ_I,
-                               operand, module->newConstInt(0), IntegerType::getTypeBool());
+                               operand, module->newConstInt32(0), IntegerType::getTypeInt1());
     emitToBlock(inst);
     return inst;
 }
 
-/// @brief 将整型值规范化为布尔值
+/// @brief 将整型值规范化为 i1 值
 /// @param value 输入值
-/// @return 已经是布尔值或新生成的布尔比较结果
+/// @return 已经是 i1 值或新生成的 i1 比较结果
 Value * IRGenerator::emitBoolize(Value * value)
 {
     if (value->getType()->isFloatType()) {
         auto * inst = new ICmpInst(currentFunction(), IRInstOperator::IRINST_OP_NE_F,
-                                   value, module->newConstFloat(0.0f), IntegerType::getTypeBool());
+                                   value, module->newConstFloat(0.0f), IntegerType::getTypeInt1());
         emitToBlock(inst);
         return inst;
     }
-    if (value->getType()->isInt1Byte()) {
+    if (value->getType()->isInt1Type()) {
         return value;
     }
     auto * inst = new ICmpInst(currentFunction(), IRInstOperator::IRINST_OP_NE_I,
-                               value, module->newConstInt(0), IntegerType::getTypeBool());
+                               value, module->newConstInt32(0), IntegerType::getTypeInt1());
     emitToBlock(inst);
     return inst;
 }
@@ -1576,14 +1576,14 @@ Value * IRGenerator::emitBoolize(Value * value)
 Value * IRGenerator::ensureI32(Value * value)
 {
     if (value->getType()->isFloatType()) {
-        auto * castInst = new FPToSIInst(currentFunction(), value, IntegerType::getTypeInt());
+        auto * castInst = new FPToSIInst(currentFunction(), value, IntegerType::getTypeInt32());
         emitToBlock(castInst);
         return castInst;
     }
-    if (!value->getType()->isInt1Byte()) {
+    if (!value->getType()->isInt1Type()) {
         return value;
     }
-    auto * zext = new ZExtInst(currentFunction(), value, IntegerType::getTypeInt());
+    auto * zext = new ZExtInst(currentFunction(), value, IntegerType::getTypeInt32());
     emitToBlock(zext);
     return zext;
 }
@@ -1594,7 +1594,7 @@ Value * IRGenerator::ensureFloat(Value * value)
         return value;
     }
 
-    if (value->getType()->isInt1Byte()) {
+    if (value->getType()->isInt1Type()) {
         value = ensureI32(value);
     }
 

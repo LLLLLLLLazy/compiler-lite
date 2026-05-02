@@ -72,7 +72,7 @@ private:
 	LiveInterval * getOrCreateInterval(Value * val);
 
 	/// @brief 判断Value是否需要活跃区间分析
-	/// 常量(ConstInt)、全局变量(GlobalVariable)、物理寄存器(RegVariable)、
+	/// 常量(ConstInteger)、全局变量(GlobalVariable)、物理寄存器(RegVariable)、
 	/// 函数(Function)等不需要分配寄存器，因此不需要活跃区间
 	/// @param val 待判断的Value
 	/// @return 是否需要活跃区间

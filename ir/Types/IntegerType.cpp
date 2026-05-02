@@ -1,38 +1,26 @@
 ///
 /// @file IntegerType.cpp
-/// @brief 整型类型类，可描述1位的bool类型或32位的int类型
-///
-/// @author zenglj (zenglj@live.com)
-/// @version 1.0
-/// @date 2024-09-29
-///
-/// @copyright Copyright (c) 2024
-///
-/// @par 修改日志:
-/// <table>
-/// <tr><th>Date       <th>Version <th>Author  <th>Description
-/// <tr><td>2024-09-29 <td>1.0     <td>zenglj  <td>新建
-/// </table>
+/// @brief 整型类型类，可描述1位的i1类型或32位的int类型
 ///
 
 #include "IntegerType.h"
 
 ///
-/// @brief 获取类型bool
+/// @brief 获取类型i1
 /// @return VoidType*
 ///
-IntegerType * IntegerType::getTypeBool()
+IntegerType * IntegerType::getTypeInt1()
 {
-	static IntegerType * oneInstanceBool = new IntegerType(1);
-	return oneInstanceBool;
+	static IntegerType * oneInstanceInt1 = new IntegerType(1);
+	return oneInstanceInt1;
 }
 
 ///
-/// @brief 获取类型int
+/// @brief 获取类型i32
 /// @return VoidType*
 ///
-IntegerType * IntegerType::getTypeInt()
+IntegerType * IntegerType::getTypeInt32()
 {
-	static IntegerType * oneInstanceInt = new IntegerType(32);
-	return oneInstanceInt;
+	static IntegerType * oneInstanceInt32 = new IntegerType(32);
+	return oneInstanceInt32;
 }

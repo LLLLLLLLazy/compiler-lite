@@ -147,7 +147,7 @@ set(IR_SRCS
 	ir/Types/FunctionType.h
 	ir/Types/PointerType.h
 	ir/Types/ArrayType.h
-	ir/Values/ConstInt.h
+	ir/Values/ConstInteger.h
 	ir/Values/ConstFloat.h
 	ir/Values/LocalVariable.h
 	ir/Values/GlobalVariable.h

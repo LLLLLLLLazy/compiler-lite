@@ -15,7 +15,7 @@
 #include "Function.h"
 #include "PlatformRiscV64.h"
 #include "Module.h"
-#include "ConstInt.h"
+#include "ConstInteger.h"
 #include "ConstFloat.h"
 #include "GlobalVariable.h"
 
@@ -430,7 +430,7 @@ void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 {
 	Type * valueType = memoryObjectType(src_var);
 	const bool wide = valueType->isPointerType();
-	if (Instanceof(constVal, ConstInt *, src_var)) {
+	if (Instanceof(constVal, ConstInteger *, src_var)) {
 		// 若src_var是常量，则直接加载常量值
 		load_imm(rs_reg_no, constVal->getVal());
 
