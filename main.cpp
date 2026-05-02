@@ -28,11 +28,13 @@
 #include "Module.h"
 #include "DominatorTree.h"
 #include "DominanceFrontier.h"
+#include "CFGSimplify.h"
 #include "ConstProp.h"
-#include "DCE.h"
+#include "DeadInstElim.h"
 #include "LoopInfo.h"
 #include "Mem2Reg.h"
 #include "PhiLowering.h"
+#include "UnreachableBlockElim.h"
 #include "CodeGeneratorRiscV64.h"
 
 ///
@@ -392,8 +394,22 @@ static int compile(std::string inputFile, std::string outputFile)
 
 				for (auto * func : module->getFunctionList()) {
 					if (!func->isBuiltin() && !func->getBlocks().empty()) {
-						DCE dce(func);
-						dce.run();
+						UnreachableBlockElim unreachableBlockElim(func);
+						changed = unreachableBlockElim.run() || changed;
+					}
+				}
+
+				for (auto * func : module->getFunctionList()) {
+					if (!func->isBuiltin() && !func->getBlocks().empty()) {
+						DeadInstElim deadInstElim(func);
+						changed = deadInstElim.run() || changed;
+					}
+				}
+
+				for (auto * func : module->getFunctionList()) {
+					if (!func->isBuiltin() && !func->getBlocks().empty()) {
+						CFGSimplify cfgSimplify(func);
+						changed = cfgSimplify.run() || changed;
 					}
 				}
 

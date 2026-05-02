@@ -40,6 +40,9 @@ public:
     /// 删除所有来自指定前驱块的 incoming 对
     void removeIncomingBlock(BasicBlock * block);
 
+    /// 将指定前驱块的 incoming block 原地改写为另一个块
+    void replaceIncomingBlock(BasicBlock * oldBlock, BasicBlock * newBlock);
+
     int32_t getIncomingCount() const
     {
         return static_cast<int32_t>(incoming.size());

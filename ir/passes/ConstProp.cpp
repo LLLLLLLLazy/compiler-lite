@@ -168,8 +168,6 @@ class SCCPSolver {
 
 public:
     /// @brief 构造 SCCP 求解器
-    /// @param function 待优化的函数
-    /// @param module 常量创建所需的模块对象
     SCCPSolver(Function * function, Module * module) : func(function), mod(module)
     {}
 
@@ -574,6 +572,7 @@ private:
                 edgeWorklist.pop_front();
                 queuedEdges.erase(edge);
 
+                // 避免重复处理同一条边
                 if (!executableEdges.insert(edge).second) {
                     continue;
                 }
@@ -654,7 +653,7 @@ private:
                 if (auto * condBr = dynamic_cast<CondBranchInst *>(inst)) {
                     LatticeValue cond = getValueState(condBr->getCondition());
                     if (cond.isConstant()) {
-                        // 先裁剪控制流，再交给后续 DCE 删除死块
+                        // 先裁剪控制流，再交给后续死块删除 pass 清理不可达块
                         changed |= rewriteCondBranch(condBr, cond.constant != 0);
                     }
                     continue;

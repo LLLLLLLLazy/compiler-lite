@@ -35,7 +35,7 @@ public:
     /// @brief 构造 mem2reg 优化器
     Mem2Reg(Function * func, Module * mod);
 
-    /// @brief 对函数原地执行 mem2reg
+    /// @brief 对函数原地执行 mem2reg，
     /// 执行后，可提升的 alloca/load/store 被移除，
     /// 控制流汇合点插入 φ 节点。
     void run();

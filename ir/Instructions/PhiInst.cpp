@@ -28,6 +28,19 @@ void PhiInst::removeIncomingBlock(BasicBlock * block)
     }
 }
 
+void PhiInst::replaceIncomingBlock(BasicBlock * oldBlock, BasicBlock * newBlock)
+{
+    if (!oldBlock || !newBlock) {
+        return;
+    }
+
+    for (auto & item : incoming) {
+        if (item.block == oldBlock) {
+            item.block = newBlock;
+        }
+    }
+}
+
 Value * PhiInst::getIncomingValue(int32_t i) const
 {
     return const_cast<PhiInst *>(this)->getOperand(i);

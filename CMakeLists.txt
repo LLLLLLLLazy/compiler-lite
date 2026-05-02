@@ -189,8 +189,12 @@ set(IR_SRCS
 	ir/analysis/DominanceFrontier.cpp
 	ir/passes/ConstProp.h
 	ir/passes/ConstProp.cpp
-	ir/passes/DCE.h
-	ir/passes/DCE.cpp
+	ir/passes/CFGSimplify.h
+	ir/passes/CFGSimplify.cpp
+	ir/passes/DeadInstElim.h
+	ir/passes/DeadInstElim.cpp
+	ir/passes/UnreachableBlockElim.h
+	ir/passes/UnreachableBlockElim.cpp
 	ir/analysis/LoopInfo.h
 	ir/analysis/LoopInfo.cpp
 	ir/passes/Mem2Reg.h
