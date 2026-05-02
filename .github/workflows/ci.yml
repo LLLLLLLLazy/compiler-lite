@@ -56,6 +56,9 @@ jobs:
       - name: Run phi regression tests
         run: bash ./tools/run-phi-regression.sh
 
+      - name: Run float regression tests
+        run: bash ./tools/run-float-regression.sh
+
       - name: Run 2023 LLVM IR smoke tests
         run: |
           while IFS= read -r test_case; do

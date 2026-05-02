@@ -160,6 +160,8 @@ set(IR_SRCS
 	ir/Instructions/StoreInst.cpp
 	ir/Instructions/BinaryInst.h
 	ir/Instructions/BinaryInst.cpp
+	ir/Instructions/FCmpInst.h
+	ir/Instructions/FCmpInst.cpp
 	ir/Instructions/ICmpInst.h
 	ir/Instructions/ICmpInst.cpp
 	ir/Instructions/SIToFPInst.h

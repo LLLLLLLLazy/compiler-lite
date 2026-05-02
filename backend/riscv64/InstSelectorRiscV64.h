@@ -85,8 +85,10 @@ private:
 	void translate_div(Instruction * inst);
 	/// @brief 翻译mod指令（取模）
 	void translate_mod(Instruction * inst);
-	/// @brief 翻译icmp/fcmp指令（整数/浮点比较）
+	/// @brief 翻译icmp指令（整数比较）
 	void translate_icmp(Instruction * inst);
+	/// @brief 翻译fcmp指令（浮点比较）
+	void translate_fcmp(Instruction * inst);
 	/// @brief 翻译浮点加法
 	void translate_fadd(Instruction * inst);
 	/// @brief 翻译浮点减法

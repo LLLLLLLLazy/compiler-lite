@@ -23,6 +23,7 @@
 #include "CallInst.h"
 #include "CondBranchInst.h"
 #include "CopyInst.h"
+#include "FCmpInst.h"
 #include "FPToSIInst.h"
 #include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
@@ -96,13 +97,13 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_SUB_F] = &InstSelectorRiscV64::translate_fsub;
 	translatorHandlers[IRInstOperator::IRINST_OP_MUL_F] = &InstSelectorRiscV64::translate_fmul;
 	translatorHandlers[IRInstOperator::IRINST_OP_DIV_F] = &InstSelectorRiscV64::translate_fdiv;
-	// 浮点比较 (复用 ICmpInst，通过translate_icmp分发)
-	translatorHandlers[IRInstOperator::IRINST_OP_LT_F] = &InstSelectorRiscV64::translate_icmp;
-	translatorHandlers[IRInstOperator::IRINST_OP_GT_F] = &InstSelectorRiscV64::translate_icmp;
-	translatorHandlers[IRInstOperator::IRINST_OP_LE_F] = &InstSelectorRiscV64::translate_icmp;
-	translatorHandlers[IRInstOperator::IRINST_OP_GE_F] = &InstSelectorRiscV64::translate_icmp;
-	translatorHandlers[IRInstOperator::IRINST_OP_EQ_F] = &InstSelectorRiscV64::translate_icmp;
-	translatorHandlers[IRInstOperator::IRINST_OP_NE_F] = &InstSelectorRiscV64::translate_icmp;
+	// 浮点比较
+	translatorHandlers[IRInstOperator::IRINST_OP_LT_F] = &InstSelectorRiscV64::translate_fcmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_GT_F] = &InstSelectorRiscV64::translate_fcmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_LE_F] = &InstSelectorRiscV64::translate_fcmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_GE_F] = &InstSelectorRiscV64::translate_fcmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_EQ_F] = &InstSelectorRiscV64::translate_fcmp;
+	translatorHandlers[IRInstOperator::IRINST_OP_NE_F] = &InstSelectorRiscV64::translate_fcmp;
 	// 类型转换
 	translatorHandlers[IRInstOperator::IRINST_OP_SITOFP] = &InstSelectorRiscV64::translate_sitofp;
 	translatorHandlers[IRInstOperator::IRINST_OP_FPTOSI] = &InstSelectorRiscV64::translate_fptosi;
@@ -461,21 +462,17 @@ void InstSelectorRiscV64::translate_binary(Instruction * inst, const std::string
 	storeResult(inst, dstReg, inst);
 }
 
-/// @brief 翻译icmp/fcmp指令（整数/浮点比较）
+/// @brief 翻译icmp指令（整数比较）
 /// @param inst IR指令
 ///
-/// 整数比较生成RISC-V整数比较指令，浮点比较生成F扩展比较指令：
-/// 整数: slt/xori/sub+seqz/snez
-/// 浮点: 先将操作数从整数寄存器移至FP寄存器(fmv.w.x)，再用flt.s/fle.s/feq.s
+/// 生成RISC-V整数比较指令：
+/// slt/xori/sub+seqz/snez
 void InstSelectorRiscV64::translate_icmp(Instruction * inst)
 {
 	auto * icmp = dynamic_cast<ICmpInst *>(inst);
 	if (icmp == nullptr) {
 		return;
 	}
-
-	bool isFloat =
-		icmp->getLHS()->getType()->isFloatType() || icmp->getRHS()->getType()->isFloatType();
 
 	int dstReg = getResultReg(inst);
 	LocalTempManager::Lease dstLease;
@@ -492,61 +489,90 @@ void InstSelectorRiscV64::translate_icmp(Instruction * inst)
 	const std::string lhs = PlatformRiscV64::regName[lhsOperand.reg];
 	const std::string rhs = PlatformRiscV64::regName[rhsOperand.reg];
 
-	if (isFloat) {
-		// 将操作数从整数寄存器移到FP寄存器
-		iloc.inst("fmv.w.x", "ft0", lhs);
-		iloc.inst("fmv.w.x", "ft1", rhs);
+	switch (inst->getOp()) {
+		case IRInstOperator::IRINST_OP_LT_I:
+			iloc.inst("slt", dst, lhs, rhs);
+			break;
+		case IRInstOperator::IRINST_OP_GT_I:
+			iloc.inst("slt", dst, rhs, lhs);
+			break;
+		case IRInstOperator::IRINST_OP_LE_I:
+			iloc.inst("slt", dst, rhs, lhs);
+			iloc.inst("xori", dst, dst, "1");
+			break;
+		case IRInstOperator::IRINST_OP_GE_I:
+			iloc.inst("slt", dst, lhs, rhs);
+			iloc.inst("xori", dst, dst, "1");
+			break;
+		case IRInstOperator::IRINST_OP_EQ_I:
+			iloc.inst("sub", dst, lhs, rhs);
+			iloc.inst("seqz", dst, dst);
+			break;
+		case IRInstOperator::IRINST_OP_NE_I:
+			iloc.inst("sub", dst, lhs, rhs);
+			iloc.inst("snez", dst, dst);
+			break;
+		default:
+			break;
+	}
 
-		switch (inst->getOp()) {
-			case IRInstOperator::IRINST_OP_LT_F:
-				iloc.inst("flt.s", dst, "ft0", "ft1");
-				break;
-			case IRInstOperator::IRINST_OP_GT_F:
-				iloc.inst("flt.s", dst, "ft1", "ft0");
-				break;
-			case IRInstOperator::IRINST_OP_LE_F:
-				iloc.inst("fle.s", dst, "ft0", "ft1");
-				break;
-			case IRInstOperator::IRINST_OP_GE_F:
-				iloc.inst("fle.s", dst, "ft1", "ft0");
-				break;
-			case IRInstOperator::IRINST_OP_EQ_F:
-				iloc.inst("feq.s", dst, "ft0", "ft1");
-				break;
-			case IRInstOperator::IRINST_OP_NE_F:
-				iloc.inst("feq.s", dst, "ft0", "ft1");
-				iloc.inst("xori", dst, dst, "1");
-				break;
-			default:
-				break;
-		}
-	} else {
-		switch (inst->getOp()) {
-			case IRInstOperator::IRINST_OP_LT_I:
-				iloc.inst("slt", dst, lhs, rhs);
-				break;
-			case IRInstOperator::IRINST_OP_GT_I:
-				iloc.inst("slt", dst, rhs, lhs);
-				break;
-			case IRInstOperator::IRINST_OP_LE_I:
-				iloc.inst("slt", dst, rhs, lhs);
-				iloc.inst("xori", dst, dst, "1");
-				break;
-			case IRInstOperator::IRINST_OP_GE_I:
-				iloc.inst("slt", dst, lhs, rhs);
-				iloc.inst("xori", dst, dst, "1");
-				break;
-			case IRInstOperator::IRINST_OP_EQ_I:
-				iloc.inst("sub", dst, lhs, rhs);
-				iloc.inst("seqz", dst, dst);
-				break;
-			case IRInstOperator::IRINST_OP_NE_I:
-				iloc.inst("sub", dst, lhs, rhs);
-				iloc.inst("snez", dst, dst);
-				break;
-			default:
-				break;
-		}
+	releaseOperand(rhsOperand);
+	releaseOperand(lhsOperand);
+
+	storeResult(inst, dstReg, inst);
+}
+
+/// @brief 翻译fcmp指令（浮点比较）
+/// @param inst IR指令
+///
+/// 先将操作数从整数寄存器移至FP寄存器，再使用F扩展比较指令
+void InstSelectorRiscV64::translate_fcmp(Instruction * inst)
+{
+	auto * fcmp = dynamic_cast<FCmpInst *>(inst);
+	if (fcmp == nullptr) {
+		return;
+	}
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+	const std::string dst = PlatformRiscV64::regName[dstReg];
+
+	OperandReg lhsOperand = loadOperand(fcmp->getLHS(), inst, dstReg);
+	const int rhsPreferredReg = lhsOperand.reg != dstReg ? dstReg : -1;
+	OperandReg rhsOperand = loadOperand(fcmp->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
+
+	const std::string lhs = PlatformRiscV64::regName[lhsOperand.reg];
+	const std::string rhs = PlatformRiscV64::regName[rhsOperand.reg];
+
+	iloc.inst("fmv.w.x", "ft0", lhs);
+	iloc.inst("fmv.w.x", "ft1", rhs);
+
+	switch (inst->getOp()) {
+		case IRInstOperator::IRINST_OP_LT_F:
+			iloc.inst("flt.s", dst, "ft0", "ft1");
+			break;
+		case IRInstOperator::IRINST_OP_GT_F:
+			iloc.inst("flt.s", dst, "ft1", "ft0");
+			break;
+		case IRInstOperator::IRINST_OP_LE_F:
+			iloc.inst("fle.s", dst, "ft0", "ft1");
+			break;
+		case IRInstOperator::IRINST_OP_GE_F:
+			iloc.inst("fle.s", dst, "ft1", "ft0");
+			break;
+		case IRInstOperator::IRINST_OP_EQ_F:
+			iloc.inst("feq.s", dst, "ft0", "ft1");
+			break;
+		case IRInstOperator::IRINST_OP_NE_F:
+			iloc.inst("feq.s", dst, "ft0", "ft1");
+			iloc.inst("xori", dst, dst, "1");
+			break;
+		default:
+			break;
 	}
 
 	releaseOperand(rhsOperand);

@@ -24,6 +24,7 @@
 #include "Common.h"
 #include "CondBranchInst.h"
 #include "ConstInteger.h"
+#include "FCmpInst.h"
 #include "FPToSIInst.h"
 #include "FormalParam.h"
 #include "GetElementPtrInst.h"
@@ -779,7 +780,7 @@ Value * IRGenerator::visitLValueAddress(ast_node * node)
         if (!indexValue) {
             return nullptr;
         }
-        indexValue = ensureI32(indexValue);
+        indexValue = convertToInt32(indexValue);
 
         Type * pointeeType = getAddressPointeeType(basePtr);
         if (pointeeType == nullptr) {
@@ -1204,28 +1205,28 @@ Value * IRGenerator::visitExpr(ast_node * node)
             return visitFuncCall(node);
 
         case ast_operator_type::AST_OP_ADD:
-            return emitBinary(node, IRInstOperator::IRINST_OP_ADD_I);
+            return emitBinary(node, IRInstOperator::IRINST_OP_ADD_I, IRInstOperator::IRINST_OP_ADD_F);
         case ast_operator_type::AST_OP_SUB:
-            return emitBinary(node, IRInstOperator::IRINST_OP_SUB_I);
+            return emitBinary(node, IRInstOperator::IRINST_OP_SUB_I, IRInstOperator::IRINST_OP_SUB_F);
         case ast_operator_type::AST_OP_MUL:
-            return emitBinary(node, IRInstOperator::IRINST_OP_MUL_I);
+            return emitBinary(node, IRInstOperator::IRINST_OP_MUL_I, IRInstOperator::IRINST_OP_MUL_F);
         case ast_operator_type::AST_OP_DIV:
-            return emitBinary(node, IRInstOperator::IRINST_OP_DIV_I);
+            return emitBinary(node, IRInstOperator::IRINST_OP_DIV_I, IRInstOperator::IRINST_OP_DIV_F);
         case ast_operator_type::AST_OP_MOD:
             return emitBinary(node, IRInstOperator::IRINST_OP_MOD_I);
 
         case ast_operator_type::AST_OP_LT:
-            return emitICmp(node, IRInstOperator::IRINST_OP_LT_I);
+            return emitCmp(node, IRInstOperator::IRINST_OP_LT_I, IRInstOperator::IRINST_OP_LT_F);
         case ast_operator_type::AST_OP_GT:
-            return emitICmp(node, IRInstOperator::IRINST_OP_GT_I);
+            return emitCmp(node, IRInstOperator::IRINST_OP_GT_I, IRInstOperator::IRINST_OP_GT_F);
         case ast_operator_type::AST_OP_LE:
-            return emitICmp(node, IRInstOperator::IRINST_OP_LE_I);
+            return emitCmp(node, IRInstOperator::IRINST_OP_LE_I, IRInstOperator::IRINST_OP_LE_F);
         case ast_operator_type::AST_OP_GE:
-            return emitICmp(node, IRInstOperator::IRINST_OP_GE_I);
+            return emitCmp(node, IRInstOperator::IRINST_OP_GE_I, IRInstOperator::IRINST_OP_GE_F);
         case ast_operator_type::AST_OP_EQ:
-            return emitICmp(node, IRInstOperator::IRINST_OP_EQ_I);
+            return emitCmp(node, IRInstOperator::IRINST_OP_EQ_I, IRInstOperator::IRINST_OP_EQ_F);
         case ast_operator_type::AST_OP_NE:
-            return emitICmp(node, IRInstOperator::IRINST_OP_NE_I);
+            return emitCmp(node, IRInstOperator::IRINST_OP_NE_I, IRInstOperator::IRINST_OP_NE_F);
 
         case ast_operator_type::AST_OP_NEG:
             return emitNeg(node);
@@ -1257,7 +1258,7 @@ Value * IRGenerator::visitExpr(ast_node * node)
                 return nullptr;
             }
             Value * rhsBool = emitBoolize(rhsVal);
-            Value * rhsI32 = ensureI32(rhsBool);
+            Value * rhsI32 = materializeBoolToInt32(rhsBool);
             emitToBlock(new StoreInst(func, rhsI32, resultSlot));
             BasicBlock * rhsEnd = currentBlock;
             emitToBlock(new BranchInst(func, endBB));
@@ -1294,7 +1295,7 @@ Value * IRGenerator::visitExpr(ast_node * node)
                 return nullptr;
             }
             Value * rhsBool = emitBoolize(rhsVal);
-            Value * rhsI32 = ensureI32(rhsBool);
+            Value * rhsI32 = materializeBoolToInt32(rhsBool);
             emitToBlock(new StoreInst(func, rhsI32, resultSlot));
             BasicBlock * rhsEnd = currentBlock;
             emitToBlock(new BranchInst(func, endBB));
@@ -1410,7 +1411,7 @@ Value * IRGenerator::visitLeafVarId(ast_node * node)
 /// @param node 表达式节点
 /// @param op 目标 IR 操作码
 /// @return 生成出的指令值，失败时返回空指针
-Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator op)
+Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator intOp, IRInstOperator floatOp)
 {
     Value * lhs = visitExpr(node->sons[0]);
     if (!lhs) {
@@ -1421,45 +1422,55 @@ Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator op)
         return nullptr;
     }
 
-    IRInstOperator actualOp = op;
-    Type * resultType = IntegerType::getTypeInt32();
-
     if (lhs->getType()->isFloatType() || rhs->getType()->isFloatType()) {
-        lhs = ensureFloat(lhs);
-        rhs = ensureFloat(rhs);
-        resultType = FloatType::getTypeFloat();
-
-        switch (op) {
-            case IRInstOperator::IRINST_OP_ADD_I:
-                actualOp = IRInstOperator::IRINST_OP_ADD_F;
-                break;
-            case IRInstOperator::IRINST_OP_SUB_I:
-                actualOp = IRInstOperator::IRINST_OP_SUB_F;
-                break;
-            case IRInstOperator::IRINST_OP_MUL_I:
-                actualOp = IRInstOperator::IRINST_OP_MUL_F;
-                break;
-            case IRInstOperator::IRINST_OP_DIV_I:
-                actualOp = IRInstOperator::IRINST_OP_DIV_F;
-                break;
-            default:
-                break;
+        if (floatOp == IRInstOperator::IRINST_OP_MAX) {
+            minic_log(LOG_ERROR, "浮点类型不支持该二元运算");
+            return nullptr;
         }
+        return emitFloatBinary(lhs, rhs, floatOp);
     } else {
-        lhs = ensureI32(lhs);
-        rhs = ensureI32(rhs);
+        return emitIntBinary(lhs, rhs, intOp);
+    }
+}
+
+Value * IRGenerator::emitIntBinary(Value * lhs, Value * rhs, IRInstOperator op)
+{
+    lhs = normalizeIntegerOperand(lhs);
+    if (!lhs) {
+        return nullptr;
+    }
+    rhs = normalizeIntegerOperand(rhs);
+    if (!rhs) {
+        return nullptr;
     }
 
-    auto * inst = new BinaryInst(currentFunction(), actualOp, lhs, rhs, resultType);
+    auto * inst = new BinaryInst(currentFunction(), op, lhs, rhs, IntegerType::getTypeInt32());
     emitToBlock(inst);
     return inst;
 }
 
-/// @brief 生成整数比较表达式对应的 IR
+Value * IRGenerator::emitFloatBinary(Value * lhs, Value * rhs, IRInstOperator op)
+{
+    lhs = convertToFloat(lhs);
+    if (!lhs) {
+        return nullptr;
+    }
+    rhs = convertToFloat(rhs);
+    if (!rhs) {
+        return nullptr;
+    }
+
+    auto * inst = new BinaryInst(currentFunction(), op, lhs, rhs, FloatType::getTypeFloat());
+    emitToBlock(inst);
+    return inst;
+}
+
+/// @brief 根据操作数类型分发比较表达式
 /// @param node 表达式节点
-/// @param op 目标 IR 比较操作码
+/// @param intOp 整数比较操作码
+/// @param floatOp 浮点比较操作码
 /// @return 生成出的比较结果值，失败时返回空指针
-Value * IRGenerator::emitICmp(ast_node * node, IRInstOperator op)
+Value * IRGenerator::emitCmp(ast_node * node, IRInstOperator intOp, IRInstOperator floatOp)
 {
     Value * lhs = visitExpr(node->sons[0]);
     if (!lhs) {
@@ -1470,40 +1481,51 @@ Value * IRGenerator::emitICmp(ast_node * node, IRInstOperator op)
         return nullptr;
     }
 
-    IRInstOperator actualOp = op;
-
     if (lhs->getType()->isFloatType() || rhs->getType()->isFloatType()) {
-        lhs = ensureFloat(lhs);
-        rhs = ensureFloat(rhs);
-
-        switch (op) {
-            case IRInstOperator::IRINST_OP_LT_I:
-                actualOp = IRInstOperator::IRINST_OP_LT_F;
-                break;
-            case IRInstOperator::IRINST_OP_GT_I:
-                actualOp = IRInstOperator::IRINST_OP_GT_F;
-                break;
-            case IRInstOperator::IRINST_OP_LE_I:
-                actualOp = IRInstOperator::IRINST_OP_LE_F;
-                break;
-            case IRInstOperator::IRINST_OP_GE_I:
-                actualOp = IRInstOperator::IRINST_OP_GE_F;
-                break;
-            case IRInstOperator::IRINST_OP_EQ_I:
-                actualOp = IRInstOperator::IRINST_OP_EQ_F;
-                break;
-            case IRInstOperator::IRINST_OP_NE_I:
-                actualOp = IRInstOperator::IRINST_OP_NE_F;
-                break;
-            default:
-                break;
-        }
+        return emitFCmp(lhs, rhs, floatOp);
     } else {
-        lhs = ensureI32(lhs);
-        rhs = ensureI32(rhs);
+        return emitICmp(lhs, rhs, intOp);
+    }
+}
+
+/// @brief 生成整数比较表达式对应的 IR
+/// @param lhs 左操作数
+/// @param rhs 右操作数
+/// @param op 整数比较操作码
+/// @return 生成出的比较结果值，失败时返回空指针
+Value * IRGenerator::emitICmp(Value * lhs, Value * rhs, IRInstOperator op)
+{
+    lhs = normalizeIntegerOperand(lhs);
+    if (!lhs) {
+        return nullptr;
+    }
+    rhs = normalizeIntegerOperand(rhs);
+    if (!rhs) {
+        return nullptr;
     }
 
-    auto * inst = new ICmpInst(currentFunction(), actualOp, lhs, rhs, IntegerType::getTypeInt1());
+    auto * inst = new ICmpInst(currentFunction(), op, lhs, rhs, IntegerType::getTypeInt1());
+    emitToBlock(inst);
+    return inst;
+}
+
+/// @brief 生成浮点比较表达式对应的 IR
+/// @param lhs 左操作数
+/// @param rhs 右操作数
+/// @param op 浮点比较操作码
+/// @return 生成出的比较结果值，失败时返回空指针
+Value * IRGenerator::emitFCmp(Value * lhs, Value * rhs, IRInstOperator op)
+{
+    lhs = convertToFloat(lhs);
+    if (!lhs) {
+        return nullptr;
+    }
+    rhs = convertToFloat(rhs);
+    if (!rhs) {
+        return nullptr;
+    }
+
+    auto * inst = new FCmpInst(currentFunction(), op, lhs, rhs, IntegerType::getTypeInt1());
     emitToBlock(inst);
     return inst;
 }
@@ -1525,7 +1547,10 @@ Value * IRGenerator::emitNeg(ast_node * node)
         return inst;
     }
 
-    operand = ensureI32(operand);
+    operand = normalizeIntegerOperand(operand);
+    if (!operand) {
+        return nullptr;
+    }
 
     auto * inst = new BinaryInst(currentFunction(), IRInstOperator::IRINST_OP_SUB_I,
                                  module->newConstInt32(0), operand, IntegerType::getTypeInt32());
@@ -1542,7 +1567,20 @@ Value * IRGenerator::emitNot(ast_node * node)
     if (!operand) {
         return nullptr;
     }
-    operand = ensureI32(operand);
+
+    if (operand->getType()->isFloatType()) {
+        return emitFloatNot(operand);
+    }
+
+    return emitIntNot(operand);
+}
+
+Value * IRGenerator::emitIntNot(Value * operand)
+{
+    operand = normalizeIntegerOperand(operand);
+    if (!operand) {
+        return nullptr;
+    }
 
     auto * inst = new ICmpInst(currentFunction(), IRInstOperator::IRINST_OP_EQ_I,
                                operand, module->newConstInt32(0), IntegerType::getTypeInt1());
@@ -1550,57 +1588,131 @@ Value * IRGenerator::emitNot(ast_node * node)
     return inst;
 }
 
-/// @brief 将整型值规范化为 i1 值
+Value * IRGenerator::emitFloatNot(Value * operand)
+{
+    auto * inst = new FCmpInst(currentFunction(), IRInstOperator::IRINST_OP_EQ_F,
+                               operand, module->newConstFloat(0.0f), IntegerType::getTypeInt1());
+    emitToBlock(inst);
+    return inst;
+}
+
+/// @brief 根据值类型分发 boolize 逻辑
 /// @param value 输入值
 /// @return 已经是 i1 值或新生成的 i1 比较结果
 Value * IRGenerator::emitBoolize(Value * value)
 {
     if (value->getType()->isFloatType()) {
-        auto * inst = new ICmpInst(currentFunction(), IRInstOperator::IRINST_OP_NE_F,
-                                   value, module->newConstFloat(0.0f), IntegerType::getTypeInt1());
-        emitToBlock(inst);
-        return inst;
+        return emitFloatBoolize(value);
     }
+
+    return emitIntBoolize(value);
+}
+
+Value * IRGenerator::emitIntBoolize(Value * value)
+{
     if (value->getType()->isInt1Type()) {
         return value;
     }
+
+    value = normalizeIntegerOperand(value);
+    if (!value) {
+        return nullptr;
+    }
+
     auto * inst = new ICmpInst(currentFunction(), IRInstOperator::IRINST_OP_NE_I,
                                value, module->newConstInt32(0), IntegerType::getTypeInt1());
     emitToBlock(inst);
     return inst;
 }
 
-/// @brief 将 i1 类型的值扩展为 i32
-/// @param value 输入值
-/// @return 原值或新生成的零扩展结果
-Value * IRGenerator::ensureI32(Value * value)
+Value * IRGenerator::emitFloatBoolize(Value * value)
 {
-    if (value->getType()->isFloatType()) {
-        auto * castInst = new FPToSIInst(currentFunction(), value, IntegerType::getTypeInt32());
-        emitToBlock(castInst);
-        return castInst;
-    }
-    if (!value->getType()->isInt1Type()) {
+    auto * inst = new FCmpInst(currentFunction(), IRInstOperator::IRINST_OP_NE_F,
+                               value, module->newConstFloat(0.0f), IntegerType::getTypeInt1());
+    emitToBlock(inst);
+    return inst;
+}
+
+Value * IRGenerator::materializeBoolToInt32(Value * value)
+{
+    if (value == nullptr || !value->getType()->isInt1Type()) {
         return value;
     }
+
     auto * zext = new ZExtInst(currentFunction(), value, IntegerType::getTypeInt32());
     emitToBlock(zext);
     return zext;
 }
 
-Value * IRGenerator::ensureFloat(Value * value)
+Value * IRGenerator::normalizeIntegerOperand(Value * value)
 {
+    if (value == nullptr) {
+        return nullptr;
+    }
+
+    if (value->getType()->isFloatType()) {
+        minic_log(LOG_ERROR, "需要整型操作数");
+        return nullptr;
+    }
+
+    return materializeBoolToInt32(value);
+}
+
+Value * IRGenerator::castFloatToInt32(Value * value)
+{
+    if (value == nullptr || !value->getType()->isFloatType()) {
+        return value;
+    }
+
+    auto * castInst = new FPToSIInst(currentFunction(), value, IntegerType::getTypeInt32());
+    emitToBlock(castInst);
+    return castInst;
+}
+
+Value * IRGenerator::convertToInt32(Value * value)
+{
+    if (value == nullptr) {
+        return nullptr;
+    }
+
+    if (value->getType()->isFloatType()) {
+        return castFloatToInt32(value);
+    }
+
+    return normalizeIntegerOperand(value);
+}
+
+Value * IRGenerator::castInt32ToFloat(Value * value)
+{
+    if (value == nullptr) {
+        return nullptr;
+    }
+
     if (value->getType()->isFloatType()) {
         return value;
     }
 
-    if (value->getType()->isInt1Type()) {
-        value = ensureI32(value);
+    if (!value->getType()->isInt32Type()) {
+        minic_log(LOG_ERROR, "需要 i32 操作数进行整型到浮点转换");
+        return nullptr;
     }
 
     auto * castInst = new SIToFPInst(currentFunction(), value, FloatType::getTypeFloat());
     emitToBlock(castInst);
     return castInst;
+}
+
+Value * IRGenerator::convertToFloat(Value * value)
+{
+    if (value == nullptr || value->getType()->isFloatType()) {
+        return value;
+    }
+
+    if (value->getType()->isInt1Type()) {
+        value = materializeBoolToInt32(value);
+    }
+
+    return castInt32ToFloat(value);
 }
 
 Value * IRGenerator::convertValueToType(Value * value, Type * targetType)
@@ -1614,11 +1726,11 @@ Value * IRGenerator::convertValueToType(Value * value, Type * targetType)
     }
 
     if (targetType->isFloatType()) {
-        return ensureFloat(value);
+        return convertToFloat(value);
     }
 
     if (targetType->isInt32Type()) {
-        return ensureI32(value);
+        return convertToInt32(value);
     }
 
     return value;

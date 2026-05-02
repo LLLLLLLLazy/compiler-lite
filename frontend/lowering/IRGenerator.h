@@ -113,11 +113,23 @@ private:
     /// @brief 统计聚合对象包含的标量元素个数
     std::size_t countScalarSlots(Type * type) const;
 
-    /// @brief 生成二元算术表达式对应的 IR
-    Value * emitBinary(ast_node * node, IRInstOperator op);
+    /// @brief 根据操作数类型分发二元算术表达式
+    Value * emitBinary(ast_node * node, IRInstOperator intOp, IRInstOperator floatOp = IRInstOperator::IRINST_OP_MAX);
+
+    /// @brief 生成整数二元算术表达式对应的 IR
+    Value * emitIntBinary(Value * lhs, Value * rhs, IRInstOperator op);
+
+    /// @brief 生成浮点二元算术表达式对应的 IR
+    Value * emitFloatBinary(Value * lhs, Value * rhs, IRInstOperator op);
+
+    /// @brief 根据操作数类型分发比较表达式
+    Value * emitCmp(ast_node * node, IRInstOperator intOp, IRInstOperator floatOp);
 
     /// @brief 生成整数比较表达式对应的 IR
-    Value * emitICmp(ast_node * node, IRInstOperator op);
+    Value * emitICmp(Value * lhs, Value * rhs, IRInstOperator op);
+
+    /// @brief 生成浮点比较表达式对应的 IR
+    Value * emitFCmp(Value * lhs, Value * rhs, IRInstOperator op);
 
     /// @brief 生成一元取负表达式对应的 IR
     Value * emitNeg(ast_node * node);
@@ -125,14 +137,38 @@ private:
     /// @brief 生成逻辑非表达式对应的 IR
     Value * emitNot(ast_node * node);
 
-    /// @brief 将任意整型值规约为 i1 值
+    /// @brief 生成整数逻辑非表达式对应的 IR
+    Value * emitIntNot(Value * operand);
+
+    /// @brief 生成浮点逻辑非表达式对应的 IR
+    Value * emitFloatNot(Value * operand);
+
+    /// @brief 根据值类型分发 boolize 逻辑
     Value * emitBoolize(Value * value);
 
-    /// @brief 将 i1 值扩展为 i32 值
-    Value * ensureI32(Value * value);
+    /// @brief 将整数值规约为 i1 值
+    Value * emitIntBoolize(Value * value);
+
+    /// @brief 将浮点值规约为 i1 值
+    Value * emitFloatBoolize(Value * value);
+
+    /// @brief 将 i1 值零扩展为 i32 值
+    Value * materializeBoolToInt32(Value * value);
+
+    /// @brief 将整型操作数规范化为 i32 值
+    Value * normalizeIntegerOperand(Value * value);
+
+    /// @brief 将 float 值转换为 i32 值
+    Value * castFloatToInt32(Value * value);
+
+    /// @brief 将数值转换为 i32 值
+    Value * convertToInt32(Value * value);
+
+    /// @brief 将 i32 值转换为 float 值
+    Value * castInt32ToFloat(Value * value);
 
     /// @brief 将数值转换为 float 值
-    Value * ensureFloat(Value * value);
+    Value * convertToFloat(Value * value);
 
     /// @brief 按目标类型执行必要的数值转换
     Value * convertValueToType(Value * value, Type * targetType);
