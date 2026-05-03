@@ -85,6 +85,9 @@ private:
     /// @brief 生成变量访问表达式并返回加载后的值
     Value * visitLeafVarId(ast_node * node);
 
+    /// @brief 预扫描全局 const 声明，在函数预声明前填充 constBindings
+    void prePopulateGlobalConstBindings(ast_node * node);
+
     /// @brief 获取声明节点的最终类型
     Type * buildDeclaredType(ast_node * declNode, bool forParam = false);
 
@@ -112,6 +115,11 @@ private:
 
     /// @brief 用扁平循环对大数组执行运行时清零
     bool emitFlatLoopZeroInitializer(Value * addr, Type * type);
+
+    /// @brief 将全局数组的常量初始化列表扁平化为标量值向量
+    bool collectGlobalArrayInitScalars(
+        Type * type, const std::vector<ast_node *> & items, std::size_t begin, std::size_t end,
+        std::vector<int32_t> & intValues, std::vector<float> & floatValues);
 
     /// @brief 统计聚合对象包含的标量元素个数
     std::size_t countScalarSlots(Type * type) const;

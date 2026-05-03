@@ -76,34 +76,36 @@ float GlobalVariable::getInitFloatValue() const
     return initFloatValue;
 }
 
-void GlobalVariable::setInitIntArrayValues(const std::vector<int32_t> & values)
+/// @brief 设置整数数组初始化值
+/// @param values 初始化值向量
+void GlobalVariable::setInitIntArray(const std::vector<int32_t> & values)
 {
-    initIntArrayValues = values;
-    initFloatArrayValues.clear();
-    inBSSSection = std::all_of(initIntArrayValues.begin(), initIntArrayValues.end(), [](int32_t value) {
-        return value == 0;
-    });
-    initKind = inBSSSection ? InitKind::Zero : InitKind::IntArray;
+    initIntArray = values;
+    inBSSSection = false;
+    initKind = InitKind::IntArray;
 }
 
-const std::vector<int32_t> & GlobalVariable::getInitIntArrayValues() const
+/// @brief 获取整数数组初始化值
+/// @return 初始化值向量
+const std::vector<int32_t> & GlobalVariable::getInitIntArray() const
 {
-    return initIntArrayValues;
+    return initIntArray;
 }
 
-void GlobalVariable::setInitFloatArrayValues(const std::vector<float> & values)
+/// @brief 设置浮点数组初始化值
+/// @param values 初始化值向量
+void GlobalVariable::setInitFloatArray(const std::vector<float> & values)
 {
-    initFloatArrayValues = values;
-    initIntArrayValues.clear();
-    inBSSSection = std::all_of(initFloatArrayValues.begin(), initFloatArrayValues.end(), [](float value) {
-        return value == 0.0f;
-    });
-    initKind = inBSSSection ? InitKind::Zero : InitKind::FloatArray;
+    initFloatArray = values;
+    inBSSSection = false;
+    initKind = InitKind::FloatArray;
 }
 
-const std::vector<float> & GlobalVariable::getInitFloatArrayValues() const
+/// @brief 获取浮点数组初始化值
+/// @return 初始化值向量
+const std::vector<float> & GlobalVariable::getInitFloatArray() const
 {
-    return initFloatArrayValues;
+    return initFloatArray;
 }
 
 /// @brief 获取初始化类别

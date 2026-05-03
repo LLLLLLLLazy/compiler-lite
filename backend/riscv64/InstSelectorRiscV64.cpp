@@ -670,43 +670,46 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 		return;
 	}
 
-	int intRegCount = 0;
-	int floatRegCount = 0;
-	int stackCount = 0;
-	std::vector<AbiArgLoc> argLocs;
-	argLocs.reserve(call->getArgCount());
-	for (int i = 0; i < call->getArgCount(); ++i) {
-		Value *arg = call->getArg(i);
-		Type *argType = arg->getType();
-		if (auto *alloca = dynamic_cast<AllocaInst *>(arg)) {
-			argType = alloca->getAllocaType();
-		}
-		argLocs.push_back(classifyAbiArg(argType, intRegCount, floatRegCount, stackCount));
-	}
+	// RISC-V ABI：整数参数和浮点参数使用独立的寄存器计数器
+	// 整数类型参数依次占用 a0-a7，浮点参数依次占用 fa0-fa7
+	// 超出对应寄存器的参数通过栈传递（每个栈槽 8 字节对齐）
+	{
+		int intIdx = 0, floatIdx = 0, stackOffset = 0;
 
-	for (int i = 0; i < call->getArgCount(); ++i) {
-		Value * arg = call->getArg(i);
-		Type * argType = arg->getType();
-		if (auto * alloca = dynamic_cast<AllocaInst *>(arg)) {
-			argType = alloca->getAllocaType();
-		}
+		for (int i = 0; i < call->getArgCount(); ++i) {
+			Value *arg = call->getArg(i);
+			Type *argType = arg->getType();
+			if (auto *alloca = dynamic_cast<AllocaInst *>(arg)) {
+				argType = alloca->getAllocaType();
+			}
 
-		const AbiArgLoc & loc = argLocs[i];
-		if (loc.kind == AbiArgLocKind::FloatReg) {
-			OperandReg val = loadOperand(arg, inst);
-			iloc.inst("fmv.w.x", "fa" + std::to_string(loc.index), PlatformRiscV64::regName[val.reg]);
-			releaseOperand(val);
-		} else if (loc.kind == AbiArgLocKind::IntReg) {
-			iloc.load_var(RISCV64_A0_REG_NO + loc.index, arg);
-		} else {
-			OperandReg value = loadOperand(arg, inst);
-			auto tmp = tempMgr.borrow(inst, value.reg);
-			iloc.store_base(value.reg,
-			                RISCV64_SP_REG_NO,
-			                loc.index * 8,
-			                tmp.reg(),
-			                argType->isPointerType());
-			releaseOperand(value);
+			if (argType->isFloatType()) {
+				if (floatIdx < 8) {
+					OperandReg val = loadOperand(arg, inst);
+					iloc.inst("fmv.w.x", "fa" + std::to_string(floatIdx), PlatformRiscV64::regName[val.reg]);
+					releaseOperand(val);
+				} else {
+					OperandReg value = loadOperand(arg, inst);
+					auto tmp = tempMgr.borrow(inst, value.reg);
+					iloc.store_base(value.reg, RISCV64_SP_REG_NO, stackOffset, tmp.reg(),
+					                arg->getType()->isPointerType());
+					releaseOperand(value);
+					stackOffset += 8;
+				}
+				floatIdx++;
+			} else {
+				if (intIdx < 8) {
+					iloc.load_var(RISCV64_A0_REG_NO + intIdx, arg);
+				} else {
+					OperandReg value = loadOperand(arg, inst);
+					auto tmp = tempMgr.borrow(inst, value.reg);
+					iloc.store_base(value.reg, RISCV64_SP_REG_NO, stackOffset, tmp.reg(),
+					                arg->getType()->isPointerType());
+					releaseOperand(value);
+					stackOffset += 8;
+				}
+				intIdx++;
+			}
 		}
 	}
 
@@ -773,10 +776,11 @@ void InstSelectorRiscV64::translate_copy(Instruction * inst)
 	releaseOperand(src);
 }
 
-/// @brief 生成形参从a0-a7到分配寄存器/栈槽的移动指令
+/// @brief 生成形参从ABI寄存器到分配位置的移动指令
 ///
-/// RISC-V调用约定：前8个参数通过a0-a7传递，
-/// 需要将它们移动到寄存器分配器分配的位置
+/// RISC-V调用约定：整数和浮点参数使用独立的寄存器计数器。
+/// 整数参数依次占用 a0-a7，浮点参数依次占用 fa0-fa7。
+/// 超出对应寄存器数量的参数通过栈传递。
 void InstSelectorRiscV64::emitFormalParamMoves()
 {
 	auto & params = func->getParams();
@@ -794,13 +798,18 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 	std::set<int> blockedRegs;
 	std::vector<RegMove> regMoves;
 
-	for (int i = 0; i < static_cast<int>(params.size()); ++i) {
-		if (paramLocs[i].kind == AbiArgLocKind::IntReg) {
-			blockedRegs.insert(RISCV64_A0_REG_NO + paramLocs[i].index);
+	// 收集实际使用的整数入参寄存器
+	{
+		int intIdx = 0;
+		for (auto * param : params) {
+			if (!param->getType()->isFloatType() && intIdx < 8) {
+				blockedRegs.insert(RISCV64_A0_REG_NO + intIdx);
+				intIdx++;
+			}
 		}
 	}
-	for (int i = 0; i < static_cast<int>(params.size()); ++i) {
-		auto * param = params[i];
+	// 收集寄存器分配器为目标分配的所有寄存器
+	for (auto * param : params) {
 		auto it = allocMap.find(param);
 		if (it != allocMap.end() && it->second.hasReg()) {
 			blockedRegs.insert(it->second.regId);
@@ -818,36 +827,44 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 		scratchReg = RISCV64_TMP_REG_NO;
 	}
 
-	for (int i = 0; i < static_cast<int>(params.size()); ++i) {
-		auto * param = params[i];
-		auto it = allocMap.find(param);
-		if (it == allocMap.end()) {
-			continue;
-		}
-
-		const AbiArgLoc & loc = paramLocs[i];
-
-		if (loc.kind == AbiArgLocKind::FloatReg) {
-			const std::string incomingFPReg = "fa" + std::to_string(loc.index);
-			if (it->second.hasReg()) {
-				iloc.inst("fmv.x.w", PlatformRiscV64::regName[it->second.regId], incomingFPReg);
-				blockedRegs.insert(it->second.regId);
-			} else if (it->second.hasStackSlot) {
-				iloc.inst("fmv.x.w", PlatformRiscV64::regName[scratchReg], incomingFPReg);
-				iloc.store_base(scratchReg, it->second.baseRegId, it->second.offset, scratchReg, false);
+	// 按声明顺序处理形参，使用独立的 int/float 寄存器计数器
+	{
+		int intIdx = 0, floatIdx = 0;
+		for (auto * param : params) {
+			auto it = allocMap.find(param);
+			if (it == allocMap.end()) {
+				continue;
 			}
-		} else if (loc.kind == AbiArgLocKind::IntReg) {
-			const int incomingReg = RISCV64_A0_REG_NO + loc.index;
-			if (it->second.hasReg()) {
-				if (it->second.regId != incomingReg) {
-					regMoves.push_back(RegMove{incomingReg, it->second.regId});
+
+			const bool isFloat = param->getType()->isFloatType();
+
+			if (isFloat) {
+				if (floatIdx < 8) {
+					const std::string fpReg = "fa" + std::to_string(floatIdx);
+					if (it->second.hasReg()) {
+						iloc.inst("fmv.x.w", PlatformRiscV64::regName[it->second.regId], fpReg);
+					} else if (it->second.hasStackSlot) {
+						iloc.inst("fmv.x.w", PlatformRiscV64::regName[scratchReg], fpReg);
+						iloc.store_base(scratchReg, it->second.baseRegId, it->second.offset,
+						                scratchReg, false);
+					}
 				}
-			} else if (it->second.hasStackSlot) {
-				iloc.store_base(incomingReg,
-					it->second.baseRegId,
-					it->second.offset,
-					scratchReg,
-					param->getType()->isPointerType());
+				// 栈传浮点参数已在 fp+offset 处，无需复制
+				floatIdx++;
+			} else {
+				if (intIdx < 8) {
+					const int incomingReg = RISCV64_A0_REG_NO + intIdx;
+					if (it->second.hasReg()) {
+						if (it->second.regId != incomingReg) {
+							regMoves.push_back(RegMove{incomingReg, it->second.regId});
+						}
+					} else if (it->second.hasStackSlot) {
+						iloc.store_base(incomingReg, it->second.baseRegId, it->second.offset,
+						                scratchReg, param->getType()->isPointerType());
+					}
+				}
+				// 栈传整数参数已在 fp+offset 处，无需复制
+				intIdx++;
 			}
 		} else {
 			const bool wide = param->getType()->isPointerType();
@@ -867,6 +884,7 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 		}
 	}
 
+	// 解析寄存器移动依赖（含循环依赖的打破）
 	while (!regMoves.empty()) {
 		bool progressed = false;
 		for (auto it = regMoves.begin(); it != regMoves.end(); ++it) {

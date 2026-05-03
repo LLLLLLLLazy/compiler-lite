@@ -133,9 +133,7 @@ bool IRGenerator::run()
     floatConstBindings.clear();
     floatConstBindings.emplace_back();
 
-    if (!precollectGlobalConstBindings(root)) {
-        return false;
-    }
+    prePopulateGlobalConstBindings(root);
 
     if (!declareCompileUnit(root)) {
         return false;
@@ -144,44 +142,49 @@ bool IRGenerator::run()
     return visitCompileUnit(root);
 }
 
-bool IRGenerator::precollectGlobalConstBindings(ast_node * node)
+/// @brief 预扫描全局 const 声明，在函数预声明前填充 constBindings
+/// @param node 编译单元根节点
+void IRGenerator::prePopulateGlobalConstBindings(ast_node * node)
 {
-    for (auto son : node->sons) {
-        if (!son || son->node_type != ast_operator_type::AST_OP_DECL_STMT) {
-            continue;
-        }
+	for (auto son : node->sons) {
+		if (!son || son->node_type != ast_operator_type::AST_OP_DECL_STMT) {
+			continue;
+		}
+		for (auto child : son->sons) {
+			if (!child || !child->isConst) {
+				continue;
+			}
 
-        for (auto declNode : son->sons) {
-            if (!declNode || !declNode->isConst) {
-                continue;
-            }
+			Type * declType = buildDeclaredType(child, false);
+			if (!declType) {
+				continue;
+			}
 
-            Type * declType = buildDeclaredType(declNode, false);
-            if (!declType || declType->isArrayType()) {
-                continue;
-            }
+			// 仅标量 const 值可用于数组维度表达式
+			if (!declType->isInt32Type() && !declType->isFloatType()) {
+				continue;
+			}
 
-            ast_node * initNode = getDeclInitNode(declNode);
-            if (!initNode) {
-                continue;
-            }
+			ast_node * initNode = getDeclInitNode(child);
+			if (!initNode) {
+				continue;
+			}
 
-            const std::string & varName = declNode->sons[1]->name;
-            if (declType->isFloatType()) {
-                double constValue = 0.0;
-                if (evaluateConstNumberExpr(initNode, constValue)) {
-                    floatConstBindings.front()[varName] = constValue;
-                }
-            } else if (declType->isInt32Type()) {
-                int32_t constValue = 0;
-                if (evaluateConstIntExpr(initNode, constValue)) {
-                    constBindings.front()[varName] = constValue;
-                }
-            }
-        }
-    }
+			std::string varName = child->sons[1]->name;
 
-    return true;
+			if (declType->isInt32Type()) {
+				int32_t constValue = 0;
+				if (evaluateConstIntExpr(initNode, constValue)) {
+					constBindings.front()[varName] = constValue;
+				}
+			} else if (declType->isFloatType()) {
+				double constValue = 0.0;
+				if (evaluateConstNumberExpr(initNode, constValue)) {
+					floatConstBindings.front()[varName] = constValue;
+				}
+			}
+		}
+	}
 }
 
 /// @brief 预声明编译单元中的所有函数
@@ -691,28 +694,18 @@ bool IRGenerator::visitVarDecl(ast_node * node)
     }
 
     if (declType->isArrayType()) {
-        if (initNode) {
-            std::vector<double> initValues;
-            if (!evaluateGlobalArrayInitializer(declType, initNode, initValues)) {
-                minic_log(LOG_ERROR, "全局变量(%s)只支持常量初始化", varName.c_str());
+        if (initNode && initNode->node_type == ast_operator_type::AST_OP_INIT_LIST && !initNode->sons.empty()) {
+            std::vector<int32_t> intVals;
+            std::vector<float> floatVals;
+            if (!collectGlobalArrayInitScalars(declType, initNode->sons, 0, initNode->sons.size(),
+                                               intVals, floatVals)) {
+                minic_log(LOG_ERROR, "全局数组(%s)初始化表达式不是编译期常量", varName.c_str());
                 return false;
             }
-
-            Type * scalarType = getArrayScalarType(declType);
-            if (scalarType != nullptr && scalarType->isFloatType()) {
-                std::vector<float> floatValues;
-                floatValues.reserve(initValues.size());
-                for (double value : initValues) {
-                    floatValues.push_back(static_cast<float>(value));
-                }
-                globalVar->setInitFloatArrayValues(floatValues);
+            if (!floatVals.empty()) {
+                globalVar->setInitFloatArray(floatVals);
             } else {
-                std::vector<int32_t> intValues;
-                intValues.reserve(initValues.size());
-                for (double value : initValues) {
-                    intValues.push_back(static_cast<int32_t>(value));
-                }
-                globalVar->setInitIntArrayValues(intValues);
+                globalVar->setInitIntArray(intVals);
             }
         }
         return true;
@@ -1048,6 +1041,82 @@ bool IRGenerator::emitArrayInitializer(
 
         if (!emitInitializer(elemAddr, elemType, item)) {
             return false;
+        }
+        ++cursor;
+    }
+
+    return true;
+}
+
+bool IRGenerator::collectGlobalArrayInitScalars(
+    Type * type, const std::vector<ast_node *> & items, std::size_t begin, std::size_t end,
+    std::vector<int32_t> & intValues, std::vector<float> & floatValues)
+{
+    auto * arrayType = dynamic_cast<ArrayType *>(type);
+    if (arrayType == nullptr) {
+        if (begin >= end) {
+            intValues.push_back(0);
+            return true;
+        }
+        ast_node * item = items[begin];
+        if (item->node_type == ast_operator_type::AST_OP_INIT_LIST) {
+            if (item->sons.empty()) {
+                intValues.push_back(0);
+                return true;
+            }
+            item = item->sons[0];
+        }
+        Type * scalarType = type;
+        while (auto * innerArray = dynamic_cast<ArrayType *>(scalarType)) {
+            scalarType = innerArray->getElementType();
+        }
+        if (scalarType->isFloatType()) {
+            double val = 0.0;
+            if (!evaluateConstNumberExpr(item, val)) return false;
+            floatValues.push_back(static_cast<float>(val));
+        } else {
+            int32_t val = 0;
+            if (!evaluateConstIntExpr(item, val)) return false;
+            intValues.push_back(val);
+        }
+        return true;
+    }
+
+    std::size_t cursor = begin;
+    Type * elemType = arrayType->getElementType();
+    std::size_t subScalarCount = countScalarSlots(elemType);
+
+    for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
+        if (cursor >= end) {
+            for (std::size_t k = 0; k < subScalarCount; ++k) {
+                intValues.push_back(0);
+            }
+            continue;
+        }
+
+        ast_node * item = items[cursor];
+        if (dynamic_cast<ArrayType *>(elemType) != nullptr && item->node_type != ast_operator_type::AST_OP_INIT_LIST) {
+            std::size_t take = 0;
+            while (cursor + take < end &&
+                   items[cursor + take]->node_type != ast_operator_type::AST_OP_INIT_LIST &&
+                   take < subScalarCount) {
+                ++take;
+            }
+            if (!collectGlobalArrayInitScalars(elemType, items, cursor, cursor + take, intValues, floatValues)) {
+                return false;
+            }
+            cursor += take;
+            continue;
+        }
+
+        if (item->node_type == ast_operator_type::AST_OP_INIT_LIST) {
+            if (!collectGlobalArrayInitScalars(elemType, item->sons, 0, item->sons.size(), intValues, floatValues)) {
+                return false;
+            }
+        } else {
+            if (!collectGlobalArrayInitScalars(elemType, items, cursor, cursor + 1, intValues, floatValues)) {
+                return false;
+            }
         }
         ++cursor;
     }

@@ -186,8 +186,18 @@ void CodeGeneratorRiscV64::genDataSection()
 			std::uint32_t bits = 0;
 			std::memcpy(&bits, &fval, sizeof(bits));
 			std::fprintf(fp, ".word %u\n", bits);
-		} else {
+		} else if (var->getInitKind() == GlobalVariable::InitKind::Int) {
 			std::fprintf(fp, ".word %d\n", var->getInitIntValue());
+		} else if (var->getInitKind() == GlobalVariable::InitKind::IntArray) {
+			for (int32_t v : var->getInitIntArray()) {
+				std::fprintf(fp, ".word %d\n", v);
+			}
+		} else if (var->getInitKind() == GlobalVariable::InitKind::FloatArray) {
+			for (float v : var->getInitFloatArray()) {
+				std::uint32_t bits = 0;
+				std::memcpy(&bits, &v, sizeof(bits));
+				std::fprintf(fp, ".word %u\n", bits);
+			}
 		}
 		emittedDataSection = true;
 	}
@@ -291,16 +301,33 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func)
 		allocMap.try_emplace(param, RegAllocInfo{});
 	}
 
-	// 栈上传入的形参位于旧sp，也就是prologue后的FP正方向偏移。
-	int intRegCount = 0;
-	int floatRegCount = 0;
-	int stackCount = 0;
-	for (auto * param: func->getParams()) {
-		auto & info = allocMap[param];
-		AbiArgLoc loc = classifyAbiArg(param->getType(), intRegCount, floatRegCount, stackCount);
-		if (loc.kind == AbiArgLocKind::Stack) {
-			info.regId = -1;
-			info.setStack(RISCV64_FP_REG_NO, loc.index * 8);
+	// RISC-V ABI：整数和浮点参数使用独立的寄存器计数器。
+	// 整数类型依次占用 a0-a7，浮点类型依次占用 fa0-fa7。
+	// 超出对应寄存器的形参通过栈传递，位于FP正方向偏移，每个栈槽 8 字节对齐。
+	{
+		int intIdx = 0, floatIdx = 0, stackOffset = 0;
+		for (auto * param : func->getParams()) {
+			const bool isFloat = param->getType()->isFloatType();
+			bool onStack = false;
+
+			if (isFloat) {
+				if (floatIdx >= 8) {
+					onStack = true;
+				}
+				floatIdx++;
+			} else {
+				if (intIdx >= 8) {
+					onStack = true;
+				}
+				intIdx++;
+			}
+
+			if (onStack) {
+				auto & info = allocMap[param];
+				info.regId = -1;
+				info.setStack(RISCV64_FP_REG_NO, stackOffset);
+				stackOffset += 8;
+			}
 		}
 	}
 

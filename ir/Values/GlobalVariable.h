@@ -7,6 +7,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <vector>
 
 #include "GlobalValue.h"
 #include "PointerType.h"
@@ -41,13 +42,13 @@ public:
 
     float getInitFloatValue() const;
 
-    void setInitIntArrayValues(const std::vector<int32_t> & values);
+    void setInitIntArray(const std::vector<int32_t> & values);
 
-    const std::vector<int32_t> & getInitIntArrayValues() const;
+    const std::vector<int32_t> & getInitIntArray() const;
 
-    void setInitFloatArrayValues(const std::vector<float> & values);
+    void setInitFloatArray(const std::vector<float> & values);
 
-    const std::vector<float> & getInitFloatArrayValues() const;
+    const std::vector<float> & getInitFloatArray() const;
 
     [[nodiscard]] InitKind getInitKind() const;
 
@@ -58,7 +59,7 @@ private:
     bool inBSSSection = true;
     int32_t initIntValue = 0;
     float initFloatValue = 0.0f;
-    std::vector<int32_t> initIntArrayValues;
-    std::vector<float> initFloatArrayValues;
+    std::vector<int32_t> initIntArray;
+    std::vector<float> initFloatArray;
     InitKind initKind = InitKind::Zero;
 };

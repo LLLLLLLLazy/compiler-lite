@@ -24,6 +24,7 @@ fi
 
 OK_NUM=0
 NG_NUM=0
+STATUS_COL_WIDTH=50
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/minic-rv64-tests.XXXXXX")
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -153,32 +154,53 @@ run_riscv64_check() {
 	local result_file="${TMP_DIR}/${testcase}.rv64.result"
 	local output=""
 	local exit_code=0
+	local t0 t1 t_compile=0 t_assemble=0 t_link=0 t_run=0
 
+	# compile
+	t0=$(date +%s%N)
 	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
-		echo "${testcase}.c compile NG [riscv64]"
+		t1=$(date +%s%N)
+		t_compile=$(( (t1 - t0) / 1000000 ))
+		echo "${testcase}.c compile NG [riscv64]  compile=${t_compile}ms"
 		return 1
 	fi
+	t1=$(date +%s%N)
+	t_compile=$(( (t1 - t0) / 1000000 ))
 
 	if [[ ! -s "${asmfile}" ]]; then
-		echo "${asmfile} not generated [riscv64]"
+		echo "${asmfile} not generated [riscv64]  compile=${t_compile}ms"
 		return 1
 	fi
 
+	# assemble
 	if [[ "${TEST_MODE}" == "assemble" ]]; then
+		t0=$(date +%s%N)
 		if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" -c -o "${objfile}" "${asmfile}" >/dev/null 2>&1; then
-			echo "${testcase}.c assemble NG [riscv64]"
+			t1=$(date +%s%N)
+			t_assemble=$(( (t1 - t0) / 1000000 ))
+			echo "${testcase}.c assemble NG [riscv64]  compile=${t_compile}ms assemble=${t_assemble}ms"
 			return 1
 		fi
+		t1=$(date +%s%N)
+		t_assemble=$(( (t1 - t0) / 1000000 ))
 
-		echo "${testcase}.c OK [riscv64-assemble]"
+		printf "%-${STATUS_COL_WIDTH}s %s\n" "${testcase}.c OK [riscv64-assemble]" "compile=${t_compile}ms assemble=${t_assemble}ms"
 		return 0
 	fi
 
+	# link
+	t0=$(date +%s%N)
 	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${STD_C}" >/dev/null 2>&1; then
-		echo "${testcase}.c link NG [riscv64]"
+		t1=$(date +%s%N)
+		t_link=$(( (t1 - t0) / 1000000 ))
+		echo "${testcase}.c link NG [riscv64]  compile=${t_compile}ms link=${t_link}ms"
 		return 1
 	fi
+	t1=$(date +%s%N)
+	t_link=$(( (t1 - t0) / 1000000 ))
 
+	# run
+	t0=$(date +%s%N)
 	if [[ -f "${infile}" ]]; then
 		output="$(timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" 2>&1)"
 		exit_code=$?
@@ -186,15 +208,17 @@ run_riscv64_check() {
 		output="$(timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" 2>&1)"
 		exit_code=$?
 	fi
+	t1=$(date +%s%N)
+	t_run=$(( (t1 - t0) / 1000000 ))
 
 	write_result_file "${output}" "${exit_code}" "${result_file}"
 
 	if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
-		echo "${testcase}.c NG [riscv64]"
+		echo "${testcase}.c NG [riscv64]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
 		return 1
 	fi
 
-	echo "${testcase}.c OK [riscv64]"
+	printf "%-${STATUS_COL_WIDTH}s %s\n" "${testcase}.c OK [riscv64]" "compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
 	return 0
 }
 
