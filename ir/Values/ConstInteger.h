@@ -13,26 +13,13 @@
 class ConstInteger : public Constant {
 
 public:
-    explicit ConstInteger(int32_t val, Type * type = IntegerType::getTypeInt32()) : Constant(type)
-    {
-        name = std::to_string(val);
-        intVal = val;
-    }
+    explicit ConstInteger(int32_t val, Type * type = IntegerType::getTypeInt32());
 
-    [[nodiscard]] std::string getIRName() const override
-    {
-        return name;
-    }
+    [[nodiscard]] std::string getIRName() const override;
 
-    [[nodiscard]] int32_t getVal() const
-    {
-        return intVal;
-    }
+    [[nodiscard]] int32_t getVal() const;
 
-    [[nodiscard]] bool isInt1Constant()
-    {
-        return getType()->isInt1Type();
-    }
+    [[nodiscard]] bool isInt1Constant();
 
 private:
     int32_t intVal = 0;

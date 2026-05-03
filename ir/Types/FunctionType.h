@@ -13,36 +13,13 @@
 
 class FunctionType final : public Type {
 public:
-    FunctionType(Type * _retType, std::vector<Type *> _argTypes)
-        : Type(FunctionTyID), retType{_retType}, argTypes{std::move(_argTypes)}
-    {}
+    FunctionType(Type * _retType, std::vector<Type *> _argTypes);
 
-    [[nodiscard]] std::string toString() const override
-    {
-        std::string typeStr = retType->toString() + " (*)(";
+    [[nodiscard]] std::string toString() const override;
 
-        bool first = true;
-        for (Type * type: argTypes) {
-            if (!first) {
-                typeStr += ", ";
-            }
-            typeStr += type->toString();
-            first = false;
-        }
+    [[nodiscard]] Type * getReturnType() const;
 
-        typeStr += ")";
-        return typeStr;
-    }
-
-    [[nodiscard]] Type * getReturnType() const
-    {
-        return retType;
-    }
-
-    [[nodiscard]] const std::vector<Type *> & getArgTypes() const
-    {
-        return argTypes;
-    }
+    [[nodiscard]] const std::vector<Type *> & getArgTypes() const;
 
 private:
     Type * retType;

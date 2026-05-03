@@ -11,64 +11,27 @@
 class PointerType : public Type {
 
     struct PointerTypeHasher final {
-        size_t operator()(const PointerType & type) const noexcept
-        {
-            return std::hash<const Type *>{}(type.getPointeeType());
-        }
+        size_t operator()(const PointerType & type) const noexcept;
     };
 
     struct PointerTypeEqual final {
-        size_t operator()(const PointerType & lhs, const PointerType & rhs) const noexcept
-        {
-            return lhs.getPointeeType() == rhs.getPointeeType();
-        }
+        size_t operator()(const PointerType & lhs, const PointerType & rhs) const noexcept;
     };
 
 public:
-    explicit PointerType(const Type * pointeeType) : Type(PointerTyID)
-    {
-        this->pointeeType = pointeeType;
+    explicit PointerType(const Type * pointeeType);
 
-        if (pointeeType->isPointerType()) {
-            Instanceof(pType, const PointerType *, pointeeType);
-            this->rootType = pType->getRootType();
-            this->depth = pType->getDepth() + 1;
-        } else {
-            this->rootType = pointeeType;
-            this->depth = 1;
-        }
-    }
+    [[nodiscard]] const Type * getRootType() const;
 
-    [[nodiscard]] const Type * getRootType() const
-    {
-        return rootType;
-    }
+    [[nodiscard]] const Type * getPointeeType() const;
 
-    [[nodiscard]] const Type * getPointeeType() const
-    {
-        return pointeeType;
-    }
+    [[nodiscard]] int32_t getDepth() const;
 
-    [[nodiscard]] int32_t getDepth() const
-    {
-        return depth;
-    }
+    static const PointerType * get(Type * pointee);
 
-    static const PointerType * get(Type * pointee)
-    {
-        static StorageSet<PointerType, PointerTypeHasher, PointerTypeEqual> storageSet;
-        return storageSet.get(pointee);
-    }
+    [[nodiscard]] int32_t getSize() const override;
 
-    [[nodiscard]] int32_t getSize() const override
-    {
-        return 8;
-    }
-
-    [[nodiscard]] std::string toString() const override
-    {
-        return pointeeType->toString() + "*";
-    }
+    [[nodiscard]] std::string toString() const override;
 
 private:
     const Type * pointeeType = nullptr;

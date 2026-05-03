@@ -20,65 +20,27 @@ public:
     };
 
 public:
-    explicit GlobalVariable(Type * _type, std::string _name)
-        : GlobalValue(const_cast<PointerType *>(PointerType::get(_type)), std::move(_name)), valueType(_type)
-    {
-        setAlignment(4);
-    }
+    explicit GlobalVariable(Type * _type, std::string _name);
 
-    [[nodiscard]] Type * getValueType() const
-    {
-        return valueType;
-    }
+    [[nodiscard]] Type * getValueType() const;
 
-    [[nodiscard]] bool isGlobalVarible() const override
-    {
-        return true;
-    }
+    [[nodiscard]] bool isGlobalVarible() const override;
 
-    [[nodiscard]] bool isInBSSSection() const
-    {
-        return this->inBSSSection;
-    }
+    [[nodiscard]] bool isInBSSSection() const;
 
-    int32_t getScopeLevel() override
-    {
-        return 0;
-    }
+    int32_t getScopeLevel() override;
 
-    void setInitIntValue(int32_t value)
-    {
-        initIntValue = value;
-        inBSSSection = (value == 0);
-        initKind = (value == 0) ? InitKind::Zero : InitKind::Int;
-    }
+    void setInitIntValue(int32_t value);
 
-    int32_t getInitIntValue() const
-    {
-        return initIntValue;
-    }
+    int32_t getInitIntValue() const;
 
-    void setInitFloatValue(float value)
-    {
-        initFloatValue = value;
-        inBSSSection = (value == 0.0f);
-        initKind = (value == 0.0f) ? InitKind::Zero : InitKind::Float;
-    }
+    void setInitFloatValue(float value);
 
-    float getInitFloatValue() const
-    {
-        return initFloatValue;
-    }
+    float getInitFloatValue() const;
 
-    [[nodiscard]] InitKind getInitKind() const
-    {
-        return initKind;
-    }
+    [[nodiscard]] InitKind getInitKind() const;
 
-    void toDeclareString(std::string & str)
-    {
-        str = "declare " + getValueType()->toString() + " " + getIRName();
-    }
+    void toDeclareString(std::string & str);
 
 private:
     Type * valueType = nullptr;

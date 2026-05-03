@@ -11,52 +11,25 @@
 class ArrayType : public Type {
 
     struct ArrayTypeHasher final {
-        size_t operator()(const ArrayType & type) const noexcept
-        {
-            size_t h1 = std::hash<const Type *>{}(type.getElementType());
-            size_t h2 = std::hash<int32_t>{}(type.getNumElements());
-            return h1 ^ (h2 << 1U);
-        }
+        size_t operator()(const ArrayType & type) const noexcept;
     };
 
     struct ArrayTypeEqual final {
-        bool operator()(const ArrayType & lhs, const ArrayType & rhs) const noexcept
-        {
-            return lhs.getElementType() == rhs.getElementType() &&
-                   lhs.getNumElements() == rhs.getNumElements();
-        }
+        bool operator()(const ArrayType & lhs, const ArrayType & rhs) const noexcept;
     };
 
 public:
-    ArrayType(Type * elementType, int32_t numElements)
-        : Type(ArrayTyID), elementType(elementType), numElements(numElements)
-    {}
+    ArrayType(Type * elementType, int32_t numElements);
 
-    [[nodiscard]] Type * getElementType() const
-    {
-        return elementType;
-    }
+    [[nodiscard]] Type * getElementType() const;
 
-    [[nodiscard]] int32_t getNumElements() const
-    {
-        return numElements;
-    }
+    [[nodiscard]] int32_t getNumElements() const;
 
-    [[nodiscard]] int32_t getSize() const override
-    {
-        return elementType->getSize() * numElements;
-    }
+    [[nodiscard]] int32_t getSize() const override;
 
-    static ArrayType * get(Type * elementType, int32_t numElements)
-    {
-        static StorageSet<ArrayType, ArrayTypeHasher, ArrayTypeEqual> storageSet;
-        return const_cast<ArrayType *>(storageSet.get(elementType, numElements));
-    }
+    static ArrayType * get(Type * elementType, int32_t numElements);
 
-    [[nodiscard]] std::string toString() const override
-    {
-        return "[" + std::to_string(numElements) + " x " + elementType->toString() + "]";
-    }
+    [[nodiscard]] std::string toString() const override;
 
 private:
     Type * elementType = nullptr;

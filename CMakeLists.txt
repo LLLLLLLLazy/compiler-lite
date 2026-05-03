@@ -145,12 +145,18 @@ set(IR_SRCS
 	ir/Types/IntegerType.h
 	ir/Types/IntegerType.cpp
 	ir/Types/FunctionType.h
+	ir/Types/FunctionType.cpp
 	ir/Types/PointerType.h
+	ir/Types/PointerType.cpp
 	ir/Types/ArrayType.h
+	ir/Types/ArrayType.cpp
 	ir/Values/ConstInteger.h
+	ir/Values/ConstInteger.cpp
 	ir/Values/ConstFloat.h
+	ir/Values/ConstFloat.cpp
 	ir/Values/LocalVariable.h
 	ir/Values/GlobalVariable.h
+	ir/Values/GlobalVariable.cpp
 	ir/Values/FormalParam.h
 	ir/Instructions/AllocaInst.h
 	ir/Instructions/AllocaInst.cpp
