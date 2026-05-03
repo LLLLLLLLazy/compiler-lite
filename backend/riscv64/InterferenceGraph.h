@@ -34,6 +34,9 @@ public:
 	/// @param nodeB 节点B的索引
 	void addEdge(int nodeA, int nodeB);
 
+	/// @brief 图构建完成后调用，对邻接表去重排序
+	void finalizeEdges();
+
 	/// @brief 判断两个节点是否干涉
 	/// O(1)查询，使用位向量
 	/// @param nodeA 节点A的索引
@@ -43,8 +46,8 @@ public:
 
 	/// @brief 获取某节点的所有干涉邻居
 	/// @param node 节点索引
-	/// @return 邻居节点索引集合
-	const std::set<int> & getNeighbors(int node) const;
+	/// @return 邻居节点索引向量
+	const std::vector<int> & getNeighbors(int node) const;
 
 	/// @brief 获取与某节点干涉的所有已分配物理寄存器集合
 	/// 遍历邻居，收集已分配physReg的邻居的物理寄存器编号
@@ -61,8 +64,8 @@ private:
 	/// 节点数量
 	int numNodes;
 
-	/// 邻接表：adjList[i] = 节点i的邻居集合
-	std::vector<std::set<int>> adjList;
+	/// 邻接表：adjList[i] = 节点i的邻居向量（sort+unique后）
+	std::vector<std::vector<int>> adjList;
 
 	/// 每行位图的64位字宽数量
 	std::size_t wordsPerRow;

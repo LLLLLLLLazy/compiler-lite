@@ -54,7 +54,18 @@ LocalTempManager::LocalTempManager(
 	const std::unordered_map<Value *, std::pair<int, int>> & _valueLiveRanges)
 	: pool(buildScratchPool(globalPool)), allocMap(_allocMap), instNumbering(_instNumbering),
 	  valueLiveRanges(_valueLiveRanges)
-{}
+{
+	// 预建 reg → 活跃区间列表 反向索引，按 start 排序
+	for (const auto & [value, info] : allocMap) {
+		if (!info.hasReg()) continue;
+		auto it = valueLiveRanges.find(value);
+		if (it == valueLiveRanges.end()) continue;
+		regIntervals[info.regId].emplace_back(it->second.first, it->second.second);
+	}
+	for (auto & [reg, intervals] : regIntervals) {
+		std::sort(intervals.begin(), intervals.end());
+	}
+}
 
 LocalTempManager::Lease::Lease(Lease && other) noexcept
 	: owner(other.owner), regId(other.regId)
@@ -166,23 +177,25 @@ int LocalTempManager::currentInstNum(Instruction * inst) const
 /// @return 是否不可作为临时寄存器借用
 bool LocalTempManager::isLiveAllocatedReg(int reg, int instNum, bool afterUses) const
 {
-	for (const auto & [value, info] : allocMap) {
-		if (value == nullptr || !info.hasReg() || info.regId != reg) {
-			continue;
-		}
+	auto it = regIntervals.find(reg);
+	if (it == regIntervals.end()) return false;
 
-		auto liveIt = valueLiveRanges.find(value);
-		if (liveIt == valueLiveRanges.end()) {
-			continue;
-		}
+	const auto & intervals = it->second;
+	// 二分查找第一个 start > instNum 的区间
+	auto iter = std::upper_bound(intervals.begin(), intervals.end(), instNum,
+		[](int val, const std::pair<int, int> & seg) { return val < seg.first; });
 
-		const auto & [start, end] = liveIt->second;
-		if (afterUses) {
-			if (start <= instNum && instNum + 1 < end) {
-				return true;
-			}
-		} else if (start <= instNum && instNum < end) {
-			return true;
+	if (afterUses) {
+		// afterUses: 仅在 instNum+1 < end 时冲突（最后使用点之后可复用）
+		if (iter != intervals.begin()) {
+			const auto & prev = *(iter - 1);
+			if (prev.first <= instNum && instNum + 1 < prev.second) return true;
+		}
+	} else {
+		// 标准: instNum 在区间内即冲突
+		if (iter != intervals.begin()) {
+			const auto & prev = *(iter - 1);
+			if (prev.first <= instNum && instNum < prev.second) return true;
 		}
 	}
 	return false;

@@ -115,4 +115,7 @@ private:
 
 	/// @brief 虚拟寄存器活跃范围
 	const std::unordered_map<Value *, std::pair<int, int>> & valueLiveRanges;
+
+	/// @brief 每个物理寄存器的活跃区间反向索引：reg → [{start, end}, ...] 按start排序
+	std::unordered_map<int, std::vector<std::pair<int, int>>> regIntervals;
 };

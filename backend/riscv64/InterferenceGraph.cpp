@@ -5,6 +5,7 @@
 
 #include "InterferenceGraph.h"
 
+#include <algorithm>
 #include <cstddef>
 
 #include "LiveInterval.h"
@@ -57,13 +58,22 @@ void InterferenceGraph::addEdge(int nodeA, int nodeB)
 		return; // 自环无意义
 	}
 
-	// 邻接表更新
-	adjList[nodeA].insert(nodeB);
-	adjList[nodeB].insert(nodeA);
+	// 邻接表更新（构建阶段仅 push_back，构建完成后调用 finalizeEdges 去重）
+	adjList[nodeA].push_back(nodeB);
+	adjList[nodeB].push_back(nodeA);
 
 	// 位向量更新
 	interferenceBits[nodeA][wordIndexFor(nodeB)] |= bitMaskFor(nodeB);
 	interferenceBits[nodeB][wordIndexFor(nodeA)] |= bitMaskFor(nodeA);
+}
+
+/// @brief 图构建完成后调用，对邻接表去重排序
+void InterferenceGraph::finalizeEdges()
+{
+	for (auto & neighbors : adjList) {
+		std::sort(neighbors.begin(), neighbors.end());
+		neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+	}
 }
 
 /// @brief 判断两个节点是否干涉
@@ -77,11 +87,11 @@ bool InterferenceGraph::hasInterference(int nodeA, int nodeB) const
 }
 
 /// @brief 获取某节点的所有干涉邻居
-const std::set<int> & InterferenceGraph::getNeighbors(int node) const
+const std::vector<int> & InterferenceGraph::getNeighbors(int node) const
 {
-	static const std::set<int> emptySet;
+	static const std::vector<int> emptyVec;
 	if (!isValidNode(node, numNodes)) {
-		return emptySet;
+		return emptyVec;
 	}
 	return adjList[node];
 }

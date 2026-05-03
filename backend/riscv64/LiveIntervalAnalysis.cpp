@@ -158,6 +158,10 @@ bool LiveIntervalAnalysis::needsInterval(Value * val)
 	if (dynamic_cast<BasicBlock *>(val)) {
 		return false;
 	}
+	// alloca 一定分配在栈上，不需要活跃区间和寄存器分配
+	if (dynamic_cast<AllocaInst *>(val)) {
+		return false;
+	}
 	return true;
 }
 
@@ -495,12 +499,26 @@ void LiveIntervalAnalysis::buildInterferenceGraph()
 	int n = static_cast<int>(intervals.size());
 	interferenceGraph = new InterferenceGraph(n);
 
-	// 对每对区间检查是否干涉
-	for (int i = 0; i < n; ++i) {
-		for (int j = i + 1; j < n; ++j) {
+	// 按区间 start 排序的索引数组，用于提前终止内层循环
+	std::vector<int> sortedIdx(n);
+	for (int k = 0; k < n; ++k) {
+		sortedIdx[k] = k;
+	}
+	std::sort(sortedIdx.begin(), sortedIdx.end(), [this](int a, int b) {
+		return intervals[a]->getStart() < intervals[b]->getStart();
+	});
+
+	for (int ii = 0; ii < n; ++ii) {
+		int i = sortedIdx[ii];
+		for (int jj = ii + 1; jj < n; ++jj) {
+			int j = sortedIdx[jj];
+			// intervals 按 start 排序，一旦 j 的 start >= i 的 end，后续都不会重叠
+			if (intervals[j]->getStart() >= intervals[i]->getEnd()) break;
 			if (intervals[i]->overlaps(*intervals[j])) {
 				interferenceGraph->addEdge(i, j);
 			}
 		}
 	}
+
+	interferenceGraph->finalizeEdges();
 }
