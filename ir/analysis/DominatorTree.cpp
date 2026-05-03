@@ -30,9 +30,9 @@ DominatorTree::DominatorTree(Function * func)
     computeDFSTimestamps();
 }
 
-// ---------------------------------------------------------------------------
+
 // 第 1 步：计算逆后序遍历（迭代式 DFS）
-// ---------------------------------------------------------------------------
+
 /// @brief 计算函数 CFG 的逆后序编号
 /// @param func 待分析的函数
 void DominatorTree::computeRPO(Function * func)
@@ -45,7 +45,7 @@ void DominatorTree::computeRPO(Function * func)
     std::unordered_map<BasicBlock *, bool> visited;
     std::vector<BasicBlock *> postOrder;
 
-    // 使用显式栈模拟后序 DFS，需要在所有后继处理完成后再记录当前节点。
+    // 使用显式栈模拟后序 DFS，需要在所有后继处理完成后再记录当前节点
     struct Frame {
         BasicBlock * bb;
         std::size_t nextSuccIdx;
@@ -83,9 +83,9 @@ void DominatorTree::computeRPO(Function * func)
     }
 }
 
-// ---------------------------------------------------------------------------
+
 // 第 2 步：计算直接支配者（Cooper 等人的算法）
-// ---------------------------------------------------------------------------
+
 /// @brief 根据逆后序结果计算每个基本块的直接支配者
 void DominatorTree::computeIDom()
 {
@@ -130,9 +130,9 @@ void DominatorTree::computeIDom()
     }
 }
 
-// ---------------------------------------------------------------------------
+
 // 第 3 步：构建支配树孩子节点映射
-// ---------------------------------------------------------------------------
+
 /// @brief 根据 idom 关系构建支配树的孩子列表
 void DominatorTree::buildDomChildren()
 {
@@ -155,9 +155,9 @@ void DominatorTree::buildDomChildren()
     }
 }
 
-// ---------------------------------------------------------------------------
+
 // 第 4 步：为支配树打上 DFS 时间戳，便于 O(1) 判断支配关系
-// ---------------------------------------------------------------------------
+
 /// @brief 为支配树节点计算 DFS 进入/退出时间戳
 void DominatorTree::computeDFSTimestamps()
 {
@@ -186,9 +186,6 @@ void DominatorTree::dfsTimestamp(BasicBlock * bb, int & timer)
     dfOut[bb] = timer++;
 }
 
-// ---------------------------------------------------------------------------
-// 借助逆后序编号在支配树上求交汇点
-// ---------------------------------------------------------------------------
 /// @brief 计算两个基本块在支配关系上的交汇点
 /// @param b1 第一个基本块
 /// @param b2 第二个基本块
@@ -206,9 +203,6 @@ BasicBlock * DominatorTree::intersect(BasicBlock * b1, BasicBlock * b2) const
     return b1;
 }
 
-// ---------------------------------------------------------------------------
-// 对外查询接口
-// ---------------------------------------------------------------------------
 /// @brief 获取指定基本块的直接支配者
 /// @param bb 目标基本块
 /// @return 直接支配者，不存在时返回空指针
@@ -256,7 +250,7 @@ bool DominatorTree::dominates(BasicBlock * a, BasicBlock * b) const
     if (itA == dfIn.end() || itB == dfIn.end()) {
         return false;
     }
-    // 若 a 的 DFS 区间完整覆盖 b 的 DFS 区间，则 a 支配 b。
+    // 若 a 的 DFS 区间完整覆盖 b 的 DFS 区间，则 a 支配 b
     return dfIn.at(a) <= dfIn.at(b) && dfOut.at(b) <= dfOut.at(a);
 }
 
@@ -269,9 +263,6 @@ bool DominatorTree::strictlyDominates(BasicBlock * a, BasicBlock * b) const
     return a != b && dominates(a, b);
 }
 
-// ---------------------------------------------------------------------------
-// 调试输出
-// ---------------------------------------------------------------------------
 /// @brief 输出支配树调试信息
 /// @param str 输出字符串
 void DominatorTree::print(std::string & str) const

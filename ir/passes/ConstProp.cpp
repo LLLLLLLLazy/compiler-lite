@@ -6,8 +6,11 @@
 #include "ConstProp.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <deque>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -15,14 +18,18 @@
 #include "BinaryInst.h"
 #include "BranchInst.h"
 #include "CondBranchInst.h"
+#include "ConstFloat.h"
 #include "ConstInteger.h"
+#include "FCmpInst.h"
+#include "FPToSIInst.h"
 #include "Function.h"
 #include "ICmpInst.h"
 #include "Instruction.h"
-#include "symboltable/Module.h"
 #include "PhiInst.h"
+#include "SIToFPInst.h"
 #include "Value.h"
 #include "ZExtInst.h"
+#include "Module.h"
 
 namespace {
 
@@ -33,10 +40,19 @@ enum class LatticeState {
     Overdefined,
 };
 
+/// @brief SCCP 常量值的具体类别
+enum class ConstantKind {
+    None,
+    Integer,
+    Float,
+};
+
 /// @brief 表示 SCCP 中的 lattice 值
 struct LatticeValue {
     LatticeState state = LatticeState::Unknown;
-    int32_t constant = 0;
+    ConstantKind kind = ConstantKind::None;
+    int32_t intConstant = 0;
+    std::uint32_t floatBits = 0;
 
     /// @brief 获取 unknown 状态的 lattice 值
     static LatticeValue getUnknown()
@@ -44,22 +60,68 @@ struct LatticeValue {
         return {};
     }
 
-    /// @brief 获取 constant 状态的 lattice 值
-    static LatticeValue getConstant(int32_t value)
+    /// @brief 获取整数 constant 状态的 lattice 值
+    static LatticeValue getIntegerConstant(int32_t value)
     {
-        return {LatticeState::Constant, value};
+        return {LatticeState::Constant, ConstantKind::Integer, value, 0};
+    }
+
+    /// @brief 获取浮点 constant 状态的 lattice 值
+    static LatticeValue getFloatConstant(float value)
+    {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return {LatticeState::Constant, ConstantKind::Float, 0, bits};
     }
 
     /// @brief 获取 overdefined 状态的 lattice 值
     static LatticeValue getOverdefined()
     {
-        return {LatticeState::Overdefined, 0};
+        return {LatticeState::Overdefined, ConstantKind::None, 0, 0};
     }
 
     /// @brief 判断 lattice 值是否为 unknown/constant/overdefined 状态
     bool isUnknown() const{ return state == LatticeState::Unknown; }
     bool isConstant() const{ return state == LatticeState::Constant; }
     bool isOverdefined() const{ return state == LatticeState::Overdefined; }
+
+    /// @brief 判断是否为整数常量
+    bool isIntegerConstant() const
+    {
+        return isConstant() && kind == ConstantKind::Integer;
+    }
+
+    /// @brief 判断是否为浮点常量
+    bool isFloatConstant() const
+    {
+        return isConstant() && kind == ConstantKind::Float;
+    }
+
+    /// @brief 读取浮点常量值
+    float getFloatValue() const
+    {
+        float value = 0.0f;
+        std::memcpy(&value, &floatBits, sizeof(value));
+        return value;
+    }
+
+    /// @brief 判断两个常量是否完全相等
+    bool equalsConstant(const LatticeValue & other) const
+    {
+        if (!isConstant() || !other.isConstant() || kind != other.kind) {
+            return false;
+        }
+
+        if (kind == ConstantKind::Integer) {
+            return intConstant == other.intConstant;
+        }
+
+        if (kind == ConstantKind::Float) {
+            return floatBits == other.floatBits;
+        }
+
+        return false;
+    }
 };
 
 /// @brief 表示 CFG 边的结构体
@@ -194,7 +256,11 @@ private:
         }
 
         if (auto * constInteger = dynamic_cast<ConstInteger *>(value)) {
-            return LatticeValue::getConstant(constInteger->getVal());
+            return LatticeValue::getIntegerConstant(constInteger->getVal());
+        }
+
+        if (auto * constFloat = dynamic_cast<ConstFloat *>(value)) {
+            return LatticeValue::getFloatConstant(constFloat->getVal());
         }
 
         if (!dynamic_cast<Instruction *>(value)) {
@@ -230,12 +296,13 @@ private:
         } else if (current.isConstant()) {
             if (incoming.isOverdefined()) {
                 next = incoming;
-            } else if (incoming.isConstant() && incoming.constant != current.constant) {
+            } else if (incoming.isConstant() && !incoming.equalsConstant(current)) {
                 next = LatticeValue::getOverdefined();
             }
         }
 
-        if (next.state == current.state && next.constant == current.constant) {
+        if (next.state == current.state && next.kind == current.kind && next.intConstant == current.intConstant &&
+            next.floatBits == current.floatBits) {
             return false;
         }
 
@@ -342,27 +409,53 @@ private:
     /// @return 求值得到的 lattice 状态
     LatticeValue evaluateBinary(BinaryInst * inst) const
     {
+        if (!inst) {
+            return LatticeValue::getOverdefined();
+        }
+
         auto lhs = getValueState(inst->getLHS());
         auto rhs = getValueState(inst->getRHS());
 
-        if (lhs.isConstant() && rhs.isConstant()) {
+        if (lhs.isIntegerConstant() && rhs.isIntegerConstant()) {
             switch (inst->getOp()) {
                 case IRInstOperator::IRINST_OP_ADD_I:
-                    return LatticeValue::getConstant(lhs.constant + rhs.constant);
+                    return LatticeValue::getIntegerConstant(lhs.intConstant + rhs.intConstant);
 
                 case IRInstOperator::IRINST_OP_SUB_I:
-                    return LatticeValue::getConstant(lhs.constant - rhs.constant);
+                    return LatticeValue::getIntegerConstant(lhs.intConstant - rhs.intConstant);
 
                 case IRInstOperator::IRINST_OP_MUL_I:
-                    return LatticeValue::getConstant(lhs.constant * rhs.constant);
+                    return LatticeValue::getIntegerConstant(lhs.intConstant * rhs.intConstant);
 
                 case IRInstOperator::IRINST_OP_DIV_I:
-                    return rhs.constant == 0 ? LatticeValue::getOverdefined()
-                                             : LatticeValue::getConstant(lhs.constant / rhs.constant);
+                    return rhs.intConstant == 0 ? LatticeValue::getOverdefined()
+                                                : LatticeValue::getIntegerConstant(lhs.intConstant / rhs.intConstant);
 
                 case IRInstOperator::IRINST_OP_MOD_I:
-                    return rhs.constant == 0 ? LatticeValue::getOverdefined()
-                                             : LatticeValue::getConstant(lhs.constant % rhs.constant);
+                    return rhs.intConstant == 0 ? LatticeValue::getOverdefined()
+                                                : LatticeValue::getIntegerConstant(lhs.intConstant % rhs.intConstant);
+
+                default:
+                    break;
+            }
+        }
+
+        if (lhs.isFloatConstant() && rhs.isFloatConstant()) {
+            float lhsValue = lhs.getFloatValue();
+            float rhsValue = rhs.getFloatValue();
+
+            switch (inst->getOp()) {
+                case IRInstOperator::IRINST_OP_ADD_F:
+                    return LatticeValue::getFloatConstant(lhsValue + rhsValue);
+
+                case IRInstOperator::IRINST_OP_SUB_F:
+                    return LatticeValue::getFloatConstant(lhsValue - rhsValue);
+
+                case IRInstOperator::IRINST_OP_MUL_F:
+                    return LatticeValue::getFloatConstant(lhsValue * rhsValue);
+
+                case IRInstOperator::IRINST_OP_DIV_F:
+                    return LatticeValue::getFloatConstant(lhsValue / rhsValue);
 
                 default:
                     return LatticeValue::getOverdefined();
@@ -381,41 +474,111 @@ private:
     /// @return 求值得到的 lattice 状态
     LatticeValue evaluateICmp(ICmpInst * inst) const
     {
+        if (!inst) {
+            return LatticeValue::getOverdefined();
+        }
+
         auto lhs = getValueState(inst->getLHS());
         auto rhs = getValueState(inst->getRHS());
 
-        if (lhs.isConstant() && rhs.isConstant()) {
+        if (lhs.isIntegerConstant() && rhs.isIntegerConstant()) {
             int32_t result = 0;
             switch (inst->getOp()) {
                 case IRInstOperator::IRINST_OP_LT_I:
-                    result = lhs.constant < rhs.constant;
+                    result = lhs.intConstant < rhs.intConstant;
                     break;
 
                 case IRInstOperator::IRINST_OP_GT_I:
-                    result = lhs.constant > rhs.constant;
+                    result = lhs.intConstant > rhs.intConstant;
                     break;
 
                 case IRInstOperator::IRINST_OP_LE_I:
-                    result = lhs.constant <= rhs.constant;
+                    result = lhs.intConstant <= rhs.intConstant;
                     break;
 
                 case IRInstOperator::IRINST_OP_GE_I:
-                    result = lhs.constant >= rhs.constant;
+                    result = lhs.intConstant >= rhs.intConstant;
                     break;
 
                 case IRInstOperator::IRINST_OP_EQ_I:
-                    result = lhs.constant == rhs.constant;
+                    result = lhs.intConstant == rhs.intConstant;
                     break;
 
                 case IRInstOperator::IRINST_OP_NE_I:
-                    result = lhs.constant != rhs.constant;
+                    result = lhs.intConstant != rhs.intConstant;
                     break;
 
                 default:
                     return LatticeValue::getOverdefined();
             }
 
-            return LatticeValue::getConstant(result);
+            return LatticeValue::getIntegerConstant(result);
+        }
+
+        if (lhs.isFloatConstant() || rhs.isFloatConstant()) {
+            return LatticeValue::getOverdefined();
+        }
+
+        if (lhs.isOverdefined() || rhs.isOverdefined()) {
+            return LatticeValue::getOverdefined();
+        }
+
+        return LatticeValue::getUnknown();
+    }
+
+    /// @brief 计算浮点比较指令的 lattice 值
+    /// @param inst 待求值的浮点比较指令
+    /// @return 求值得到的 lattice 状态
+    LatticeValue evaluateFCmp(FCmpInst * inst) const
+    {
+        if (!inst) {
+            return LatticeValue::getOverdefined();
+        }
+
+        auto lhs = getValueState(inst->getLHS());
+        auto rhs = getValueState(inst->getRHS());
+
+        if (lhs.isFloatConstant() && rhs.isFloatConstant()) {
+            float lhsValue = lhs.getFloatValue();
+            float rhsValue = rhs.getFloatValue();
+            bool lhsOrdered = !std::isnan(lhsValue);
+            bool rhsOrdered = !std::isnan(rhsValue);
+            int32_t result = 0;
+
+            switch (inst->getOp()) {
+                case IRInstOperator::IRINST_OP_LT_F:
+                    result = lhsOrdered && rhsOrdered && lhsValue < rhsValue;
+                    break;
+
+                case IRInstOperator::IRINST_OP_GT_F:
+                    result = lhsOrdered && rhsOrdered && lhsValue > rhsValue;
+                    break;
+
+                case IRInstOperator::IRINST_OP_LE_F:
+                    result = lhsOrdered && rhsOrdered && lhsValue <= rhsValue;
+                    break;
+
+                case IRInstOperator::IRINST_OP_GE_F:
+                    result = lhsOrdered && rhsOrdered && lhsValue >= rhsValue;
+                    break;
+
+                case IRInstOperator::IRINST_OP_EQ_F:
+                    result = lhsOrdered && rhsOrdered && lhsValue == rhsValue;
+                    break;
+
+                case IRInstOperator::IRINST_OP_NE_F:
+                    result = lhsOrdered && rhsOrdered && lhsValue != rhsValue;
+                    break;
+
+                default:
+                    return LatticeValue::getOverdefined();
+            }
+
+            return LatticeValue::getIntegerConstant(result);
+        }
+
+        if (lhs.isIntegerConstant() || rhs.isIntegerConstant()) {
+            return LatticeValue::getOverdefined();
         }
 
         if (lhs.isOverdefined() || rhs.isOverdefined()) {
@@ -457,7 +620,7 @@ private:
                 continue;
             }
 
-            if (result.constant != incomingState.constant) {
+            if (!result.equalsConstant(incomingState)) {
                 return LatticeValue::getOverdefined();
             }
         }
@@ -475,8 +638,58 @@ private:
     LatticeValue evaluateZExt(ZExtInst * inst) const
     {
         LatticeValue source = getValueState(inst->getSource());
-        if (source.isConstant()) {
-            return LatticeValue::getConstant(source.constant);
+        if (source.isIntegerConstant()) {
+            return LatticeValue::getIntegerConstant(source.intConstant);
+        }
+
+        if (source.isOverdefined()) {
+            return LatticeValue::getOverdefined();
+        }
+
+        return LatticeValue::getUnknown();
+    }
+
+    /// @brief 计算 sitofp 指令的 lattice 值
+    /// @param inst 待求值的 sitofp 指令
+    /// @return 求值得到的 lattice 状态
+    LatticeValue evaluateSIToFP(SIToFPInst * inst) const
+    {
+        if (!inst) {
+            return LatticeValue::getOverdefined();
+        }
+
+        LatticeValue source = getValueState(inst->getSource());
+        if (source.isIntegerConstant()) {
+            return LatticeValue::getFloatConstant(static_cast<float>(source.intConstant));
+        }
+
+        if (source.isOverdefined()) {
+            return LatticeValue::getOverdefined();
+        }
+
+        return LatticeValue::getUnknown();
+    }
+
+    /// @brief 计算 fptosi 指令的 lattice 值
+    /// @param inst 待求值的 fptosi 指令
+    /// @return 求值得到的 lattice 状态
+    LatticeValue evaluateFPToSI(FPToSIInst * inst) const
+    {
+        if (!inst) {
+            return LatticeValue::getOverdefined();
+        }
+
+        LatticeValue source = getValueState(inst->getSource());
+        if (source.isFloatConstant()) {
+            float sourceValue = source.getFloatValue();
+            float maxInt = static_cast<float>(std::numeric_limits<int32_t>::max());
+            float minInt = static_cast<float>(std::numeric_limits<int32_t>::min());
+
+            if (std::isnan(sourceValue) || !std::isfinite(sourceValue) || sourceValue > maxInt || sourceValue < minInt) {
+                return LatticeValue::getOverdefined();
+            }
+
+            return LatticeValue::getIntegerConstant(static_cast<int32_t>(sourceValue));
         }
 
         if (source.isOverdefined()) {
@@ -501,6 +714,10 @@ private:
             case IRInstOperator::IRINST_OP_MUL_I:
             case IRInstOperator::IRINST_OP_DIV_I:
             case IRInstOperator::IRINST_OP_MOD_I:
+            case IRInstOperator::IRINST_OP_ADD_F:
+            case IRInstOperator::IRINST_OP_SUB_F:
+            case IRInstOperator::IRINST_OP_MUL_F:
+            case IRInstOperator::IRINST_OP_DIV_F:
                 return evaluateBinary(dynamic_cast<BinaryInst *>(inst));
 
             case IRInstOperator::IRINST_OP_LT_I:
@@ -511,11 +728,25 @@ private:
             case IRInstOperator::IRINST_OP_NE_I:
                 return evaluateICmp(dynamic_cast<ICmpInst *>(inst));
 
+            case IRInstOperator::IRINST_OP_LT_F:
+            case IRInstOperator::IRINST_OP_GT_F:
+            case IRInstOperator::IRINST_OP_LE_F:
+            case IRInstOperator::IRINST_OP_GE_F:
+            case IRInstOperator::IRINST_OP_EQ_F:
+            case IRInstOperator::IRINST_OP_NE_F:
+                return evaluateFCmp(dynamic_cast<FCmpInst *>(inst));
+
             case IRInstOperator::IRINST_OP_PHI:
                 return evaluatePhi(dynamic_cast<PhiInst *>(inst));
 
             case IRInstOperator::IRINST_OP_ZEXT:
                 return evaluateZExt(dynamic_cast<ZExtInst *>(inst));
+
+            case IRInstOperator::IRINST_OP_SITOFP:
+                return evaluateSIToFP(dynamic_cast<SIToFPInst *>(inst));
+
+            case IRInstOperator::IRINST_OP_FPTOSI:
+                return evaluateFPToSI(dynamic_cast<FPToSIInst *>(inst));
 
             case IRInstOperator::IRINST_OP_COPY:
                 return getValueState(inst->getOperand(0));
@@ -545,9 +776,9 @@ private:
         }
 
         LatticeValue cond = getValueState(condBr->getCondition());
-        if (cond.isConstant()) {
+        if (cond.isIntegerConstant()) {
             // 条件已知时，只传播可达那一条边
-            enqueueEdge(parent, cond.constant != 0 ? condBr->getTrueDest() : condBr->getFalseDest());
+            enqueueEdge(parent, cond.intConstant != 0 ? condBr->getTrueDest() : condBr->getFalseDest());
             return;
         }
 
@@ -614,23 +845,31 @@ private:
 
     /// @brief 将 lattice 里的常量结果还原成 IR 常量对象
     /// @param type 目标常量类型
-    /// @param value 常量的整数值
+    /// @param value 常量值
     /// @return 对应的 IR 常量对象
-    ConstInteger * materializeConstant(Type * type, int32_t value) const
+    Value * materializeConstant(Type * type, const LatticeValue & value) const
     {
-        if (!type || !type->isIntegerType()) {
+        if (!type || !value.isConstant()) {
             return nullptr;
         }
 
-        if (type->isInt1Type()) {
-            return mod->newConstInt1(value != 0);
+        if (type->isIntegerType() && value.isIntegerConstant()) {
+            if (type->isInt1Type()) {
+                return mod->newConstInt1(value.intConstant != 0);
+            }
+
+            if (type->isInt32Type()) {
+                return mod->newConstInt32(value.intConstant);
+            }
+
+            return mod->newConstInteger(type, value.intConstant);
         }
 
-        if (type->isInt32Type()) {
-            return mod->newConstInt32(value);
+        if (type->isFloatType() && value.isFloatConstant()) {
+            return mod->newConstFloat(value.getFloatValue());
         }
 
-        return mod->newConstInteger(type, value);
+        return nullptr;
     }
 
     /// @brief 将 SCCP 求得的常量与常量分支回写到 IR 中
@@ -652,9 +891,9 @@ private:
 
                 if (auto * condBr = dynamic_cast<CondBranchInst *>(inst)) {
                     LatticeValue cond = getValueState(condBr->getCondition());
-                    if (cond.isConstant()) {
+                    if (cond.isIntegerConstant()) {
                         // 先裁剪控制流，再交给后续死块删除 pass 清理不可达块
-                        changed |= rewriteCondBranch(condBr, cond.constant != 0);
+                        changed |= rewriteCondBranch(condBr, cond.intConstant != 0);
                     }
                     continue;
                 }
@@ -668,8 +907,8 @@ private:
                     continue;
                 }
 
-                ConstInteger * replacement = materializeConstant(inst->getType(), state.constant);
-                if (!replacement) {
+                Value * replacement = materializeConstant(inst->getType(), state);
+                if (!replacement || replacement == inst) {
                     continue;
                 }
 

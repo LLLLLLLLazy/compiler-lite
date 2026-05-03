@@ -25,13 +25,13 @@ class Function;
 class DominanceFrontier {
 
 public:
-    /// 构造时立即计算所有基本块的支配边界。
+    /// 构造时立即计算所有基本块的支配边界
     explicit DominanceFrontier(Function * func, const DominatorTree & dt);
 
-    /// 返回基本块 bb 的支配边界集合（只读）。
+    /// 返回基本块 bb 的支配边界集合（只读）
     const std::set<BasicBlock *> & getFrontier(BasicBlock * bb) const;
 
-    /// 将每个块的支配边界打印到 str（调试用）。
+    /// 将每个块的支配边界打印到 str（调试用）
     void print(std::string & str) const;
 
 private:

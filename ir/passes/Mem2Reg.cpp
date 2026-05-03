@@ -4,7 +4,7 @@
 ///
 ///       把局部变量从`内存读写形式（alloca/load/store)`
 ///       提升成`SSA 寄存器形式（直接用值和 phi）`，
-///       从而让 IR 更简洁、更容易优化。
+///       从而让 IR 更简洁、更容易优化
 ///
 /// 参考：
 ///   Cytron et al., "Efficiently Computing Static Single Assignment Form and
@@ -246,7 +246,7 @@ void Mem2Reg::rename(
     // 记录每个 alloca 在当前块中压栈了多少个值，便于离开时回退
     std::unordered_map<AllocaInst *, int> pushCount;
 
-    // ---- 处理当前块中的指令 ----
+    // 处理当前块中的指令
     for (auto * inst : bb->getInstructions()) {
         if (auto * phi = dynamic_cast<PhiInst *>(inst)) {
             // 块头的 phi 会为对应 alloca 产生新的到达定义
@@ -286,7 +286,7 @@ void Mem2Reg::rename(
         }
     }
 
-    // ---- 为直接后继块中的 phi 补充 incoming 值 ----
+    // 为直接后继块中的 phi 补充 incoming 值
     for (auto * succ : bb->getSuccessors()) {
         for (auto * inst : succ->getInstructions()) {
             auto * phi = dynamic_cast<PhiInst *>(inst);
@@ -308,12 +308,12 @@ void Mem2Reg::rename(
         }
     }
 
-    // ---- 递归处理支配树子节点 ----
+    // 递归处理支配树子节点
     for (auto * child : dt.getDomChildren(bb)) {
         rename(child, dt, reachingDefs, allocaPhis, phiToAlloca, visited);
     }
 
-    // ---- 回退当前块压入的到达定义 ----
+    // 回退当前块压入的到达定义
     for (auto & [alloca, count] : pushCount) {
         auto & stack = reachingDefs[alloca];
         for (int i = 0; i < count; ++i) {
@@ -334,8 +334,8 @@ void Mem2Reg::cleanup(const std::vector<AllocaInst *> & allocas)
 {
     std::unordered_set<AllocaInst *> allocaSet(allocas.begin(), allocas.end());
 
-    // 第 1 轮：删除所有基本块中的死 load/store。
-    // 必须先做这一步，确保 alloca 的 use 链在删除 alloca 之前已经清空。
+    // 第 1 轮：删除所有基本块中的死 load/store
+    // 必须先做这一步，确保 alloca 的 use 链在删除 alloca 之前已经清空
     for (auto * bb : func->getBlocks()) {
         auto & insts = bb->getInstructions();
         auto it = insts.begin();
@@ -353,8 +353,8 @@ void Mem2Reg::cleanup(const std::vector<AllocaInst *> & allocas)
         }
     }
 
-    // 第 2 轮：从入口块中删除已提升的 alloca。
-    // 其 use 链此时应已为空，因为所有使用者已经在上一步被删除。
+    // 第 2 轮：从入口块中删除已提升的 alloca
+    // 其 use 链此时应已为空，因为所有使用者已经在上一步被删除
     BasicBlock * entry = func->getEntryBlock();
     if (!entry) {
         return;

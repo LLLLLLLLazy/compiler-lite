@@ -34,7 +34,7 @@ void DominanceFrontier::compute(Function * func, const DominatorTree & dt)
 
     // Cytron 等人的算法：
     // 对于每个汇合点（拥有多个前驱的基本块），从各前驱沿 idom 链向上走，
-    // 直到到达该汇合点的直接支配者，并把汇合点加入沿途节点的支配边界中。
+    // 直到到达该汇合点的直接支配者，并把汇合点加入沿途节点的支配边界中
     for (auto * bb : func->getBlocks()) {
         const auto & preds = bb->getPredecessors();
         if (preds.size() < 2) {
