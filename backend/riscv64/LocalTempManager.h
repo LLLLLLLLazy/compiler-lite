@@ -8,7 +8,9 @@
 ///
 #pragma once
 
+#include <cstddef>
 #include <map>
+#include <memory>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -154,6 +156,9 @@ private:
 	/// @brief 所有创建的scratch值
 	std::vector<ScratchValue> scratchValues;
 
-	/// @brief 物理寄存器→ScratchValue映射（当前借出的）
-	std::unordered_map<int, ScratchValue *> regToScratch;
+	/// @brief scratch唯一标识的所有权容器
+	std::vector<std::unique_ptr<char>> scratchIdentities;
+
+	/// @brief 物理寄存器→ScratchValue索引映射（当前借出的）
+	std::unordered_map<int, std::size_t> regToScratch;
 };

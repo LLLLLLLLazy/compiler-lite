@@ -160,13 +160,14 @@ LocalTempManager::Lease LocalTempManager::borrowExcluding(
 
 		// 创建ScratchValue
 		ScratchValue sv;
-		sv.identity = new char;
+		scratchIdentities.push_back(std::make_unique<char>());
+		sv.identity = scratchIdentities.back().get();
 		sv.originalPhysReg = reg;
 		sv.borrowPos = iloc ? iloc->getMachineInstCount() : 0;
 		scratchValues.push_back(sv);
-		ScratchValue * svPtr = &scratchValues.back();
+		const std::size_t scratchIndex = scratchValues.size() - 1;
 
-		regToScratch[reg] = svPtr;
+		regToScratch[reg] = scratchIndex;
 		borrowed.insert(reg);
 		return Lease(this, reg);
 	}
@@ -196,13 +197,14 @@ int LocalTempManager::borrowImpl(Instruction * inst, int excludeReg, bool afterU
 
 		// 创建ScratchValue
 		ScratchValue sv;
-		sv.identity = new char; // 唯一地址作为allocationMap的key
+		scratchIdentities.push_back(std::make_unique<char>());
+		sv.identity = scratchIdentities.back().get();
 		sv.originalPhysReg = reg;
 		sv.borrowPos = iloc ? iloc->getMachineInstCount() : 0;
 		scratchValues.push_back(sv);
-		ScratchValue * svPtr = &scratchValues.back();
+		const std::size_t scratchIndex = scratchValues.size() - 1;
 
-		regToScratch[reg] = svPtr;
+		regToScratch[reg] = scratchIndex;
 		borrowed.insert(reg);
 		return reg;
 	}
@@ -217,9 +219,9 @@ void LocalTempManager::release(int reg)
 {
 	auto it = regToScratch.find(reg);
 	if (it != regToScratch.end()) {
-		ScratchValue * sv = it->second;
-		sv->releasePos = iloc ? iloc->getMachineInstCount() : 0;
-		sv->released = true;
+		ScratchValue & scratchValue = scratchValues[it->second];
+		scratchValue.releasePos = iloc ? iloc->getMachineInstCount() : 0;
+		scratchValue.released = true;
 		regToScratch.erase(it);
 	}
 	borrowed.erase(reg);
