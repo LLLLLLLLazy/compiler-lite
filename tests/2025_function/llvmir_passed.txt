@@ -14,6 +14,8 @@
 2025_func_006_func_name
 2025_func_007_arr_init_nd
 2025_func_007_const_var_defn3
+2025_func_008_const_array_defn
+2025_func_008_global_arr_init
 2025_func_009_BFS
 2025_func_009_func_defn
 2025_func_010_DFS
@@ -24,7 +26,9 @@
 2025_func_012_addc
 2025_func_013_LCA
 2025_func_013_sub2
+2025_func_014_dp
 2025_func_014_subc
+2025_func_015_graph_coloring
 2025_func_015_mul
 2025_func_016_k_smallest
 2025_func_016_mulc
@@ -33,6 +37,7 @@
 2025_func_018_divc
 2025_func_018_prim
 2025_func_019_mod
+2025_func_019_search
 2025_func_020_rem
 2025_func_020_sort
 2025_func_021_if_test2
@@ -59,12 +64,15 @@
 2025_func_031_while_if_test1
 2025_func_032_many_params3
 2025_func_032_while_if_test2
+2025_func_033_multi_branch
 2025_func_033_while_if_test3
+2025_func_034_arr_expr_len
 2025_func_034_multi_loop
 2025_func_035_math
 2025_func_035_op_priority1
 2025_func_036_op_priority2
 2025_func_036_rotate
+2025_func_037_dct
 2025_func_037_op_priority3
 2025_func_038_light2d
 2025_func_038_op_priority4
@@ -84,6 +92,7 @@
 2025_func_051_short_circuit3
 2025_func_052_scope
 2025_func_053_scope2
+2025_func_054_hidden_var
 2025_func_055_sort_test1
 2025_func_056_sort_test2
 2025_func_057_sort_test3
@@ -109,10 +118,13 @@
 2025_func_077_substr
 2025_func_078_side_effect
 2025_func_079_var_name
+2025_func_080_chaos_token
 2025_func_081_skip_spaces
+2025_func_082_long_func
 2025_func_083_long_array
 2025_func_084_long_array2
 2025_func_085_long_code
+2025_func_086_long_code2
 2025_func_087_many_params
 2025_func_088_many_params2
 2025_func_089_many_globals

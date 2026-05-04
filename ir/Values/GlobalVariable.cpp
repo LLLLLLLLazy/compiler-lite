@@ -5,6 +5,8 @@
 
 #include "GlobalVariable.h"
 
+#include <algorithm>
+
 /// @brief 构造全局变量对象
 /// @param _type 全局变量值类型
 /// @param _name 全局变量名称
@@ -72,6 +74,36 @@ void GlobalVariable::setInitFloatValue(float value)
 float GlobalVariable::getInitFloatValue() const
 {
     return initFloatValue;
+}
+
+void GlobalVariable::setInitIntArrayValues(const std::vector<int32_t> & values)
+{
+    initIntArrayValues = values;
+    initFloatArrayValues.clear();
+    inBSSSection = std::all_of(initIntArrayValues.begin(), initIntArrayValues.end(), [](int32_t value) {
+        return value == 0;
+    });
+    initKind = inBSSSection ? InitKind::Zero : InitKind::IntArray;
+}
+
+const std::vector<int32_t> & GlobalVariable::getInitIntArrayValues() const
+{
+    return initIntArrayValues;
+}
+
+void GlobalVariable::setInitFloatArrayValues(const std::vector<float> & values)
+{
+    initFloatArrayValues = values;
+    initIntArrayValues.clear();
+    inBSSSection = std::all_of(initFloatArrayValues.begin(), initFloatArrayValues.end(), [](float value) {
+        return value == 0.0f;
+    });
+    initKind = inBSSSection ? InitKind::Zero : InitKind::FloatArray;
+}
+
+const std::vector<float> & GlobalVariable::getInitFloatArrayValues() const
+{
+    return initFloatArrayValues;
 }
 
 /// @brief 获取初始化类别

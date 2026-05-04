@@ -6,6 +6,7 @@
 2023_func_05_arr_defn4
 2023_func_06_const_var_defn2
 2023_func_07_const_var_defn3
+2023_func_08_const_array_defn
 2023_func_09_func_defn
 2023_func_10_var_defn_func
 2023_func_11_add2
@@ -31,6 +32,7 @@
 2023_func_31_while_if_test1
 2023_func_32_while_if_test2
 2023_func_33_while_if_test3
+2023_func_34_arr_expr_len
 2023_func_35_op_priority1
 2023_func_36_op_priority2
 2023_func_37_op_priority3
@@ -50,6 +52,7 @@
 2023_func_51_short_circuit3
 2023_func_52_scope
 2023_func_53_scope2
+2023_func_54_hidden_var
 2023_func_55_sort_test1
 2023_func_56_sort_test2
 2023_func_57_sort_test3
@@ -75,10 +78,12 @@
 2023_func_77_substr
 2023_func_78_side_effect
 2023_func_79_var_name
+2023_func_80_chaos_token
 2023_func_81_skip_spaces
 2023_func_83_long_array
 2023_func_84_long_array2
 2023_func_85_long_code
+2023_func_86_long_code2
 2023_func_87_many_params
 2023_func_88_many_params2
 2023_func_89_many_globals

@@ -29,6 +29,30 @@
 
 namespace {
 
+enum class AbiArgLocKind {
+	IntReg,
+	FloatReg,
+	Stack,
+};
+
+struct AbiArgLoc {
+	AbiArgLocKind kind;
+	int index;
+};
+
+AbiArgLoc classifyAbiArg(Type * type, int & intRegCount, int & floatRegCount, int & stackCount)
+{
+	if (type != nullptr && type->isFloatType() && floatRegCount < 8) {
+		return {AbiArgLocKind::FloatReg, floatRegCount++};
+	}
+
+	if (intRegCount < 8) {
+		return {AbiArgLocKind::IntReg, intRegCount++};
+	}
+
+	return {AbiArgLocKind::Stack, stackCount++};
+}
+
 /// @brief 保存的callee-saved寄存器占用的栈帧字节数
 /// RISC-V64的callee-saved寄存器：ra, s0-s11, 共13个64位寄存器 = 104字节
 constexpr int kSavedFrameBytes = 104;
@@ -76,6 +100,40 @@ int maxCallArgCount(Function * func)
 	return result;
 }
 
+int callStackArgCount(CallInst * call)
+{
+	if (call == nullptr) {
+		return 0;
+	}
+
+	int intRegCount = 0;
+	int floatRegCount = 0;
+	int stackCount = 0;
+	for (int i = 0; i < call->getArgCount(); ++i) {
+		Value * arg = call->getArg(i);
+		Type * argType = arg != nullptr ? arg->getType() : nullptr;
+		if (auto * alloca = dynamic_cast<AllocaInst *>(arg)) {
+			argType = alloca->getAllocaType();
+		}
+		classifyAbiArg(argType, intRegCount, floatRegCount, stackCount);
+	}
+
+	return stackCount;
+}
+
+int maxCallStackArgCount(Function * func)
+{
+	int result = 0;
+	for (auto * bb: func->getBlocks()) {
+		for (auto * inst: bb->getInstructions()) {
+			if (auto * call = dynamic_cast<CallInst *>(inst)) {
+				result = std::max(result, callStackArgCount(call));
+			}
+		}
+	}
+	return result;
+}
+
 } // namespace
 
 /// @brief 构造函数
@@ -113,7 +171,17 @@ void CodeGeneratorRiscV64::genDataSection()
 		std::fprintf(fp, ".type %s, %%object\n", var->getName().c_str());
 		std::fprintf(fp, ".size %s, %d\n", var->getName().c_str(), var->getValueType()->getSize());
 		std::fprintf(fp, "%s:\n", var->getName().c_str());
-		if (var->getInitKind() == GlobalVariable::InitKind::Float) {
+		if (var->getInitKind() == GlobalVariable::InitKind::FloatArray) {
+			for (float fval: var->getInitFloatArrayValues()) {
+				std::uint32_t bits = 0;
+				std::memcpy(&bits, &fval, sizeof(bits));
+				std::fprintf(fp, ".word %u\n", bits);
+			}
+		} else if (var->getInitKind() == GlobalVariable::InitKind::IntArray) {
+			for (int32_t value: var->getInitIntArrayValues()) {
+				std::fprintf(fp, ".word %d\n", value);
+			}
+		} else if (var->getInitKind() == GlobalVariable::InitKind::Float) {
 			float fval = var->getInitFloatValue();
 			std::uint32_t bits = 0;
 			std::memcpy(&bits, &fval, sizeof(bits));
@@ -223,12 +291,17 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func)
 		allocMap.try_emplace(param, RegAllocInfo{});
 	}
 
-	// 超过8个寄存器参数(a0-a7)的形参通过栈传递，位于FP正方向偏移
-	for (int i = 8; i < static_cast<int>(func->getParams().size()); ++i) {
-		auto * param = func->getParams()[i];
+	// 栈上传入的形参位于旧sp，也就是prologue后的FP正方向偏移。
+	int intRegCount = 0;
+	int floatRegCount = 0;
+	int stackCount = 0;
+	for (auto * param: func->getParams()) {
 		auto & info = allocMap[param];
-		info.regId = -1;
-		info.setStack(RISCV64_FP_REG_NO, (i - 8) * 8);
+		AbiArgLoc loc = classifyAbiArg(param->getType(), intRegCount, floatRegCount, stackCount);
+		if (loc.kind == AbiArgLocKind::Stack) {
+			info.regId = -1;
+			info.setStack(RISCV64_FP_REG_NO, loc.index * 8);
+		}
 	}
 
 	// 遍历所有指令，为AllocaInst和有结果值的指令创建分配信息
@@ -257,8 +330,8 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func)
 	}
 
 	// 计算栈帧总大小：callee-saved + 局部变量 + 超出寄存器传递的调用参数，16字节对齐
-	const int maxArgs = maxCallArgCount(func);
-	const int outgoingBytes = maxArgs > 8 ? (maxArgs - 8) * 8 : 0;
+	const int maxStackArgs = maxCallStackArgCount(func);
+	const int outgoingBytes = maxStackArgs * 8;
 	const int frameSize = alignTo(kSavedFrameBytes + localBytes + outgoingBytes, 16);
 	greedyAllocator.setOutgoingArgBytes(outgoingBytes);
 	greedyAllocator.setFrameSize(frameSize);

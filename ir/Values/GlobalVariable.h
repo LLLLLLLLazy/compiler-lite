@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <vector>
 #include <cstdint>
 
 #include "GlobalValue.h"
@@ -17,6 +18,8 @@ public:
         Zero,
         Int,
         Float,
+        IntArray,
+        FloatArray,
     };
 
 public:
@@ -38,6 +41,14 @@ public:
 
     float getInitFloatValue() const;
 
+    void setInitIntArrayValues(const std::vector<int32_t> & values);
+
+    const std::vector<int32_t> & getInitIntArrayValues() const;
+
+    void setInitFloatArrayValues(const std::vector<float> & values);
+
+    const std::vector<float> & getInitFloatArrayValues() const;
+
     [[nodiscard]] InitKind getInitKind() const;
 
     void toDeclareString(std::string & str);
@@ -47,5 +58,7 @@ private:
     bool inBSSSection = true;
     int32_t initIntValue = 0;
     float initFloatValue = 0.0f;
+    std::vector<int32_t> initIntArrayValues;
+    std::vector<float> initFloatArrayValues;
     InitKind initKind = InitKind::Zero;
 };

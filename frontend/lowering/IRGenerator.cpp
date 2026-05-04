@@ -77,6 +77,14 @@ bool isArrayType(Type * type)
     return type != nullptr && type->isArrayType();
 }
 
+Type * getArrayScalarType(Type * type)
+{
+    while (auto * arrayType = dynamic_cast<ArrayType *>(type)) {
+        type = arrayType->getElementType();
+    }
+    return type;
+}
+
 constexpr std::size_t kFlatZeroInitThreshold = 256;
 
 Type * getVariableValueType(Value * var)
@@ -125,11 +133,55 @@ bool IRGenerator::run()
     floatConstBindings.clear();
     floatConstBindings.emplace_back();
 
+    if (!precollectGlobalConstBindings(root)) {
+        return false;
+    }
+
     if (!declareCompileUnit(root)) {
         return false;
     }
 
     return visitCompileUnit(root);
+}
+
+bool IRGenerator::precollectGlobalConstBindings(ast_node * node)
+{
+    for (auto son : node->sons) {
+        if (!son || son->node_type != ast_operator_type::AST_OP_DECL_STMT) {
+            continue;
+        }
+
+        for (auto declNode : son->sons) {
+            if (!declNode || !declNode->isConst) {
+                continue;
+            }
+
+            Type * declType = buildDeclaredType(declNode, false);
+            if (!declType || declType->isArrayType()) {
+                continue;
+            }
+
+            ast_node * initNode = getDeclInitNode(declNode);
+            if (!initNode) {
+                continue;
+            }
+
+            const std::string & varName = declNode->sons[1]->name;
+            if (declType->isFloatType()) {
+                double constValue = 0.0;
+                if (evaluateConstNumberExpr(initNode, constValue)) {
+                    floatConstBindings.front()[varName] = constValue;
+                }
+            } else if (declType->isInt32Type()) {
+                int32_t constValue = 0;
+                if (evaluateConstIntExpr(initNode, constValue)) {
+                    constBindings.front()[varName] = constValue;
+                }
+            }
+        }
+    }
+
+    return true;
 }
 
 /// @brief 预声明编译单元中的所有函数
@@ -639,9 +691,29 @@ bool IRGenerator::visitVarDecl(ast_node * node)
     }
 
     if (declType->isArrayType()) {
-        if (initNode && !(initNode->node_type == ast_operator_type::AST_OP_INIT_LIST && initNode->sons.empty())) {
-            minic_log(LOG_ERROR, "当前仅支持零初始化的全局数组(%s)", varName.c_str());
-            return false;
+        if (initNode) {
+            std::vector<double> initValues;
+            if (!evaluateGlobalArrayInitializer(declType, initNode, initValues)) {
+                minic_log(LOG_ERROR, "全局变量(%s)只支持常量初始化", varName.c_str());
+                return false;
+            }
+
+            Type * scalarType = getArrayScalarType(declType);
+            if (scalarType != nullptr && scalarType->isFloatType()) {
+                std::vector<float> floatValues;
+                floatValues.reserve(initValues.size());
+                for (double value : initValues) {
+                    floatValues.push_back(static_cast<float>(value));
+                }
+                globalVar->setInitFloatArrayValues(floatValues);
+            } else {
+                std::vector<int32_t> intValues;
+                intValues.reserve(initValues.size());
+                for (double value : initValues) {
+                    intValues.push_back(static_cast<int32_t>(value));
+                }
+                globalVar->setInitIntArrayValues(intValues);
+            }
         }
         return true;
     }
@@ -1020,6 +1092,92 @@ bool IRGenerator::emitInitializer(Value * addr, Type * type, ast_node * initNode
         return false;
     }
     emitToBlock(new StoreInst(currentFunction(), initValue, addr));
+    return true;
+}
+
+bool IRGenerator::evaluateGlobalArrayInitializer(Type * type, ast_node * initNode, std::vector<double> & values)
+{
+    auto * arrayType = dynamic_cast<ArrayType *>(type);
+    if (arrayType != nullptr) {
+        if (initNode == nullptr) {
+            return collectGlobalArrayInitializer(type, {}, 0, 0, values);
+        }
+
+        if (initNode->node_type == ast_operator_type::AST_OP_INIT_LIST) {
+            return collectGlobalArrayInitializer(type, initNode->sons, 0, initNode->sons.size(), values);
+        }
+
+        std::vector<ast_node *> singleItem{initNode};
+        return collectGlobalArrayInitializer(type, singleItem, 0, 1, values);
+    }
+
+    if (initNode == nullptr) {
+        values.push_back(0.0);
+        return true;
+    }
+
+    ast_node * scalarInit = initNode;
+    if (scalarInit->node_type == ast_operator_type::AST_OP_INIT_LIST) {
+        if (scalarInit->sons.empty()) {
+            values.push_back(0.0);
+            return true;
+        }
+        scalarInit = scalarInit->sons[0];
+    }
+
+    double value = 0.0;
+    if (!evaluateConstNumberExpr(scalarInit, value)) {
+        return false;
+    }
+
+    values.push_back(value);
+    return true;
+}
+
+bool IRGenerator::collectGlobalArrayInitializer(
+    Type * type, const std::vector<ast_node *> & items, std::size_t begin, std::size_t end, std::vector<double> & values)
+{
+    auto * arrayType = dynamic_cast<ArrayType *>(type);
+    if (arrayType == nullptr) {
+        if (begin >= end) {
+            return evaluateGlobalArrayInitializer(type, nullptr, values);
+        }
+        return evaluateGlobalArrayInitializer(type, items[begin], values);
+    }
+
+    std::size_t cursor = begin;
+    Type * elemType = arrayType->getElementType();
+    std::size_t subScalarCount = countScalarSlots(elemType);
+
+    for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
+        if (cursor >= end) {
+            if (!evaluateGlobalArrayInitializer(elemType, nullptr, values)) {
+                return false;
+            }
+            continue;
+        }
+
+        ast_node * item = items[cursor];
+        if (dynamic_cast<ArrayType *>(elemType) != nullptr && item->node_type != ast_operator_type::AST_OP_INIT_LIST) {
+            std::size_t take = 0;
+            while (cursor + take < end &&
+                   items[cursor + take]->node_type != ast_operator_type::AST_OP_INIT_LIST &&
+                   take < subScalarCount) {
+                ++take;
+            }
+            if (!collectGlobalArrayInitializer(elemType, items, cursor, cursor + take, values)) {
+                return false;
+            }
+            cursor += take;
+            continue;
+        }
+
+        if (!evaluateGlobalArrayInitializer(elemType, item, values)) {
+            return false;
+        }
+        ++cursor;
+    }
+
     return true;
 }
 
@@ -1413,6 +1571,56 @@ Value * IRGenerator::visitLeafVarId(ast_node * node)
 /// @return 生成出的指令值，失败时返回空指针
 Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator intOp, IRInstOperator floatOp)
 {
+    if (node->node_type == ast_operator_type::AST_OP_ADD || node->node_type == ast_operator_type::AST_OP_MUL) {
+        std::vector<ast_node *> pending{node};
+        std::vector<ast_node *> operands;
+
+        while (!pending.empty()) {
+            ast_node * current = pending.back();
+            pending.pop_back();
+
+            if (current != nullptr && current->node_type == node->node_type && current->sons.size() >= 2) {
+                pending.push_back(current->sons[1]);
+                pending.push_back(current->sons[0]);
+                continue;
+            }
+
+            operands.push_back(current);
+        }
+
+        if (operands.empty()) {
+            return nullptr;
+        }
+
+        Value * result = visitExpr(operands[0]);
+        if (!result) {
+            return nullptr;
+        }
+
+        for (std::size_t i = 1; i < operands.size(); ++i) {
+            Value * rhs = visitExpr(operands[i]);
+            if (!rhs) {
+                return nullptr;
+            }
+
+            if (result->getType()->isFloatType() || rhs->getType()->isFloatType()) {
+                if (floatOp == IRInstOperator::IRINST_OP_MAX) {
+                    minic_log(LOG_ERROR, "浮点类型不支持该二元运算");
+                    return nullptr;
+                }
+                result = emitFloatBinary(result, rhs, floatOp);
+            } else {
+                result = emitIntBinary(result, rhs, intOp);
+            }
+
+            if (!result) {
+                return nullptr;
+            }
+        }
+
+        return result;
+    }
+
     Value * lhs = visitExpr(node->sons[0]);
     if (!lhs) {
         return nullptr;

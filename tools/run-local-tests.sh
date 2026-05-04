@@ -136,6 +136,26 @@ write_result_file() {
     printf '%s\n' "${exit_code}" >> "${result_file}"
 }
 
+write_result_file_from_path() {
+    local output_file="$1"
+    local exit_code="$2"
+    local result_file="$3"
+
+    if [[ -s "${output_file}" ]]; then
+        cat "${output_file}" > "${result_file}"
+
+        local last_byte_hex
+        last_byte_hex=$(tail -c 1 "${output_file}" | od -An -tx1 | tr -d '[:space:]')
+        if [[ "${last_byte_hex}" != "0a" ]]; then
+            printf '\n' >> "${result_file}"
+        fi
+    else
+        : > "${result_file}"
+    fi
+
+    printf '%s\n' "${exit_code}" >> "${result_file}"
+}
+
 run_asm_check() {
     local cfile="$1"
     local infile="$2"
@@ -189,7 +209,7 @@ run_llvmir_check() {
     local llfile="${TMP_DIR}/${testcase}.ll"
     local exe_file="${TMP_DIR}/${testcase}_ll"
     local result_file="${TMP_DIR}/${testcase}.llvmir.result"
-    local output=""
+    local output_file="${TMP_DIR}/${testcase}.llvmir.raw"
     local exit_code=0
 
     if ! timeout --foreground 10 "${MINIC_BIN}" -S "${frontend_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
@@ -208,14 +228,14 @@ run_llvmir_check() {
     fi
 
     if [[ -f "${infile}" ]]; then
-        output="$(timeout --foreground 10 "${exe_file}" < "${infile}" 2>&1)"
+        timeout --foreground 10 "${exe_file}" < "${infile}" > "${output_file}" 2>&1
         exit_code=$?
     else
-        output="$(timeout --foreground 10 "${exe_file}" 2>&1)"
+        timeout --foreground 10 "${exe_file}" > "${output_file}" 2>&1
         exit_code=$?
     fi
 
-    write_result_file "${output}" "${exit_code}" "${result_file}"
+    write_result_file_from_path "${output_file}" "${exit_code}" "${result_file}"
 
     if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
         echo "${testcase}.c NG [llvmir]"

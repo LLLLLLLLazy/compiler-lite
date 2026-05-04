@@ -13,6 +13,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "ArrayType.h"
 #include "BasicBlock.h"
 #include "Function.h"
 #include "GlobalVariable.h"
@@ -32,10 +33,37 @@ std::string formatFloatGlobalInit(float value)
     return oss.str();
 }
 
+std::string formatArrayGlobalInit(Type * type, GlobalVariable * global, std::size_t & cursor)
+{
+    if (auto * arrayType = dynamic_cast<ArrayType *>(type)) {
+        std::string text = "[";
+        Type * elemType = arrayType->getElementType();
+        for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
+            if (i != 0) {
+                text += ", ";
+            }
+            text += elemType->toString() + " " + formatArrayGlobalInit(elemType, global, cursor);
+        }
+        text += "]";
+        return text;
+    }
+
+    if (type->isFloatType()) {
+        return formatFloatGlobalInit(global->getInitFloatArrayValues()[cursor++]);
+    }
+
+    return std::to_string(global->getInitIntArrayValues()[cursor++]);
+}
+
 std::string formatGlobalInit(GlobalVariable * global)
 {
     Type * valueType = global->getValueType();
     if (valueType->isArrayType()) {
+        if (global->getInitKind() == GlobalVariable::InitKind::FloatArray ||
+            global->getInitKind() == GlobalVariable::InitKind::IntArray) {
+            std::size_t cursor = 0;
+            return formatArrayGlobalInit(valueType, global, cursor);
+        }
         return "zeroinitializer";
     }
 

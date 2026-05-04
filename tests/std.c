@@ -75,7 +75,7 @@ void putarray(int n, int * d)
     printf("\n");
 }
 
-void putstr(char * str)
+__attribute__((weak)) void putstr(char * str)
 {
     printf("%s", str);
 }

@@ -34,6 +34,9 @@ private:
     /// @brief 预声明编译单元中的函数符号
     bool declareCompileUnit(ast_node * node);
 
+    /// @brief 预收集编译单元顶层的标量 const 绑定
+    bool precollectGlobalConstBindings(ast_node * node);
+
     /// @brief 遍历编译单元并生成全局对象与函数体 IR
     bool visitCompileUnit(ast_node * node);
 
@@ -175,6 +178,14 @@ private:
 
     /// @brief 计算全局变量初始化表达式的整型常量值
     bool evaluateGlobalIntConstExpr(ast_node * node, int32_t & result);
+
+    /// @brief 计算全局数组初始化列表并展开为标量常量序列
+    bool evaluateGlobalArrayInitializer(Type * type, ast_node * initNode, std::vector<double> & values);
+
+    /// @brief 递归收集数组初始化列表中的常量值
+    bool collectGlobalArrayInitializer(
+        Type * type, const std::vector<ast_node *> & items, std::size_t begin, std::size_t end,
+        std::vector<double> & values);
 
     /// @brief 获取当前正在生成的函数
     Function * currentFunction() const;

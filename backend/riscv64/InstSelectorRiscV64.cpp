@@ -41,6 +41,30 @@
 
 namespace {
 
+enum class AbiArgLocKind {
+	IntReg,
+	FloatReg,
+	Stack,
+};
+
+struct AbiArgLoc {
+	AbiArgLocKind kind;
+	int index;
+};
+
+AbiArgLoc classifyAbiArg(Type * type, int & intRegCount, int & floatRegCount, int & stackCount)
+{
+	if (type != nullptr && type->isFloatType() && floatRegCount < 8) {
+		return {AbiArgLocKind::FloatReg, floatRegCount++};
+	}
+
+	if (intRegCount < 8) {
+		return {AbiArgLocKind::IntReg, intRegCount++};
+	}
+
+	return {AbiArgLocKind::Stack, stackCount++};
+}
+
 
 /// @brief 获取callee-saved寄存器名称列表
 /// @return ra, s0-s11的寄存器名称列表
@@ -289,31 +313,31 @@ void InstSelectorRiscV64::translate_gep(Instruction * inst)
 /// @brief 翻译add指令（加法）
 void InstSelectorRiscV64::translate_add(Instruction * inst)
 {
-	translate_binary(inst, "add");
+	translate_binary(inst, "addw");
 }
 
 /// @brief 翻译sub指令（减法）
 void InstSelectorRiscV64::translate_sub(Instruction * inst)
 {
-	translate_binary(inst, "sub");
+	translate_binary(inst, "subw");
 }
 
 /// @brief 翻译mul指令（乘法）
 void InstSelectorRiscV64::translate_mul(Instruction * inst)
 {
-	translate_binary(inst, "mul");
+	translate_binary(inst, "mulw");
 }
 
 /// @brief 翻译div指令（除法）
 void InstSelectorRiscV64::translate_div(Instruction * inst)
 {
-	translate_binary(inst, "div");
+	translate_binary(inst, "divw");
 }
 
 /// @brief 翻译mod指令（取模）
 void InstSelectorRiscV64::translate_mod(Instruction * inst)
 {
-	translate_binary(inst, "rem");
+	translate_binary(inst, "remw");
 }
 
 /// @brief 翻译浮点二元运算的通用实现
@@ -646,32 +670,43 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 		return;
 	}
 
-	// 超过8个寄存器参数的实参通过栈传递
-	for (int i = 8; i < call->getArgCount(); ++i) {
-		OperandReg value = loadOperand(call->getArg(i), inst);
-		auto tmp = tempMgr.borrow(inst, value.reg);
-		iloc.store_base(value.reg,
-		                RISCV64_SP_REG_NO,
-		                (i - 8) * 8,
-		                tmp.reg(),
-		                call->getArg(i)->getType()->isPointerType());
-		releaseOperand(value);
-	}
-
-	// 前8个参数通过a0-a7传递（float类型通过fa0-fa7传递）
-	for (int i = 0; i < call->getArgCount() && i < 8; ++i) {
+	int intRegCount = 0;
+	int floatRegCount = 0;
+	int stackCount = 0;
+	std::vector<AbiArgLoc> argLocs;
+	argLocs.reserve(call->getArgCount());
+	for (int i = 0; i < call->getArgCount(); ++i) {
 		Value *arg = call->getArg(i);
 		Type *argType = arg->getType();
 		if (auto *alloca = dynamic_cast<AllocaInst *>(arg)) {
 			argType = alloca->getAllocaType();
 		}
-		if (argType->isFloatType()) {
-			// float参数：加载到临时整数寄存器，再移至FP参数寄存器
+		argLocs.push_back(classifyAbiArg(argType, intRegCount, floatRegCount, stackCount));
+	}
+
+	for (int i = 0; i < call->getArgCount(); ++i) {
+		Value * arg = call->getArg(i);
+		Type * argType = arg->getType();
+		if (auto * alloca = dynamic_cast<AllocaInst *>(arg)) {
+			argType = alloca->getAllocaType();
+		}
+
+		const AbiArgLoc & loc = argLocs[i];
+		if (loc.kind == AbiArgLocKind::FloatReg) {
 			OperandReg val = loadOperand(arg, inst);
-			iloc.inst("fmv.w.x", "fa" + std::to_string(i), PlatformRiscV64::regName[val.reg]);
+			iloc.inst("fmv.w.x", "fa" + std::to_string(loc.index), PlatformRiscV64::regName[val.reg]);
 			releaseOperand(val);
+		} else if (loc.kind == AbiArgLocKind::IntReg) {
+			iloc.load_var(RISCV64_A0_REG_NO + loc.index, arg);
 		} else {
-			iloc.load_var(RISCV64_A0_REG_NO + i, arg);
+			OperandReg value = loadOperand(arg, inst);
+			auto tmp = tempMgr.borrow(inst, value.reg);
+			iloc.store_base(value.reg,
+			                RISCV64_SP_REG_NO,
+			                loc.index * 8,
+			                tmp.reg(),
+			                argType->isPointerType());
+			releaseOperand(value);
 		}
 	}
 
@@ -746,14 +781,25 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 {
 	auto & params = func->getParams();
 	auto & allocMap = allocator.getAllocationMap();
+	std::vector<AbiArgLoc> paramLocs;
+	paramLocs.reserve(params.size());
+
+	int intRegCount = 0;
+	int floatRegCount = 0;
+	int stackCount = 0;
+	for (auto * param: params) {
+		paramLocs.push_back(classifyAbiArg(param->getType(), intRegCount, floatRegCount, stackCount));
+	}
 
 	std::set<int> blockedRegs;
 	std::vector<RegMove> regMoves;
 
-	for (int i = 0; i < static_cast<int>(params.size()) && i < 8; ++i) {
-		blockedRegs.insert(RISCV64_A0_REG_NO + i);
+	for (int i = 0; i < static_cast<int>(params.size()); ++i) {
+		if (paramLocs[i].kind == AbiArgLocKind::IntReg) {
+			blockedRegs.insert(RISCV64_A0_REG_NO + paramLocs[i].index);
+		}
 	}
-	for (int i = 0; i < static_cast<int>(params.size()) && i < 8; ++i) {
+	for (int i = 0; i < static_cast<int>(params.size()); ++i) {
 		auto * param = params[i];
 		auto it = allocMap.find(param);
 		if (it != allocMap.end() && it->second.hasReg()) {
@@ -772,39 +818,51 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 		scratchReg = RISCV64_TMP_REG_NO;
 	}
 
-	for (int i = 0; i < static_cast<int>(params.size()) && i < 8; ++i) {
+	for (int i = 0; i < static_cast<int>(params.size()); ++i) {
 		auto * param = params[i];
 		auto it = allocMap.find(param);
 		if (it == allocMap.end()) {
 			continue;
 		}
 
-		const bool isFloat = param->getType()->isFloatType();
-		const int incomingReg = RISCV64_A0_REG_NO + i;
-		const std::string incomingFPReg = "fa" + std::to_string(i);
+		const AbiArgLoc & loc = paramLocs[i];
 
-		if (isFloat) {
-			// float参数从fa0-fa7传入
+		if (loc.kind == AbiArgLocKind::FloatReg) {
+			const std::string incomingFPReg = "fa" + std::to_string(loc.index);
 			if (it->second.hasReg()) {
 				iloc.inst("fmv.x.w", PlatformRiscV64::regName[it->second.regId], incomingFPReg);
 				blockedRegs.insert(it->second.regId);
 			} else if (it->second.hasStackSlot) {
 				iloc.inst("fmv.x.w", PlatformRiscV64::regName[scratchReg], incomingFPReg);
-				iloc.store_base(scratchReg, it->second.baseRegId, it->second.offset, scratchReg,
-					false);
+				iloc.store_base(scratchReg, it->second.baseRegId, it->second.offset, scratchReg, false);
 			}
-		} else {
+		} else if (loc.kind == AbiArgLocKind::IntReg) {
+			const int incomingReg = RISCV64_A0_REG_NO + loc.index;
 			if (it->second.hasReg()) {
 				if (it->second.regId != incomingReg) {
 					regMoves.push_back(RegMove{incomingReg, it->second.regId});
 				}
 			} else if (it->second.hasStackSlot) {
-				// 分配在栈上：生成store指令将传入寄存器值存到栈槽
 				iloc.store_base(incomingReg,
 					it->second.baseRegId,
 					it->second.offset,
 					scratchReg,
 					param->getType()->isPointerType());
+			}
+		} else {
+			const bool wide = param->getType()->isPointerType();
+			const int incomingOffset = loc.index * 8;
+			if (it->second.hasReg()) {
+				iloc.load_base(it->second.regId, RISCV64_FP_REG_NO, incomingOffset, wide);
+			} else if (it->second.hasStackSlot) {
+				if (it->second.baseRegId != RISCV64_FP_REG_NO || it->second.offset != incomingOffset) {
+					iloc.load_base(scratchReg, RISCV64_FP_REG_NO, incomingOffset, wide);
+					iloc.store_base(scratchReg,
+						it->second.baseRegId,
+						it->second.offset,
+						scratchReg,
+						wide);
+				}
 			}
 		}
 	}
