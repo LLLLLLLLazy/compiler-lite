@@ -14,6 +14,17 @@
 
 namespace {
 
+/// @brief 判断寄存器是否为callee-saved通用寄存器（GPR）
+/// @param reg 寄存器编号
+/// @return 是否为callee-saved GPR
+///
+/// RISC-V64 callee-saved GPR包括：s0(FP), s1(9), s2-s11(18-27)
+/// 这些寄存器在scratch借用时需要排除，因为它们在prologue/epilogue中需要保存/恢复
+bool isCalleeSavedGpr(int reg)
+{
+	return reg == RISCV64_FP_REG_NO || reg == 9 || (reg >= 18 && reg <= 27);
+}
+
 std::vector<int> buildScratchPool(const std::vector<int> & globalPool)
 {
 	// t3-t4 始终作为scratch寄存器，保证scratch可用性
@@ -25,6 +36,10 @@ std::vector<int> buildScratchPool(const std::vector<int> & globalPool)
 	}
 	// 全局池中的寄存器也参与scratch借用
 	for (int reg : globalPool) {
+		// 排除callee-saved寄存器，避免scratch借用破坏prologue/epilogue的保存/恢复约定
+		if (isCalleeSavedGpr(reg)) {
+			continue;
+		}
 		if (std::find(result.begin(), result.end(), reg) == result.end()) {
 			result.push_back(reg);
 		}

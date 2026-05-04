@@ -66,16 +66,6 @@ AbiArgLoc classifyAbiArg(Type * type, int & intRegCount, int & floatRegCount, in
 }
 
 
-/// @brief 获取callee-saved寄存器名称列表
-/// @return ra, s0-s11的寄存器名称列表
-const std::vector<std::string> & savedRegs()
-{
-	static const std::vector<std::string> regs = {
-		"ra", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
-	};
-	return regs;
-}
-
 struct RegMove {
 	int src = -1;
 	int dst = -1;
@@ -822,60 +812,32 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 	auto scratchLease = tempMgr.borrowExcluding(nullptr, blockedRegs);
 	int scratchReg = scratchLease.reg();
 
-	// 按声明顺序处理形参，使用独立的 int/float 寄存器计数器
+	// 先处理整数入参，避免后续float形参落到a0-a7时覆盖尚未搬走的整数实参。
 	{
-		int intIdx = 0, floatIdx = 0;
+		int intIdx = 0;
 		for (auto * param : params) {
 			auto it = allocMap.find(param);
 			if (it == allocMap.end()) {
 				continue;
 			}
 
-			const bool isFloat = param->getType()->isFloatType();
+			if (param->getType()->isFloatType()) {
+				continue;
+			}
 
-			if (isFloat) {
-				if (floatIdx < 8) {
-					const std::string fpReg = "fa" + std::to_string(floatIdx);
-					if (it->second.hasReg()) {
-						iloc.inst("fmv.x.w", PlatformRiscV64::regName[it->second.regId], fpReg);
-					} else if (it->second.hasStackSlot) {
-						iloc.inst("fmv.x.w", PlatformRiscV64::regName[scratchReg], fpReg);
-						iloc.store_base(scratchReg, it->second.baseRegId, it->second.offset,
-						                scratchReg, false);
+			if (intIdx < 8) {
+				const int incomingReg = RISCV64_A0_REG_NO + intIdx;
+				if (it->second.hasReg()) {
+					if (it->second.regId != incomingReg) {
+						regMoves.push_back(RegMove{incomingReg, it->second.regId});
 					}
-				}
-				// 栈传浮点参数已在 fp+offset 处，无需复制
-				floatIdx++;
-			} else {
-				if (intIdx < 8) {
-					const int incomingReg = RISCV64_A0_REG_NO + intIdx;
-					if (it->second.hasReg()) {
-						if (it->second.regId != incomingReg) {
-							regMoves.push_back(RegMove{incomingReg, it->second.regId});
-						}
-					} else if (it->second.hasStackSlot) {
-						iloc.store_base(incomingReg, it->second.baseRegId, it->second.offset,
-						                scratchReg, param->getType()->isPointerType());
-					}
-				}
-				// 栈传整数参数已在 fp+offset 处，无需复制
-				intIdx++;
-			}
-		} else {
-			const bool wide = param->getType()->isPointerType();
-			const int incomingOffset = loc.index * 8;
-			if (it->second.hasReg()) {
-				iloc.load_base(it->second.regId, RISCV64_FP_REG_NO, incomingOffset, wide);
-			} else if (it->second.hasStackSlot) {
-				if (it->second.baseRegId != RISCV64_FP_REG_NO || it->second.offset != incomingOffset) {
-					iloc.load_base(scratchReg, RISCV64_FP_REG_NO, incomingOffset, wide);
-					iloc.store_base(scratchReg,
-						it->second.baseRegId,
-						it->second.offset,
-						scratchReg,
-						wide);
+				} else if (it->second.hasStackSlot) {
+					iloc.store_base(incomingReg, it->second.baseRegId, it->second.offset,
+					                scratchReg, param->getType()->isPointerType());
 				}
 			}
+			// 栈传整数参数已在 fp+offset 处，无需复制
+			intIdx++;
 		}
 	}
 
@@ -913,6 +875,37 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 			}
 		}
 	}
+
+	// 整数入参已经安全落位后，再处理浮点入参。
+	// 浮点入参通过fa0-fa7传递，使用fmv.x.w将浮点寄存器的位模式移动到整数寄存器
+	{
+		int floatIdx = 0;
+		for (auto * param : params) {
+			auto it = allocMap.find(param);
+			if (it == allocMap.end()) {
+				continue;
+			}
+			if (!param->getType()->isFloatType()) {
+				continue;
+			}
+
+			if (floatIdx < 8) {
+				// fa0-fa7: 浮点参数寄存器
+				const std::string fpReg = "fa" + std::to_string(floatIdx);
+				if (it->second.hasReg()) {
+					// 目标分配了整数寄存器，用fmv.x.w将浮点寄存器位模式移入整数寄存器
+					iloc.inst("fmv.x.w", PlatformRiscV64::regName[it->second.regId], fpReg);
+				} else if (it->second.hasStackSlot) {
+					// 目标在栈上，先移入scratch寄存器，再存入栈
+					iloc.inst("fmv.x.w", PlatformRiscV64::regName[scratchReg], fpReg);
+					iloc.store_base(scratchReg, it->second.baseRegId, it->second.offset,
+					                scratchReg, false);
+				}
+			}
+			// 栈传浮点参数已在 fp+offset 处，无需复制
+			floatIdx++;
+		}
+	}
 }
 
 /// @brief 生成函数epilogue
@@ -921,12 +914,15 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 void InstSelectorRiscV64::emitEpilogue()
 {
 	const int frameSize = allocator.getFrameSize();
+	// 获取当前函数实际需要保存的callee-saved寄存器列表
+	const auto & savedRegs = iloc.getSavedRegs();
 	auto tmp = tempMgr.borrow(nullptr);
 
-	// 逆序恢复callee-saved寄存器
-	for (int i = static_cast<int>(savedRegs().size()) - 1; i >= 0; --i) {
+	// 逆序恢复callee-saved寄存器（与prologue中保存顺序相反）
+	for (int i = static_cast<int>(savedRegs.size()) - 1; i >= 0; --i) {
 		const int offset = frameSize - (i + 1) * 8;
-		emitLoad64(savedRegs()[i], offset, tmp.reg());
+		// 通过寄存器编号查找对应的寄存器名称
+		emitLoad64(PlatformRiscV64::regName[savedRegs[i]], offset, tmp.reg());
 	}
 
 	// 恢复栈指针

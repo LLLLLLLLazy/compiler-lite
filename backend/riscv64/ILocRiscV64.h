@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "Module.h"
 #include "Value.h"
@@ -118,6 +119,9 @@ class ILocRiscV64 {
 	/// @brief 已计算好的函数栈帧大小
 	int frameSize = 0;
 
+	/// @brief 当前函数需要在栈帧中保存的callee-saved寄存器
+	std::vector<int> savedRegs;
+
 	/// @brief 机器指令计数器（每次emit递增）
 	int machineInstCount = 0;
 
@@ -153,6 +157,18 @@ public:
 	int getFrameSize() const
 	{
 		return frameSize;
+	}
+
+	/// @brief 设置当前函数需要保存的callee-saved寄存器
+	void setSavedRegs(const std::vector<int> & regs)
+	{
+		savedRegs = regs;
+	}
+
+	/// @brief 获取当前函数需要保存的callee-saved寄存器
+	const std::vector<int> & getSavedRegs() const
+	{
+		return savedRegs;
 	}
 
 	/// @brief 注释指令，RISCV64使用#作为注释符

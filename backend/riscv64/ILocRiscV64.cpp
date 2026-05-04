@@ -22,10 +22,6 @@
 
 namespace {
 
-/// @brief callee-saved寄存器占用的栈帧字节数
-/// RISC-V64的callee-saved寄存器：ra, s0-s11, 共13个64位寄存器 = 104字节
-constexpr int kSavedFrameBytes = 104;
-
 /// @brief 判断指令是否为内部标签定义指令（以.L开头的标签）
 bool isInternalLabelInst(const RiscV64Inst * inst)
 {
@@ -73,10 +69,11 @@ Type * memoryObjectType(Value * val)
 
 /// @brief 根据寄存器分配信息动态计算所需栈帧大小
 /// @param regAllocMap 寄存器分配映射表
+/// @param savedFrameBytes callee-saved寄存器占用的字节数
 /// @return 16字节对齐的栈帧大小
-int computeFrameSize(const std::unordered_map<Value *, RegAllocInfo> & regAllocMap)
+int computeFrameSize(const std::unordered_map<Value *, RegAllocInfo> & regAllocMap, int savedFrameBytes)
 {
-	int requiredBytes = kSavedFrameBytes;
+	int requiredBytes = savedFrameBytes;
 	for (const auto & [_, info] : regAllocMap) {
 		if (!info.hasStackSlot) {
 			continue;
@@ -90,7 +87,7 @@ int computeFrameSize(const std::unordered_map<Value *, RegAllocInfo> & regAllocM
 		} else if (info.baseRegId == RISCV64_SP_REG_NO) {
 			// SP正方向偏移的栈槽：超出寄存器传递的调用参数
 			slotReach = static_cast<int>(info.offset);
-			requiredBytes = std::max(requiredBytes, kSavedFrameBytes + slotReach);
+			requiredBytes = std::max(requiredBytes, savedFrameBytes + slotReach);
 		}
 	}
 
@@ -541,14 +538,16 @@ void ILocRiscV64::leaStack(int rs_reg_no, int base_reg_no, int off)
 }
 
 /// @brief 函数内栈内空间分配（局部变量、形参变量、函数参数传值，或不能寄存器分配的临时变量等）
-/// RISCV64 prologue: addi sp,sp,-framesize; sd ra,off(sp); sd s0,off(sp); addi s0,sp,framesize
+/// RISCV64 prologue: addi sp,sp,-framesize; 保存必要callee-saved寄存器; addi s0,sp,framesize
 /// @param func 函数
 /// @param tmp_reg_no 临时寄存器编号
 void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 {
 	(void) func;
 	// 优先使用已计算的栈帧大小，否则动态计算
-	const int currentFrameSize = frameSize > 0 ? frameSize : computeFrameSize(regAllocMap);
+	// 根据实际需要保存的callee-saved寄存器数量计算占用字节数
+	const int savedFrameBytes = static_cast<int>(savedRegs.size()) * 8;
+	const int currentFrameSize = frameSize > 0 ? frameSize : computeFrameSize(regAllocMap, savedFrameBytes);
 
 	// RISCV64 prologue:
 	// addi sp, sp, -framesize
@@ -560,21 +559,19 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 		emit("add", "sp", "sp", PlatformRiscV64::regName[tmp_reg_no]);
 	}
 
-	// 保存callee-saved寄存器：ra, s0-s11，共13个64位寄存器
-	const std::vector<std::string> savedRegs = {
-		"ra", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
-	};
-
 	// 逐个保存callee-saved寄存器到栈帧顶部
+	// savedRegs由CodeGeneratorRiscV64根据实际使用情况计算得出，仅保存必要的寄存器
 	for (int i = 0; i < static_cast<int>(savedRegs.size()); ++i) {
 		int offset = currentFrameSize - (i + 1) * 8;
+		// 通过寄存器编号查找对应的寄存器名称
+		const std::string & regName = PlatformRiscV64::regName[savedRegs[i]];
 		if (PlatformRiscV64::isDisp(offset)) {
-			emit("sd", savedRegs[i], std::to_string(offset) + "(sp)");
+			emit("sd", regName, std::to_string(offset) + "(sp)");
 		} else {
 			// 偏移超出12位范围，通过临时寄存器计算地址
 			load_imm(tmp_reg_no, offset);
 			emit("add", PlatformRiscV64::regName[tmp_reg_no], "sp", PlatformRiscV64::regName[tmp_reg_no]);
-			emit("sd", savedRegs[i], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+			emit("sd", regName, "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
 		}
 	}
 

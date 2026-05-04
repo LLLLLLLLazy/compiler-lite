@@ -5,6 +5,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "CodeGeneratorAsm.h"
 #include "GreedyRegAllocator.h"
@@ -54,4 +55,7 @@ protected:
 private:
 	/// @brief Greedy寄存器分配器实例
 	GreedyRegAllocator greedyAllocator;
+
+	/// @brief 当前函数需要保存的callee-saved寄存器编号
+	std::vector<int> currentSavedRegs;
 };

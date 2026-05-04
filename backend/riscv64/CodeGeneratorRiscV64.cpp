@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "AllocaInst.h"
 #include "BasicBlock.h"
@@ -30,34 +32,6 @@
 #include "Value.h"
 
 namespace {
-
-enum class AbiArgLocKind {
-	IntReg,
-	FloatReg,
-	Stack,
-};
-
-struct AbiArgLoc {
-	AbiArgLocKind kind;
-	int index;
-};
-
-AbiArgLoc classifyAbiArg(Type * type, int & intRegCount, int & floatRegCount, int & stackCount)
-{
-	if (type != nullptr && type->isFloatType() && floatRegCount < 8) {
-		return {AbiArgLocKind::FloatReg, floatRegCount++};
-	}
-
-	if (intRegCount < 8) {
-		return {AbiArgLocKind::IntReg, intRegCount++};
-	}
-
-	return {AbiArgLocKind::Stack, stackCount++};
-}
-
-/// @brief 保存的callee-saved寄存器占用的栈帧字节数
-/// RISC-V64的callee-saved寄存器：ra, s0-s11, 共13个64位寄存器 = 104字节
-constexpr int kSavedFrameBytes = 104;
 
 /// @brief 将value向上对齐到align的倍数
 /// @param value 待对齐的值
@@ -102,38 +76,60 @@ int maxCallArgCount(Function * func)
 	return result;
 }
 
-int callStackArgCount(CallInst * call)
+/// @brief 判断函数中是否包含函数调用指令
+/// @param func 待检查的函数
+/// @return 是否包含CallInst
+bool hasCallInst(Function * func)
 {
-	if (call == nullptr) {
-		return 0;
-	}
-
-	int intRegCount = 0;
-	int floatRegCount = 0;
-	int stackCount = 0;
-	for (int i = 0; i < call->getArgCount(); ++i) {
-		Value * arg = call->getArg(i);
-		Type * argType = arg != nullptr ? arg->getType() : nullptr;
-		if (auto * alloca = dynamic_cast<AllocaInst *>(arg)) {
-			argType = alloca->getAllocaType();
-		}
-		classifyAbiArg(argType, intRegCount, floatRegCount, stackCount);
-	}
-
-	return stackCount;
-}
-
-int maxCallStackArgCount(Function * func)
-{
-	int result = 0;
 	for (auto * bb: func->getBlocks()) {
 		for (auto * inst: bb->getInstructions()) {
-			if (auto * call = dynamic_cast<CallInst *>(inst)) {
-				result = std::max(result, callStackArgCount(call));
+			if (dynamic_cast<CallInst *>(inst) != nullptr) {
+				return true;
 			}
 		}
 	}
-	return result;
+	return false;
+}
+
+/// @brief 计算当前函数需要在prologue/epilogue中保存的callee-saved寄存器列表
+/// @param func 当前函数
+/// @param allocMap 寄存器分配映射表
+/// @return 需要保存的寄存器编号列表（按栈帧中保存顺序排列）
+///
+/// 策略：
+/// - 若函数包含调用指令，则必须保存ra（返回地址）
+/// - 始终保存s0（帧指针，后端固定使用s0作为FP）
+/// - 对于s1-s11（编号9,18-27），仅当寄存器分配器实际使用了该寄存器时才保存
+std::vector<int> computeSavedRegs(Function * func, const std::unordered_map<Value *, RegAllocInfo> & allocMap)
+{
+	std::vector<int> regs;
+	if (hasCallInst(func)) {
+		// 函数内有调用，需要保存返回地址寄存器ra
+		regs.push_back(RISCV64_RA_REG_NO);
+	}
+
+	// 后端当前始终使用s0作为帧指针，必须保存
+	regs.push_back(RISCV64_FP_REG_NO);
+
+	// s1-s11的寄存器编号：s1=9, s2=18, s3=19, ..., s11=27
+	const std::vector<int> calleeSavedGprs = {
+		9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+	};
+	// 仅保存被寄存器分配器实际分配使用的callee-saved寄存器
+	for (int reg: calleeSavedGprs) {
+		bool used = false;
+		for (const auto & [_, info]: allocMap) {
+			if (info.hasReg() && info.regId == reg) {
+				used = true;
+				break;
+			}
+		}
+		if (used) {
+			regs.push_back(reg);
+		}
+	}
+
+	return regs;
 }
 
 } // namespace
@@ -173,17 +169,7 @@ void CodeGeneratorRiscV64::genDataSection()
 		std::fprintf(fp, ".type %s, %%object\n", var->getName().c_str());
 		std::fprintf(fp, ".size %s, %d\n", var->getName().c_str(), var->getValueType()->getSize());
 		std::fprintf(fp, "%s:\n", var->getName().c_str());
-		if (var->getInitKind() == GlobalVariable::InitKind::FloatArray) {
-			for (float fval: var->getInitFloatArrayValues()) {
-				std::uint32_t bits = 0;
-				std::memcpy(&bits, &fval, sizeof(bits));
-				std::fprintf(fp, ".word %u\n", bits);
-			}
-		} else if (var->getInitKind() == GlobalVariable::InitKind::IntArray) {
-			for (int32_t value: var->getInitIntArrayValues()) {
-				std::fprintf(fp, ".word %d\n", value);
-			}
-		} else if (var->getInitKind() == GlobalVariable::InitKind::Float) {
+		if (var->getInitKind() == GlobalVariable::InitKind::Float) {
 			float fval = var->getInitFloatValue();
 			std::uint32_t bits = 0;
 			std::memcpy(&bits, &fval, sizeof(bits));
@@ -222,6 +208,8 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	// 创建底层汇编序列，设置寄存器分配信息和栈帧大小
 	ILocRiscV64 iloc(module);
 	iloc.setRegAllocMap(greedyAllocator.getAllocationMap());
+	// 设置当前函数需要保存的callee-saved寄存器列表
+	iloc.setSavedRegs(currentSavedRegs);
 	iloc.setFrameSize(greedyAllocator.getFrameSize());
 
 	// 执行指令选择，将IR翻译为RISC-V64汇编指令
@@ -250,10 +238,12 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 			}
 			auto * key = reinterpret_cast<Value *>(sv.identity);
 			if (sv.spilled) {
+				// 根据实际保存的callee-saved寄存器数量计算栈帧占用字节数
+				const int savedFrameBytes = static_cast<int>(currentSavedRegs.size()) * 8;
 				int slotSize = 8;
 				int newFrameSize = greedyAllocator.getFrameSize() + slotSize;
 				greedyAllocator.setFrameSize(newFrameSize);
-				sv.spillSlot = -(kSavedFrameBytes + newFrameSize);
+				sv.spillSlot = -(savedFrameBytes + newFrameSize);
 				RegAllocInfo info;
 				info.setStack(RISCV64_FP_REG_NO, sv.spillSlot);
 				allocMap[key] = info;
@@ -311,6 +301,8 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 	// 调整函数调用和形参指令（RISC-V64暂不需要额外调整）
 	adjustFuncCallInsts(func);
 	adjustFormalParamInsts(func);
+	// 计算当前函数需要保存的callee-saved寄存器列表
+	currentSavedRegs = computeSavedRegs(func, greedyAllocator.getAllocationMap());
 	// 为未分配寄存器和溢出的变量分配栈槽
 	stackAlloc(func);
 }
@@ -320,13 +312,15 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 ///
 /// 栈帧布局（从高地址到低地址）：
 /// - caller的栈帧
-/// - 返回地址和callee-saved寄存器（kSavedFrameBytes字节）
+/// - 返回地址和callee-saved寄存器（savedFrameBytes字节）
 /// - 局部变量和溢出变量（localBytes字节）
 /// - 超过8个参数的调用参数（outgoingBytes字节）
 ///
 void CodeGeneratorRiscV64::stackAlloc(Function * func)
 {
 	auto & allocMap = greedyAllocator.getAllocationMap();
+	// 根据实际保存的callee-saved寄存器数量计算栈帧占用字节数
+	const int savedFrameBytes = static_cast<int>(currentSavedRegs.size()) * 8;
 
 	int localBytes = 0;
 	// 为Value分配栈槽，偏移量相对于FP寄存器为负方向
@@ -337,7 +331,7 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func)
 		}
 
 		localBytes += stackSlotSize(val);
-		info.setStack(RISCV64_FP_REG_NO, -(kSavedFrameBytes + localBytes));
+		info.setStack(RISCV64_FP_REG_NO, -(savedFrameBytes + localBytes));
 	};
 
 	// 为所有形参创建分配信息
@@ -401,9 +395,9 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func)
 	}
 
 	// 计算栈帧总大小：callee-saved + 局部变量 + 超出寄存器传递的调用参数，16字节对齐
-	const int maxStackArgs = maxCallStackArgCount(func);
-	const int outgoingBytes = maxStackArgs * 8;
-	const int frameSize = alignTo(kSavedFrameBytes + localBytes + outgoingBytes, 16);
+	const int maxArgs = maxCallArgCount(func);
+	const int outgoingBytes = maxArgs > 8 ? (maxArgs - 8) * 8 : 0;
+	const int frameSize = alignTo(savedFrameBytes + localBytes + outgoingBytes, 16);
 	greedyAllocator.setOutgoingArgBytes(outgoingBytes);
 	greedyAllocator.setFrameSize(frameSize);
 }
