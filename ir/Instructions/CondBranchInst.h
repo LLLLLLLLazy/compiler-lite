@@ -33,6 +33,20 @@ public:
         return falseDest;
     }
 
+    /// @brief 原地改写真分支目标
+    /// @param dest 新的真分支目标
+    void setTrueDest(BasicBlock * dest)
+    {
+        trueDest = dest;
+    }
+
+    /// @brief 原地改写假分支目标
+    /// @param dest 新的假分支目标
+    void setFalseDest(BasicBlock * dest)
+    {
+        falseDest = dest;
+    }
+
     void toString(std::string & str) override;
 
 private:

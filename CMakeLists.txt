@@ -207,6 +207,8 @@ set(IR_SRCS
 	ir/analysis/LoopInfo.cpp
 	ir/passes/Mem2Reg.h
 	ir/passes/Mem2Reg.cpp
+	ir/passes/LICM.h
+	ir/passes/LICM.cpp
 	ir/passes/PhiLowering.h
 	ir/passes/PhiLowering.cpp
 )

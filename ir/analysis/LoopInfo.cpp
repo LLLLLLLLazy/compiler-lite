@@ -39,17 +39,22 @@ void LoopInfo::computeLoops(Function * func, DominatorTree * domTree)
 
 void LoopInfo::discoverLoop(BasicBlock * header, BasicBlock * backEdgeSrc)
 {
-    // 同一个header可能已由另一条回边发现（如包含多重回边的循环），去重
-    if (loopHeaders.find(header) != loopHeaders.end()) {
-        return;
+    // 同一个 header 可能对应多条回边，需要把各回边发现的 body 合并起来
+    Loop * loop = nullptr;
+    for (auto & existing : loops) {
+        if (existing.header == header) {
+            loop = &existing;
+            break;
+        }
     }
-    loopHeaders.insert(header);
 
-    Loop loop;
-    loop.header = header;
-    loop.body.insert(header);
+    if (loop == nullptr) {
+        loops.push_back({header, {header}});
+        loop = &loops.back();
+        loopHeaders.insert(header);
+    }
 
-    // 从回边源出发，反向遍历CFG，收集所有可到达header的节点（不经过header）
+    // 从回边源出发，反向遍历 CFG，收集所有可到达 header 的节点（不经过 header）
     std::stack<BasicBlock *> worklist;
     worklist.push(backEdgeSrc);
 
@@ -57,20 +62,18 @@ void LoopInfo::discoverLoop(BasicBlock * header, BasicBlock * backEdgeSrc)
         BasicBlock * node = worklist.top();
         worklist.pop();
 
-        // 如果已在body中则跳过
-        if (loop.body.find(node) != loop.body.end()) {
+        // 如果已在 body 中则跳过
+        if (loop->body.find(node) != loop->body.end()) {
             continue;
         }
-        loop.body.insert(node);
+        loop->body.insert(node);
 
         for (auto * pred : node->getPredecessors()) {
-            if (loop.body.find(pred) == loop.body.end()) {
+            if (loop->body.find(pred) == loop->body.end()) {
                 worklist.push(pred);
             }
         }
     }
-
-    loops.push_back(std::move(loop));
 }
 
 void LoopInfo::computeLoopDepths(Function * func)

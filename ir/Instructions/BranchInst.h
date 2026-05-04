@@ -20,6 +20,13 @@ public:
         return target;
     }
 
+    /// @brief 原地改写跳转目标基本块
+    /// @param newTarget 新的跳转目标
+    void setTarget(BasicBlock * newTarget)
+    {
+        target = newTarget;
+    }
+
     void toString(std::string & str) override;
 
 private:

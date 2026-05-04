@@ -101,7 +101,7 @@ bool UnreachableBlockElim::run()
         }
     }
 
-    // 先拆掉死块内所有指令的 use-def 边，再统一释放块对象。
+    // 先拆掉死块内所有指令的 use-def 边，再统一释放块对象
     for (auto * deadBB : deadBlocks) {
         for (auto * inst : deadBB->getInstructions()) {
             inst->clearOperands();
