@@ -32,6 +32,27 @@
 #include "Types/IntegerType.h"
 #include "Value.h"
 
+namespace {
+
+/// @brief 为 mem2reg 的未定义读生成与目标类型匹配的零常量
+/// @param mod 所属模块
+/// @param type 目标 SSA 值类型
+/// @return 类型匹配的零常量
+Value * createMem2RegZero(Module * mod, Type * type)
+{
+    if (type && type->isFloatType()) {
+        return mod->newConstFloat(0.0f);
+    }
+
+    if (type && type->isIntegerType()) {
+        return mod->newConstInteger(type, 0);
+    }
+
+    return mod->newConstInt32(0);
+}
+
+} // namespace
+
 // ---------------------------------------------------------------------------
 // 构造函数
 // ---------------------------------------------------------------------------
@@ -264,8 +285,7 @@ void Mem2Reg::rename(
                 auto it = reachingDefs.find(alloca);
                 if (it != reachingDefs.end()) {
                     // 若尚无定义，则默认以常量 0 作为初值
-                    Value * reaching =
-                        it->second.empty() ? static_cast<Value *>(mod->newConstInt32(0)) : it->second.back();
+                    Value * reaching = it->second.empty() ? createMem2RegZero(mod, load->getType()) : it->second.back();
                     load->replaceAllUseWith(reaching);
                     load->setDead(true);
                 }
@@ -302,7 +322,7 @@ void Mem2Reg::rename(
             AllocaInst * alloca = it->second;
             auto defIt = reachingDefs.find(alloca);
             Value * reaching = (defIt == reachingDefs.end() || defIt->second.empty())
-                                    ? static_cast<Value *>(mod->newConstInt32(0))
+                                    ? createMem2RegZero(mod, phi->getType())
                                     : defIt->second.back();
             phi->addIncoming(reaching, bb);
         }
