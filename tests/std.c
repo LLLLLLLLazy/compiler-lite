@@ -75,7 +75,10 @@ void putarray(int n, int * d)
     printf("\n");
 }
 
-__attribute__((weak)) void putstr(char * str)
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+void putstr(char * str)
 {
     printf("%s", str);
 }
@@ -118,4 +121,3 @@ void putf(char a[], ...)
     vfprintf(stdout, a, args);
     va_end(args);
 }
-

@@ -45,6 +45,9 @@ public:
 		showLinearIR = show;
 	}
 
+	/// @brief 获取所有创建的scratch值
+	std::vector<ScratchValue> & getScratchValues() { return tempMgr.getScratchValues(); }
+
 private:
 	struct OperandReg {
 		int reg = -1;

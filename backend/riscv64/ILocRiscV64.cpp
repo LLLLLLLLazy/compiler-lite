@@ -13,6 +13,7 @@
 #include "AllocaInst.h"
 #include "Common.h"
 #include "Function.h"
+#include "LocalTempManager.h"
 #include "PlatformRiscV64.h"
 #include "Module.h"
 #include "ConstInteger.h"
@@ -183,7 +184,11 @@ std::string RiscV64Inst::outPut()
 	return ret;
 }
 
-#define emit(...) code.push_back(new RiscV64Inst(__VA_ARGS__))
+#define emit(...)                                                                                                      \
+	do {                                                                                                               \
+		code.push_back(new RiscV64Inst(__VA_ARGS__));                                                                  \
+		++machineInstCount;                                                                                            \
+	} while (0)
 
 /// @brief 构造函数
 /// @param _module 符号表
@@ -611,4 +616,86 @@ void ILocRiscV64::jump(std::string label)
 void ILocRiscV64::ldr_args(Function * fun)
 {
 	// RISCV64的参数加载由CodeGeneratorRiscV64::adjustFormalParamInsts处理
+}
+
+/// @brief 记录IR指令对应的机器指令范围
+/// @param inst IR指令
+/// @param start 该IR指令翻译开始时的机器指令计数
+void ILocRiscV64::recordMIRange(Instruction * inst, int start)
+{
+	if (inst != nullptr) {
+		instToMIRange[inst] = {start, machineInstCount};
+	}
+}
+
+/// @brief 替换字符串中的寄存器名（带边界检查）
+/// @param text 待替换的字符串
+/// @param oldReg 旧寄存器名
+/// @param newReg 新寄存器名
+/// @return 是否发生替换
+static bool replaceRegName(std::string & text, const std::string & oldReg, const std::string & newReg)
+{
+	bool replaced = false;
+	std::string::size_type pos = 0;
+	while ((pos = text.find(oldReg, pos)) != std::string::npos) {
+		// 检查前一个字符是否为寄存器名边界（非字母数字非下划线）
+		if (pos > 0 && (std::isalnum(text[pos - 1]) || text[pos - 1] == '_')) {
+			pos += oldReg.size();
+			continue;
+		}
+		// 检查后一个字符是否为寄存器名边界
+		auto endPos = pos + oldReg.size();
+		if (endPos < text.size() && (std::isalnum(text[endPos]) || text[endPos] == '_')) {
+			pos = endPos;
+			continue;
+		}
+		text.replace(pos, oldReg.size(), newReg);
+		pos += newReg.size();
+		replaced = true;
+	}
+	return replaced;
+}
+
+/// @brief 替换机器指令中的scratch寄存器编号
+///
+/// 遍历所有机器指令，对scratch值的[borrowPos, releasePos)范围内的指令，
+/// 将原始物理寄存器名替换为新分配的物理寄存器名。
+///
+/// @param scratchValues scratch值列表
+void ILocRiscV64::patchScratchRegs(const std::vector<ScratchValue> & scratchValues)
+{
+	// 构建机器指令的线性列表（跳过dead指令的占位）
+	std::vector<RiscV64Inst *> instVec;
+	instVec.reserve(code.size());
+	for (auto * inst : code) {
+		instVec.push_back(inst);
+	}
+
+	for (const auto & sv : scratchValues) {
+		if (sv.spilled || sv.originalPhysReg < 0 || sv.physicalReg < 0) {
+			continue;
+		}
+		if (sv.originalPhysReg == sv.physicalReg) {
+			continue; // 分配了相同的寄存器，无需patch
+		}
+
+		const std::string & oldName = PlatformRiscV64::regName[sv.originalPhysReg];
+		const std::string & newName = PlatformRiscV64::regName[sv.physicalReg];
+
+		// 替换 [borrowPos, releasePos) 范围内的机器指令
+		int miIdx = 0;
+		for (auto * inst : code) {
+			if (miIdx >= sv.borrowPos && miIdx < sv.releasePos) {
+				replaceRegName(inst->opcode, oldName, newName);
+				replaceRegName(inst->result, oldName, newName);
+				replaceRegName(inst->arg1, oldName, newName);
+				replaceRegName(inst->arg2, oldName, newName);
+				replaceRegName(inst->addition, oldName, newName);
+			}
+			if (miIdx >= sv.releasePos) {
+				break;
+			}
+			++miIdx;
+		}
+	}
 }

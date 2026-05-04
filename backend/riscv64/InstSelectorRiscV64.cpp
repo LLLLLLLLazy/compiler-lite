@@ -93,6 +93,7 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	, tempMgr(_allocator.getAvailableRegs(), _allocator.getAllocationMap(),
 	          _allocator.getInstNumbering(), _allocator.getValueLiveRanges())
 {
+	tempMgr.setILoc(&_iloc);
 	// 注册各IR操作码对应的翻译处理函数
 	translatorHandlers[IRInstOperator::IRINST_OP_ALLOCA] = &InstSelectorRiscV64::translate_alloca;
 	translatorHandlers[IRInstOperator::IRINST_OP_LOAD] = &InstSelectorRiscV64::translate_load;
@@ -179,9 +180,10 @@ void InstSelectorRiscV64::translate(Instruction * inst)
 		outputIRInstruction(inst);
 	}
 
+	int miStart = iloc.getMachineInstCount();
 	(this->*(handlerIt->second))(inst);
-
 	assert(tempMgr.allReleased());
+	iloc.recordMIRange(inst, miStart);
 }
 
 /// @brief 输出IR指令的文本表示作为注释（调试用）
@@ -529,11 +531,11 @@ void InstSelectorRiscV64::translate_icmp(Instruction * inst)
 			iloc.inst("xori", dst, dst, "1");
 			break;
 		case IRInstOperator::IRINST_OP_EQ_I:
-			iloc.inst("sub", dst, lhs, rhs);
+			iloc.inst("subw", dst, lhs, rhs);
 			iloc.inst("seqz", dst, dst);
 			break;
 		case IRInstOperator::IRINST_OP_NE_I:
-			iloc.inst("sub", dst, lhs, rhs);
+			iloc.inst("subw", dst, lhs, rhs);
 			iloc.inst("snez", dst, dst);
 			break;
 		default:
@@ -816,16 +818,9 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 		}
 	}
 
-	int scratchReg = -1;
-	for (int reg : allocator.getAvailableRegs()) {
-		if (blockedRegs.find(reg) == blockedRegs.end()) {
-			scratchReg = reg;
-			break;
-		}
-	}
-	if (scratchReg < 0) {
-		scratchReg = RISCV64_TMP_REG_NO;
-	}
+	// 通过tempMgr借用scratch寄存器（自动走scratch虚拟寄存器流程）
+	auto scratchLease = tempMgr.borrowExcluding(nullptr, blockedRegs);
+	int scratchReg = scratchLease.reg();
 
 	// 按声明顺序处理形参，使用独立的 int/float 寄存器计数器
 	{

@@ -1640,74 +1640,39 @@ Value * IRGenerator::visitLeafVarId(ast_node * node)
 /// @return 生成出的指令值，失败时返回空指针
 Value * IRGenerator::emitBinary(ast_node * node, IRInstOperator intOp, IRInstOperator floatOp)
 {
-    if (node->node_type == ast_operator_type::AST_OP_ADD || node->node_type == ast_operator_type::AST_OP_MUL) {
-        std::vector<ast_node *> pending{node};
-        std::vector<ast_node *> operands;
+    // 将左结合的同操作符链展平为迭代，避免深层递归导致栈溢出
+    std::vector<ast_node *> rhsOps;
+    ast_node * cur = node;
+    while (cur && cur->node_type == node->node_type && cur->sons.size() >= 2) {
+        rhsOps.push_back(cur->sons[1]);
+        cur = cur->sons[0];
+    }
 
-        while (!pending.empty()) {
-            ast_node * current = pending.back();
-            pending.pop_back();
+    Value * result = visitExpr(cur);
+    if (!result) {
+        return nullptr;
+    }
 
-            if (current != nullptr && current->node_type == node->node_type && current->sons.size() >= 2) {
-                pending.push_back(current->sons[1]);
-                pending.push_back(current->sons[0]);
-                continue;
-            }
-
-            operands.push_back(current);
-        }
-
-        if (operands.empty()) {
+    for (int i = static_cast<int>(rhsOps.size()) - 1; i >= 0; --i) {
+        Value * rhs = visitExpr(rhsOps[i]);
+        if (!rhs) {
             return nullptr;
         }
 
-        Value * result = visitExpr(operands[0]);
+        if (result->getType()->isFloatType() || rhs->getType()->isFloatType()) {
+            if (floatOp == IRInstOperator::IRINST_OP_MAX) {
+                minic_log(LOG_ERROR, "浮点类型不支持该二元运算");
+                return nullptr;
+            }
+            result = emitFloatBinary(result, rhs, floatOp);
+        } else {
+            result = emitIntBinary(result, rhs, intOp);
+        }
         if (!result) {
             return nullptr;
         }
-
-        for (std::size_t i = 1; i < operands.size(); ++i) {
-            Value * rhs = visitExpr(operands[i]);
-            if (!rhs) {
-                return nullptr;
-            }
-
-            if (result->getType()->isFloatType() || rhs->getType()->isFloatType()) {
-                if (floatOp == IRInstOperator::IRINST_OP_MAX) {
-                    minic_log(LOG_ERROR, "浮点类型不支持该二元运算");
-                    return nullptr;
-                }
-                result = emitFloatBinary(result, rhs, floatOp);
-            } else {
-                result = emitIntBinary(result, rhs, intOp);
-            }
-
-            if (!result) {
-                return nullptr;
-            }
-        }
-
-        return result;
     }
-
-    Value * lhs = visitExpr(node->sons[0]);
-    if (!lhs) {
-        return nullptr;
-    }
-    Value * rhs = visitExpr(node->sons[1]);
-    if (!rhs) {
-        return nullptr;
-    }
-
-    if (lhs->getType()->isFloatType() || rhs->getType()->isFloatType()) {
-        if (floatOp == IRInstOperator::IRINST_OP_MAX) {
-            minic_log(LOG_ERROR, "浮点类型不支持该二元运算");
-            return nullptr;
-        }
-        return emitFloatBinary(lhs, rhs, floatOp);
-    } else {
-        return emitIntBinary(lhs, rhs, intOp);
-    }
+    return result;
 }
 
 Value * IRGenerator::emitIntBinary(Value * lhs, Value * rhs, IRInstOperator op)

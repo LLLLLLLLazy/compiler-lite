@@ -333,14 +333,11 @@ std::vector<int> GreedyRegAllocator::buildRegisterPool(Function * func) const
 {
 	(void) func;
 
+	// t3-t4 (28-29) 保留为scratch寄存器，t5-t6 (30-31) 参与全局分配
 	std::vector<int> regs = {
 		5,  // t0
 		6,  // t1
 		7,  // t2
-		28, // t3
-		29, // t4
-		30, // t5
-		31, // t6
 		10, // a0
 		11, // a1
 		12, // a2
@@ -360,6 +357,8 @@ std::vector<int> GreedyRegAllocator::buildRegisterPool(Function * func) const
 		25, // s9
 		26, // s10
 		27, // s11
+		30, // t5
+		31, // t6
 	};
 
 	return regs;

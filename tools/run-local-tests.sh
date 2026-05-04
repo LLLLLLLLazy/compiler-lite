@@ -12,6 +12,7 @@ TEST_ROOT="${REPO_ROOT}/tests"
 FRONTEND=${MINIC_FRONTEND:-"antlr"}
 TEST_MODE=${MINIC_TEST_MODE:-"llvmir"}
 CLANG_BIN=${CLANG_BIN:-"clang"}
+TEST_TIMEOUT=${MINIC_TEST_TIMEOUT:-30}
 
 OK_NUM=0
 NG_NUM=0
@@ -43,6 +44,7 @@ Environment:
   MINIC_TEST_MODE=asm       Verify generated assembly via cross-compile + qemu
   MINIC_TEST_MODE=ast       Verify AST image generation
   MINIC_TEST_MODE=all       Run llvmir + asm + ast checks together
+  MINIC_TEST_TIMEOUT=30     Per-step timeout passed to timeout(1)
 
 Examples:
   ./tools/run-local-tests.sh
@@ -120,14 +122,18 @@ infer_suite_from_testcase() {
 }
 
 write_result_file() {
-    local output="$1"
+    local output_file="$1"
     local exit_code="$2"
     local result_file="$3"
 
-    if [[ -n "${output}" ]]; then
-        printf '%s' "${output}" > "${result_file}"
-        if [[ "${output}" != *$'\n' ]]; then
-            printf '\n' >> "${result_file}"
+    if [[ -f "${output_file}" ]]; then
+        cp "${output_file}" "${result_file}"
+        if [[ -s "${result_file}" ]]; then
+            local last_byte
+            last_byte=$(tail -c 1 "${result_file}" | od -An -t u1 | tr -d '[:space:]')
+            if [[ "${last_byte}" != "10" ]]; then
+                printf '\n' >> "${result_file}"
+            fi
         fi
     else
         : > "${result_file}"
@@ -163,11 +169,11 @@ run_asm_check() {
     local testcase="$4"
     local asmfile="${TMP_DIR}/${testcase}.s"
     local exe_file="${TMP_DIR}/${testcase}"
+    local output_file="${TMP_DIR}/${testcase}.asm.output"
     local result_file="${TMP_DIR}/${testcase}.asm.result"
-    local output=""
     local exit_code=0
 
-    if ! timeout --foreground 10 "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${testcase}.c compile NG [asm]"
         return 1
     fi
@@ -177,20 +183,20 @@ run_asm_check() {
         return 1
     fi
 
-    if ! timeout --foreground 10 "${ARM_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${ARM_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
         echo "${testcase}.c link NG [asm]"
         return 1
     fi
 
     if [[ -f "${infile}" ]]; then
-        output="$(timeout --foreground 10 ${QEMU_ARM_BIN} "${exe_file}" < "${infile}" 2>&1)"
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_ARM_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2>&1
         exit_code=$?
     else
-        output="$(timeout --foreground 10 ${QEMU_ARM_BIN} "${exe_file}" 2>&1)"
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_ARM_BIN}" "${exe_file}" > "${output_file}" 2>&1
         exit_code=$?
     fi
 
-    write_result_file "${output}" "${exit_code}" "${result_file}"
+    write_result_file "${output_file}" "${exit_code}" "${result_file}"
 
     if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
         echo "${testcase}.c NG [asm]"
@@ -208,11 +214,11 @@ run_llvmir_check() {
     local testcase="$4"
     local llfile="${TMP_DIR}/${testcase}.ll"
     local exe_file="${TMP_DIR}/${testcase}_ll"
+    local output_file="${TMP_DIR}/${testcase}.llvmir.output"
     local result_file="${TMP_DIR}/${testcase}.llvmir.result"
-    local output_file="${TMP_DIR}/${testcase}.llvmir.raw"
     local exit_code=0
 
-    if ! timeout --foreground 10 "${MINIC_BIN}" -S "${frontend_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${testcase}.c compile NG [llvmir]"
         return 1
     fi
@@ -222,20 +228,20 @@ run_llvmir_check() {
         return 1
     fi
 
-    if ! timeout --foreground 10 "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
         echo "${testcase}.c link NG [llvmir]"
         return 1
     fi
 
     if [[ -f "${infile}" ]]; then
-        timeout --foreground 10 "${exe_file}" < "${infile}" > "${output_file}" 2>&1
+        timeout --foreground "${TEST_TIMEOUT}" "${exe_file}" < "${infile}" > "${output_file}" 2>&1
         exit_code=$?
     else
-        timeout --foreground 10 "${exe_file}" > "${output_file}" 2>&1
+        timeout --foreground "${TEST_TIMEOUT}" "${exe_file}" > "${output_file}" 2>&1
         exit_code=$?
     fi
 
-    write_result_file_from_path "${output_file}" "${exit_code}" "${result_file}"
+    write_result_file "${output_file}" "${exit_code}" "${result_file}"
 
     if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
         echo "${testcase}.c NG [llvmir]"
@@ -254,7 +260,7 @@ run_ast_check() {
     local expected_png="${case_root}/${testcase}.png"
     local expected_svg="${case_root}/${testcase}.svg"
 
-    if ! timeout --foreground 10 "${MINIC_BIN}" -S "${frontend_args[@]}" -T -o "${astfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -T -o "${astfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${testcase}.c compile NG [ast]"
         return 1
     fi

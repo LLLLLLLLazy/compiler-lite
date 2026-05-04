@@ -3,9 +3,13 @@
 #include <list>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include "Module.h"
 #include "Value.h"
+
+class Instruction;
+struct ScratchValue;
 
 #define Instanceof(res, type, var) auto res = dynamic_cast<type>(var)
 
@@ -113,6 +117,12 @@ class ILocRiscV64 {
 
 	/// @brief 已计算好的函数栈帧大小
 	int frameSize = 0;
+
+	/// @brief 机器指令计数器（每次emit递增）
+	int machineInstCount = 0;
+
+	/// @brief IR指令→机器指令范围映射 [start, end)
+	std::unordered_map<Instruction *, std::pair<int, int>> instToMIRange;
 
 public:
 	/// @brief 构造函数
@@ -252,4 +262,19 @@ public:
 
 	/// @brief 删除无用的Label指令
 	void deleteUnusedLabel();
+
+	/// @brief 获取当前机器指令计数
+	int getMachineInstCount() const { return machineInstCount; }
+
+	/// @brief 记录IR指令对应的机器指令范围
+	/// @param inst IR指令
+	/// @param start 该IR指令翻译开始时的机器指令计数
+	void recordMIRange(Instruction * inst, int start);
+
+	/// @brief 获取IR指令→机器指令范围映射
+	const auto & getInstToMIRange() const { return instToMIRange; }
+
+	/// @brief 替换机器指令中的scratch寄存器编号
+	/// @param scratchValues scratch值列表（包含原始物理寄存器和新分配的物理寄存器）
+	void patchScratchRegs(const std::vector<ScratchValue> & scratchValues);
 };

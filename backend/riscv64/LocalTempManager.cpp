@@ -16,21 +16,22 @@ namespace {
 
 std::vector<int> buildScratchPool(const std::vector<int> & globalPool)
 {
-	const std::vector<int> preferred = {
-		5, 6, 7, 28, 29, 30, 31,       // t0-t6
-		10, 11, 12, 13, 14, 15, 16, 17, // a0-a7
-		9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, // s1-s11
-	};
+	// t3-t4 始终作为scratch寄存器，保证scratch可用性
+	const std::vector<int> reserved = {28, 29};
 
 	std::vector<int> result;
-	for (int reg : preferred) {
-		if (std::find(globalPool.begin(), globalPool.end(), reg) != globalPool.end()) {
+	for (int reg : reserved) {
+		result.push_back(reg);
+	}
+	// 全局池中的寄存器也参与scratch借用
+	for (int reg : globalPool) {
+		if (std::find(result.begin(), result.end(), reg) == result.end()) {
 			result.push_back(reg);
 		}
 	}
 
 	if (result.empty()) {
-		result = {RISCV64_TMP_REG_NO, 6, 7, 28, 29, 30, 31};
+		result = {RISCV64_TMP_REG_NO, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 28, 29, 30, 31};
 	}
 	return result;
 }
@@ -122,6 +123,43 @@ LocalTempManager::Lease LocalTempManager::borrowAfterUses(Instruction * inst, in
 	return Lease(this, borrowImpl(inst, excludeReg, true));
 }
 
+/// @brief 借用临时寄存器，排除一组指定的寄存器
+LocalTempManager::Lease LocalTempManager::borrowExcluding(
+	Instruction * inst, const std::set<int> & excludeRegs)
+{
+	const int instNum = currentInstNum(inst);
+
+	for (int reg : pool) {
+		if (excludeRegs.count(reg)) {
+			continue;
+		}
+		if (borrowed.find(reg) != borrowed.end()) {
+			continue;
+		}
+		if (inst == nullptr && isArgumentReg(reg)) {
+			continue;
+		}
+		if (instNum >= 0 && isLiveAllocatedReg(reg, instNum, false)) {
+			continue;
+		}
+
+		// 创建ScratchValue
+		ScratchValue sv;
+		sv.identity = new char;
+		sv.originalPhysReg = reg;
+		sv.borrowPos = iloc ? iloc->getMachineInstCount() : 0;
+		scratchValues.push_back(sv);
+		ScratchValue * svPtr = &scratchValues.back();
+
+		regToScratch[reg] = svPtr;
+		borrowed.insert(reg);
+		return Lease(this, reg);
+	}
+
+	std::fprintf(stderr, "LocalTempManager: 无可用的临时寄存器！\n");
+	std::abort();
+}
+
 /// @brief 临时寄存器借用的通用实现
 int LocalTempManager::borrowImpl(Instruction * inst, int excludeReg, bool afterUses)
 {
@@ -140,6 +178,16 @@ int LocalTempManager::borrowImpl(Instruction * inst, int excludeReg, bool afterU
 		if (instNum >= 0 && isLiveAllocatedReg(reg, instNum, afterUses)) {
 			continue;
 		}
+
+		// 创建ScratchValue
+		ScratchValue sv;
+		sv.identity = new char; // 唯一地址作为allocationMap的key
+		sv.originalPhysReg = reg;
+		sv.borrowPos = iloc ? iloc->getMachineInstCount() : 0;
+		scratchValues.push_back(sv);
+		ScratchValue * svPtr = &scratchValues.back();
+
+		regToScratch[reg] = svPtr;
 		borrowed.insert(reg);
 		return reg;
 	}
@@ -152,6 +200,13 @@ int LocalTempManager::borrowImpl(Instruction * inst, int excludeReg, bool afterU
 /// @param reg 物理寄存器编号
 void LocalTempManager::release(int reg)
 {
+	auto it = regToScratch.find(reg);
+	if (it != regToScratch.end()) {
+		ScratchValue * sv = it->second;
+		sv->releasePos = iloc ? iloc->getMachineInstCount() : 0;
+		sv->released = true;
+		regToScratch.erase(it);
+	}
 	borrowed.erase(reg);
 }
 

@@ -9,6 +9,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -17,8 +18,23 @@
 #include "ILocRiscV64.h"
 
 class Function;
+class ILocRiscV64;
 class Instruction;
 class Value;
+
+/// @brief Scratch虚拟寄存器，用于指令选择阶段的临时寄存器需求
+///
+/// 在指令选择过程中创建，后续由ScratchAllocator分配物理寄存器或溢出到栈。
+struct ScratchValue {
+	void * identity = nullptr;      ///< 唯一标识，用作allocationMap的key
+	int originalPhysReg = -1;       ///< borrow时分配的原始物理寄存器编号
+	int physicalReg = -1;           ///< ScratchAllocator分配的物理寄存器, -1=未分配
+	bool spilled = false;           ///< 是否溢出到栈
+	int64_t spillSlot = 0;          ///< 溢出栈偏移
+	int borrowPos = -1;             ///< 借用时的机器指令位置
+	int releasePos = -1;            ///< 归还时的机器指令位置
+	bool released = false;          ///< 是否已归还
+};
 
 /// @brief 动态临时寄存器管理器
 ///
@@ -77,9 +93,22 @@ public:
 	/// @return 寄存器租约
 	Lease borrowAfterUses(Instruction * inst, int excludeReg = -1);
 
+	/// @brief 借用临时寄存器，排除一组指定的寄存器
+	/// @param inst 当前正在翻译的IR指令（可为nullptr）
+	/// @param excludeRegs 需要排除的寄存器集合
+	/// @return 寄存器租约
+	Lease borrowExcluding(Instruction * inst, const std::set<int> & excludeRegs);
+
 	/// @brief 检查所有借出的寄存器是否已全部归还
 	/// @return 是否全部归还
 	bool allReleased() const { return borrowed.empty(); }
+
+	/// @brief 设置ILoc引用（用于获取机器指令计数）
+	void setILoc(ILocRiscV64 * _iloc) { iloc = _iloc; }
+
+	/// @brief 获取所有创建的scratch值
+	std::vector<ScratchValue> & getScratchValues() { return scratchValues; }
+	const std::vector<ScratchValue> & getScratchValues() const { return scratchValues; }
 
 private:
 	/// @brief 查询当前指令编号
@@ -118,4 +147,13 @@ private:
 
 	/// @brief 每个物理寄存器的活跃区间反向索引：reg → [{start, end}, ...] 按start排序
 	std::unordered_map<int, std::vector<std::pair<int, int>>> regIntervals;
+
+	/// @brief ILoc引用（用于获取机器指令计数）
+	ILocRiscV64 * iloc = nullptr;
+
+	/// @brief 所有创建的scratch值
+	std::vector<ScratchValue> scratchValues;
+
+	/// @brief 物理寄存器→ScratchValue映射（当前借出的）
+	std::unordered_map<int, ScratchValue *> regToScratch;
 };

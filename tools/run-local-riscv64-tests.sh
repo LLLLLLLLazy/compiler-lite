@@ -127,14 +127,18 @@ infer_suite_from_testcase() {
 }
 
 write_result_file() {
-	local output="$1"
+	local output_file="$1"
 	local exit_code="$2"
 	local result_file="$3"
 
-	if [[ -n "${output}" ]]; then
-		printf '%s' "${output}" > "${result_file}"
-		if [[ "${output}" != *$'\n' ]]; then
-			printf '\n' >> "${result_file}"
+	if [[ -f "${output_file}" ]]; then
+		cp "${output_file}" "${result_file}"
+		if [[ -s "${result_file}" ]]; then
+			local last_byte
+			last_byte=$(tail -c 1 "${result_file}" | od -An -t u1 | tr -d '[:space:]')
+			if [[ "${last_byte}" != "10" ]]; then
+				printf '\n' >> "${result_file}"
+			fi
 		fi
 	else
 		: > "${result_file}"
@@ -151,8 +155,8 @@ run_riscv64_check() {
 	local asmfile="${TMP_DIR}/${testcase}.rv64.s"
 	local objfile="${TMP_DIR}/${testcase}.rv64.o"
 	local exe_file="${TMP_DIR}/${testcase}.rv64"
+	local output_file="${TMP_DIR}/${testcase}.rv64.output"
 	local result_file="${TMP_DIR}/${testcase}.rv64.result"
-	local output=""
 	local exit_code=0
 	local t0 t1 t_compile=0 t_assemble=0 t_link=0 t_run=0
 
@@ -202,16 +206,16 @@ run_riscv64_check() {
 	# run
 	t0=$(date +%s%N)
 	if [[ -f "${infile}" ]]; then
-		output="$(timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" 2>&1)"
+		timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2>&1
 		exit_code=$?
 	else
-		output="$(timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" 2>&1)"
+		timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" > "${output_file}" 2>&1
 		exit_code=$?
 	fi
 	t1=$(date +%s%N)
 	t_run=$(( (t1 - t0) / 1000000 ))
 
-	write_result_file "${output}" "${exit_code}" "${result_file}"
+	write_result_file "${output_file}" "${exit_code}" "${result_file}"
 
 	if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
 		echo "${testcase}.c NG [riscv64]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"

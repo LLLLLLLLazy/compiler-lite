@@ -15,6 +15,7 @@
 
 #include "ArrayType.h"
 #include "BasicBlock.h"
+#include "ArrayType.h"
 #include "Function.h"
 #include "GlobalVariable.h"
 #include "Instruction.h"
@@ -33,36 +34,87 @@ std::string formatFloatGlobalInit(float value)
     return oss.str();
 }
 
-std::string formatArrayGlobalInit(Type * type, GlobalVariable * global, std::size_t & cursor)
+std::string formatIntArrayInit(
+    Type * type, const std::vector<int32_t> & values, std::size_t & cursor, bool includeType)
 {
-    if (auto * arrayType = dynamic_cast<ArrayType *>(type)) {
-        std::string text = "[";
-        Type * elemType = arrayType->getElementType();
-        for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
-            if (i != 0) {
-                text += ", ";
-            }
-            text += elemType->toString() + " " + formatArrayGlobalInit(elemType, global, cursor);
+    auto * arrayType = dynamic_cast<ArrayType *>(type);
+    if (arrayType == nullptr) {
+        int32_t value = 0;
+        if (cursor < values.size()) {
+            value = values[cursor];
         }
-        text += "]";
-        return text;
+        ++cursor;
+        return type->toString() + " " + std::to_string(value);
     }
 
-    if (type->isFloatType()) {
-        return formatFloatGlobalInit(global->getInitFloatArrayValues()[cursor++]);
+    std::vector<std::string> elems;
+    Type * elemType = arrayType->getElementType();
+    elems.reserve(arrayType->getNumElements());
+    for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
+        elems.push_back(formatIntArrayInit(elemType, values, cursor, true));
     }
 
-    return std::to_string(global->getInitIntArrayValues()[cursor++]);
+    std::ostringstream oss;
+    if (includeType) {
+        oss << type->toString() << " ";
+    }
+    oss << "[";
+    for (std::size_t i = 0; i < elems.size(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << elems[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::string formatFloatArrayInit(
+    Type * type, const std::vector<float> & values, std::size_t & cursor, bool includeType)
+{
+    auto * arrayType = dynamic_cast<ArrayType *>(type);
+    if (arrayType == nullptr) {
+        float value = 0.0f;
+        if (cursor < values.size()) {
+            value = values[cursor];
+        }
+        ++cursor;
+        return type->toString() + " " + formatFloatGlobalInit(value);
+    }
+
+    std::vector<std::string> elems;
+    Type * elemType = arrayType->getElementType();
+    elems.reserve(arrayType->getNumElements());
+    for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
+        elems.push_back(formatFloatArrayInit(elemType, values, cursor, true));
+    }
+
+    std::ostringstream oss;
+    if (includeType) {
+        oss << type->toString() << " ";
+    }
+    oss << "[";
+    for (std::size_t i = 0; i < elems.size(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << elems[i];
+    }
+    oss << "]";
+    return oss.str();
 }
 
 std::string formatGlobalInit(GlobalVariable * global)
 {
     Type * valueType = global->getValueType();
     if (valueType->isArrayType()) {
-        if (global->getInitKind() == GlobalVariable::InitKind::FloatArray ||
-            global->getInitKind() == GlobalVariable::InitKind::IntArray) {
+        if (global->getInitKind() == GlobalVariable::InitKind::IntArray) {
             std::size_t cursor = 0;
-            return formatArrayGlobalInit(valueType, global, cursor);
+            return formatIntArrayInit(valueType, global->getInitIntArray(), cursor, false);
+        }
+        if (global->getInitKind() == GlobalVariable::InitKind::FloatArray) {
+            std::size_t cursor = 0;
+            return formatFloatArrayInit(valueType, global->getInitFloatArray(), cursor, false);
         }
         return "zeroinitializer";
     }

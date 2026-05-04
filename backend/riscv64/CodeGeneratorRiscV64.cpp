@@ -24,7 +24,9 @@
 #include "ILocRiscV64.h"
 #include "InstSelectorRiscV64.h"
 #include "Instruction.h"
+#include "LocalTempManager.h"
 #include "PlatformRiscV64.h"
+#include "ScratchAllocator.h"
 #include "Value.h"
 
 namespace {
@@ -211,7 +213,7 @@ void CodeGeneratorRiscV64::genDataSection()
 /// @brief 生成函数的代码段
 /// @param func 待生成的函数
 ///
-/// 流程：寄存器分配 -> 指令选择 -> 删除无用标签 -> 输出汇编
+/// 流程：寄存器分配 -> 指令选择(含scratch vreg创建) -> scratch分配 -> patchup -> 输出汇编
 void CodeGeneratorRiscV64::genCodeSection(Function * func)
 {
 	// 执行寄存器分配
@@ -223,9 +225,51 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	iloc.setFrameSize(greedyAllocator.getFrameSize());
 
 	// 执行指令选择，将IR翻译为RISC-V64汇编指令
+	// 指令选择过程中创建ScratchValue（虚拟寄存器）
 	InstSelectorRiscV64 instSelector(func, iloc, greedyAllocator);
 	instSelector.setShowLinearIR(showLinearIR);
 	instSelector.run();
+
+	// Scratch寄存器分配：为ScratchValue分配物理寄存器
+	auto & scratchValues = instSelector.getScratchValues();
+	if (!scratchValues.empty()) {
+		ScratchAllocator scratchAlloc;
+		scratchAlloc.allocate(
+			scratchValues,
+			greedyAllocator.getAllocationMap(),
+			greedyAllocator.getValueLiveRanges(),
+			greedyAllocator.getInstNumbering(),
+			iloc.getInstToMIRange(),
+			greedyAllocator.getAvailableRegs());
+
+		// 将scratch分配结果写入allocationMap，并为spilled scratch分配栈槽
+		auto & allocMap = greedyAllocator.getAllocationMap();
+		for (auto & sv : scratchValues) {
+			if (!sv.released) {
+				continue;
+			}
+			auto * key = reinterpret_cast<Value *>(sv.identity);
+			if (sv.spilled) {
+				int slotSize = 8;
+				int newFrameSize = greedyAllocator.getFrameSize() + slotSize;
+				greedyAllocator.setFrameSize(newFrameSize);
+				sv.spillSlot = -(kSavedFrameBytes + newFrameSize);
+				RegAllocInfo info;
+				info.setStack(RISCV64_FP_REG_NO, sv.spillSlot);
+				allocMap[key] = info;
+			} else if (sv.physicalReg >= 0) {
+				RegAllocInfo info;
+				info.setReg(sv.physicalReg);
+				allocMap[key] = info;
+			}
+		}
+
+		// 更新栈帧大小后需要重新设置
+		iloc.setFrameSize(greedyAllocator.getFrameSize());
+
+		// Patchup：替换机器指令中的scratch寄存器编号
+		iloc.patchScratchRegs(scratchValues);
+	}
 
 	// 删除未被引用的基本块标签
 	iloc.deleteUnusedLabel();
