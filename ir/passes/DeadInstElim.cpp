@@ -24,41 +24,7 @@ bool isTriviallyDead(Instruction * inst)
         return false;
     }
 
-    // 这里仅删除确定无副作用的纯值指令
-    // load/call/store/branch/ret 这类涉及内存或控制流的指令，先保守保留
-    switch (inst->getOp()) {
-        case IRInstOperator::IRINST_OP_ALLOCA:
-        case IRInstOperator::IRINST_OP_PHI:
-        case IRInstOperator::IRINST_OP_ZEXT:
-        case IRInstOperator::IRINST_OP_SITOFP:
-        case IRInstOperator::IRINST_OP_FPTOSI:
-        case IRInstOperator::IRINST_OP_COPY:
-        case IRInstOperator::IRINST_OP_ADD_I:
-        case IRInstOperator::IRINST_OP_SUB_I:
-        case IRInstOperator::IRINST_OP_MUL_I:
-        case IRInstOperator::IRINST_OP_DIV_I:
-        case IRInstOperator::IRINST_OP_MOD_I:
-        case IRInstOperator::IRINST_OP_LT_I:
-        case IRInstOperator::IRINST_OP_GT_I:
-        case IRInstOperator::IRINST_OP_LE_I:
-        case IRInstOperator::IRINST_OP_GE_I:
-        case IRInstOperator::IRINST_OP_EQ_I:
-        case IRInstOperator::IRINST_OP_NE_I:
-        case IRInstOperator::IRINST_OP_ADD_F:
-        case IRInstOperator::IRINST_OP_SUB_F:
-        case IRInstOperator::IRINST_OP_MUL_F:
-        case IRInstOperator::IRINST_OP_DIV_F:
-        case IRInstOperator::IRINST_OP_LT_F:
-        case IRInstOperator::IRINST_OP_GT_F:
-        case IRInstOperator::IRINST_OP_LE_F:
-        case IRInstOperator::IRINST_OP_GE_F:
-        case IRInstOperator::IRINST_OP_EQ_F:
-        case IRInstOperator::IRINST_OP_NE_F:
-            return true;
-
-        default:
-            return false;
-    }
+    return !inst->mayReadMemory() && !inst->mayHaveSideEffects();
 }
 
 /// @brief 从所有基本块中清扫已标记为 dead 的指令

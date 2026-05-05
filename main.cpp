@@ -32,6 +32,7 @@
 #include "ConstProp.h"
 #include "DeadInstElim.h"
 #include "LICM.h"
+#include "LocalMemoryOpt.h"
 #include "LoopInfo.h"
 #include "Mem2Reg.h"
 #include "PhiLowering.h"
@@ -386,6 +387,13 @@ static int compile(std::string inputFile, std::string outputFile)
 			int32_t optRounds = 0;
 			do {
 				changed = false;
+				for (auto * func : module->getFunctionList()) {
+					if (!func->isBuiltin() && !func->getBlocks().empty()) {
+						LocalMemoryOpt localMemoryOpt(func);
+						changed = localMemoryOpt.run() || changed;
+					}
+				}
+
 				for (auto * func : module->getFunctionList()) {
 					if (!func->isBuiltin() && !func->getBlocks().empty()) {
 						LICM licm(func);

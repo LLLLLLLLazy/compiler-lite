@@ -197,12 +197,16 @@ set(IR_SRCS
 	ir/analysis/DominatorTree.cpp
 	ir/analysis/DominanceFrontier.h
 	ir/analysis/DominanceFrontier.cpp
+	ir/analysis/MemoryLocation.h
+	ir/analysis/MemoryLocation.cpp
 	ir/passes/ConstProp.h
 	ir/passes/ConstProp.cpp
 	ir/passes/CFGSimplify.h
 	ir/passes/CFGSimplify.cpp
 	ir/passes/DeadInstElim.h
 	ir/passes/DeadInstElim.cpp
+	ir/passes/LocalMemoryOpt.h
+	ir/passes/LocalMemoryOpt.cpp
 	ir/passes/UnreachableBlockElim.h
 	ir/passes/UnreachableBlockElim.cpp
 	ir/analysis/LoopInfo.h

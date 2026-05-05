@@ -81,6 +81,18 @@ public:
     /// @brief 判断指令是否会产生结果值
     bool hasResultValue();
 
+    /// @brief 判断指令是否可能读取内存
+    bool mayReadMemory() const;
+
+    /// @brief 判断指令是否可能写入内存
+    bool mayWriteMemory() const;
+
+    /// @brief 判断指令是否具有副作用
+    bool mayHaveSideEffects() const;
+
+    /// @brief 判断指令是否可被安全推测执行
+    bool isSpeculatable() const;
+
     /// @brief 判断指令是否为基本块终结指令
     bool isTerminator() const;
 
