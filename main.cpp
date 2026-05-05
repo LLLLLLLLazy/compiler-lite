@@ -21,6 +21,7 @@
 #include "Common.h"
 #include "AST.h"
 #include "Antlr4Executor.h"
+#include "ArrayScalarize.h"
 #include "FrontEndExecutor.h"
 #include "Graph.h"
 #include "IRGenerator.h"
@@ -374,6 +375,14 @@ static int compile(std::string inputFile, std::string outputFile)
 		}
 
 		if (gOptLevel > 0) {
+			// 将局部数组的常量下标元素拆成独立标量槽位
+			for (auto * func : module->getFunctionList()) {
+				if (!func->isBuiltin() && !func->getBlocks().empty()) {
+					ArrayScalarize arrayScalarize(func);
+					arrayScalarize.run();
+				}
+			}
+
 			// 运行 mem2reg，将可提升的 alloca/load/store 转为 SSA 形式
 			for (auto * func : module->getFunctionList()) {
 				if (!func->isBuiltin() && !func->getBlocks().empty()) {

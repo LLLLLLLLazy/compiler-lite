@@ -199,6 +199,8 @@ set(IR_SRCS
 	ir/analysis/DominanceFrontier.cpp
 	ir/analysis/MemoryLocation.h
 	ir/analysis/MemoryLocation.cpp
+	ir/passes/ArrayScalarize.h
+	ir/passes/ArrayScalarize.cpp
 	ir/passes/ConstProp.h
 	ir/passes/ConstProp.cpp
 	ir/passes/CFGSimplify.h
