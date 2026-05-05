@@ -32,6 +32,7 @@
 #include "CFGSimplify.h"
 #include "ConstProp.h"
 #include "DeadInstElim.h"
+#include "InstCombine.h"
 #include "LICM.h"
 #include "LocalMemoryOpt.h"
 #include "LoopInfo.h"
@@ -407,6 +408,13 @@ static int compile(std::string inputFile, std::string outputFile)
 					if (!func->isBuiltin() && !func->getBlocks().empty()) {
 						LICM licm(func);
 						changed = licm.run() || changed;
+					}
+				}
+
+				for (auto * func : module->getFunctionList()) {
+					if (!func->isBuiltin() && !func->getBlocks().empty()) {
+						InstCombine instCombine(func, module);
+						changed = instCombine.run() || changed;
 					}
 				}
 

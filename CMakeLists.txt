@@ -203,6 +203,8 @@ set(IR_SRCS
 	ir/passes/ArrayScalarize.cpp
 	ir/passes/ConstProp.h
 	ir/passes/ConstProp.cpp
+	ir/passes/InstCombine.h
+	ir/passes/InstCombine.cpp
 	ir/passes/CFGSimplify.h
 	ir/passes/CFGSimplify.cpp
 	ir/passes/DeadInstElim.h
