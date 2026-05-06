@@ -43,5 +43,6 @@ public:
     }
 
 protected:
+    // 全局值的对齐方式，默认为4字节对齐
     int32_t alignment = 4;
 };

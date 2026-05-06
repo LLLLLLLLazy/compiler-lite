@@ -40,6 +40,17 @@ namespace {
 
 using ValueSet = std::unordered_set<Value *>;
 
+struct ValueLocation {
+	int pos;
+	BasicBlock * block;
+};
+
+struct LoopRange {
+	const std::unordered_set<BasicBlock *> * body;
+	int start;
+	int end;
+};
+
 std::vector<Value *> instructionUses(Instruction * inst)
 {
 	std::vector<Value *> uses;
@@ -190,18 +201,12 @@ LiveInterval * LiveIntervalAnalysis::getOrCreateInterval(Value * val)
 /// 4. 对于每条指令：
 ///    - 源操作数为使用点，更新对应活跃区间的使用位置
 ///    - 结果值为定义点，更新对应活跃区间的定义位置
-/// 5. 基于CFG求解基本块live-in/live-out，为跨回边和跨块copy补充存活段
+/// 5. 基于CFG live-in/live-out、SSA def-use关系和LoopInfo补充跨块、跨回边存活段
 ///
 void LiveIntervalAnalysis::computeLiveIntervals()
 {
 	nextInstNum = 0;
-	std::unordered_map<BasicBlock *, int> blockStartNums;
-	std::unordered_map<BasicBlock *, int> blockEndNums;
 	auto & blocks = func->getBlocks();
-	std::unordered_map<BasicBlock *, int> blockOrder;
-	for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
-		blockOrder[blocks[i]] = i;
-	}
 
 	std::unordered_map<BasicBlock *, int> blockFirstInst;
 	std::unordered_map<BasicBlock *, int> blockLastInst;
@@ -209,20 +214,37 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 	std::unordered_map<BasicBlock *, ValueSet> blockDef;
 	std::unordered_map<BasicBlock *, ValueSet> liveIn;
 	std::unordered_map<BasicBlock *, ValueSet> liveOut;
+	std::unordered_map<Value *, std::vector<ValueLocation>> valueDefs;
+	std::unordered_map<Value *, std::vector<ValueLocation>> valueUses;
 
-	// 处理函数形参：形参在函数入口处定义，活跃区间起点为0
+	auto recordDef = [&](Value * value, BasicBlock * bb, int instNum) {
+		if (!needsInterval(value)) {
+			return;
+		}
+
+		valueDefs[value].push_back({instNum, bb});
+		getOrCreateInterval(value)->addSegment(instNum, instNum + 1);
+	};
+
+	auto recordUse = [&](Value * value, BasicBlock * bb, int instNum) {
+		if (!needsInterval(value)) {
+			return;
+		}
+
+		valueUses[value].push_back({instNum, bb});
+		getOrCreateInterval(value)->addUsePosition(instNum);
+	};
+
+	// 处理函数形参：形参在CFG入口前隐式定义，活跃区间起点为0
 	auto & params = func->getParams();
 	for (auto * param : params) {
 		if (needsInterval(param)) {
-			LiveInterval * interval = getOrCreateInterval(param);
-			// 形参在指令编号0处定义
-			interval->addSegment(0, 1);
-			interval->addUsePosition(0);
+			recordDef(param, nullptr, 0);
 		}
 	}
 
 	// 按基本块顺序遍历指令
-	for (auto * bb : func->getBlocks()) {
+	for (auto * bb : blocks) {
 		for (auto * inst : bb->getInstructions()) {
 			int instNum = nextInstNum++;
 			instNumbering[inst] = instNum;
@@ -233,32 +255,25 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 			blockLastInst[bb] = instNum;
 
 			for (Value * usedValue : instructionUses(inst)) {
-				if (!needsInterval(usedValue)) {
-					continue;
-				}
-				getOrCreateInterval(usedValue)->addUsePosition(instNum);
-				if (blockDef[bb].find(usedValue) == blockDef[bb].end()) {
+				recordUse(usedValue, bb, instNum);
+				if (needsInterval(usedValue) && blockDef[bb].find(usedValue) == blockDef[bb].end()) {
 					blockUse[bb].insert(usedValue);
 				}
 			}
 
 			if (Value * definedValue = instructionDef(inst); needsInterval(definedValue)) {
-				LiveInterval * interval = getOrCreateInterval(definedValue);
-				// 定义点：从当前指令编号开始
-				// 添加一个从定义点开始的子段，结束点暂时设为定义点+1
-				// 后续通过使用点来扩展区间
-				interval->addSegment(instNum, instNum + 1);
+				recordDef(definedValue, bb, instNum);
 				blockDef[bb].insert(definedValue);
 			}
 		}
 	}
 
-	// 基于CFG求解基本块级live-in/live-out集合，覆盖循环回边与PhiLowering
-	// 插入的跨前驱copy。后续区间扩展使用这些集合保守地添加整块存活段。
+	// CFG级活跃性补充了单纯def-use线性区间看不到的路径关系。
+	// 这对PhiLowering生成的跨前驱copy尤其重要：某个copy的目标寄存器
+	// 不能覆盖同一并行copy组里后续仍要读取的旧值。
 	bool changed = true;
 	while (changed) {
 		changed = false;
-		auto & blocks = func->getBlocks();
 		for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
 			BasicBlock * bb = *it;
 			ValueSet newOut;
@@ -284,124 +299,81 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 		}
 	}
 
-	for (auto * bb : func->getBlocks()) {
+	for (auto * bb : blocks) {
 		auto firstIt = blockFirstInst.find(bb);
 		auto lastIt = blockLastInst.find(bb);
 		if (firstIt == blockFirstInst.end() || lastIt == blockLastInst.end()) {
 			continue;
 		}
 
-		const int blockStart = firstIt->second;
-		const int blockEnd = lastIt->second + 1;
 		ValueSet blockLive = liveIn[bb];
 		blockLive.insert(liveOut[bb].begin(), liveOut[bb].end());
 		for (Value * value : blockLive) {
 			if (needsInterval(value)) {
-				getOrCreateInterval(value)->addSegment(blockStart, blockEnd);
+				getOrCreateInterval(value)->addSegment(firstIt->second, lastIt->second + 1);
 			}
-		}
-
-		if (nextInstNum > blockStart) {
-			blockStartNums[bb] = blockStart;
-			blockEndNums[bb] = nextInstNum;
 		}
 	}
 
-	// 第二遍：根据使用点扩展活跃区间
-	// 对于每个活跃区间，使用点已经记录，现在需要构建完整的存活子段
-	// 活跃区间从定义点延伸到最后一个使用点
+	// SSA值通常只有一个定义，可直接从定义点延伸到各使用点。
+	// PhiLowering会为同一个phi结果在不同前驱块插入显式copy，形成多个定义；
+	// 这种值使用一个保守连续区间覆盖所有copy定义和后续使用。
 	for (auto * interval : intervals) {
-		const auto & usePositions = interval->getUsePositions();
+		Value * value = interval->getVReg();
+		auto defsIt = valueDefs.find(value);
+		auto usesIt = valueUses.find(value);
+		const auto * uses = usesIt != valueUses.end() ? &usesIt->second : nullptr;
 
-		if (usePositions.empty()) {
-			// 没有使用点，区间仅包含定义点（已在上面添加）
-			continue;
-		}
+		if (defsIt == valueDefs.end() || defsIt->second.empty()) {
+			if (uses == nullptr || uses->empty()) {
+				continue;
+			}
 
-		// 找到最后一个使用点
-		int lastUse = *std::max_element(usePositions.begin(), usePositions.end());
-
-		// 找到定义点（区间的起始位置）
-		int defPoint = interval->getStart();
-
-		// 如果定义点有效，扩展区间到覆盖最后一个使用点
-		if (defPoint < std::numeric_limits<int>::max() && lastUse >= defPoint) {
-			// 添加从定义点到最后一个使用点+1的子段
-			// addSegment会自动与已有子段合并
-			interval->addSegment(defPoint, lastUse + 1);
-		} else if (defPoint >= std::numeric_limits<int>::max()) {
-			// 定义点未设置（如形参，其定义点为0但通过addSegment(0,1)已设置）
-			// 对于形参，start已被设为0，需要从0延伸到最后使用点
+			int lastUse = 0;
+			for (const auto & use : *uses) {
+				lastUse = std::max(lastUse, use.pos);
+			}
 			interval->addSegment(0, lastUse + 1);
-		}
-	}
-	// 线性编号本身不表达回边迭代。对所有“在循环内使用、且定义发生在循环外”的值，
-	// 保守地把活跃区间延长到循环头之后，避免循环不变量在一次迭代后被错误复用寄存器。
-	for (auto * bb : blocks) {
-		auto bbStartIt = blockStartNums.find(bb);
-		auto bbEndIt = blockEndNums.find(bb);
-		if (bbStartIt == blockStartNums.end() || bbEndIt == blockEndNums.end()) {
 			continue;
 		}
 
-		for (auto * succ : bb->getSuccessors()) {
-			auto succStartIt = blockStartNums.find(succ);
-			auto succOrderIt = blockOrder.find(succ);
-			auto bbOrderIt = blockOrder.find(bb);
-			if (succStartIt == blockStartNums.end() || succOrderIt == blockOrder.end() ||
-				bbOrderIt == blockOrder.end() || succOrderIt->second > bbOrderIt->second) {
+		const auto & defs = defsIt->second;
+		if (defs.size() == 1) {
+			if (uses == nullptr) {
 				continue;
 			}
 
-			const int loopStart = succStartIt->second;
-			for (int idx = succOrderIt->second; idx <= bbOrderIt->second; ++idx) {
-				BasicBlock * loopBB = blocks[idx];
-				for (auto * inst : loopBB->getInstructions()) {
-					for (auto * operand : inst->getOperandsValue()) {
-						if (!needsInterval(operand)) {
-							continue;
-						}
-
-						LiveInterval * interval = getOrCreateInterval(operand);
-						if (interval->getStart() < loopStart) {
-							interval->addSegment(loopStart, nextInstNum);
-						}
-					}
-				}
+			const int defPos = defs.front().pos;
+			for (const auto & use : *uses) {
+				interval->addSegment(std::min(defPos, use.pos), std::max(defPos, use.pos) + 1);
 			}
+			continue;
+		}
+
+		int firstPos = std::numeric_limits<int>::max();
+		int lastPos = std::numeric_limits<int>::min();
+		for (const auto & def : defs) {
+			firstPos = std::min(firstPos, def.pos);
+			lastPos = std::max(lastPos, def.pos);
+		}
+		if (uses != nullptr) {
+			for (const auto & use : *uses) {
+				firstPos = std::min(firstPos, use.pos);
+				lastPos = std::max(lastPos, use.pos);
+			}
+		}
+		if (firstPos != std::numeric_limits<int>::max() && lastPos != std::numeric_limits<int>::min()) {
+			interval->addSegment(firstPos, lastPos + 1);
 		}
 	}
 
-	// 第三遍：循环感知的活跃区间扩展
-	// Mem2Reg 会将 alloca 提升为 SSA 值直接引用。对于来自循环外部的值
-	// （函数参数等），其 use 仅出现在循环头，但对应寄存器可能在循环体内
-	// 被 GEP 等操作覆盖。这里将这些"循环外定义、循环头使用"的值扩展到
-	// 循环体末尾，确保寄存器在循环内不会被错误复用。
-	// 循环内定义的值无需扩展——它们的定义点本身就在循环内，寄存器分配
-	// 已能正确处理。
+	// 对跨越自然循环的值补充整段循环体。这里覆盖两类常见形态：
+	// 1. 循环前定义，循环体内或循环退出后使用，必须穿过整个循环；
+	// 2. 循环内定义，循环外使用，必须活到循环出口。
+	// 这直接用LoopInfo覆盖回边，不再通过基本块live-in/live-out求不动点。
 	if (loopInfo != nullptr) {
-		// 构建每个基本块中的指令编号范围
-		std::unordered_map<BasicBlock *, int> bbFirstInst;
-		std::unordered_map<BasicBlock *, int> bbLastInst;
-		for (auto & [inst, num] : instNumbering) {
-			BasicBlock * bb = inst->getParentBlock();
-			if (bb == nullptr) {
-				continue;
-			}
-			auto it = bbFirstInst.find(bb);
-			if (it == bbFirstInst.end()) {
-				bbFirstInst[bb] = num;
-				bbLastInst[bb] = num;
-			} else {
-				bbFirstInst[bb] = std::min(bbFirstInst[bb], num);
-				bbLastInst[bb] = std::max(bbLastInst[bb], num);
-			}
-		}
-
-		// 对每个循环，计算循环体块的编号范围
-		std::unordered_map<BasicBlock *, int> loopBodyMinInst;
-		std::unordered_map<BasicBlock *, int> loopBodyMaxInst;
-		for (auto * bb : func->getBlocks()) {
+		std::vector<LoopRange> loopRanges;
+		for (auto * bb : blocks) {
 			if (!loopInfo->isLoopHeader(bb)) {
 				continue;
 			}
@@ -410,52 +382,63 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 				continue;
 			}
 			int minInst = std::numeric_limits<int>::max();
-			int maxInst = 0;
+			int maxInst = std::numeric_limits<int>::min();
 			for (auto * bodyBB : *body) {
-				auto itFirst = bbFirstInst.find(bodyBB);
-				auto itLast = bbLastInst.find(bodyBB);
-				if (itFirst != bbFirstInst.end()) {
+				auto itFirst = blockFirstInst.find(bodyBB);
+				auto itLast = blockLastInst.find(bodyBB);
+				if (itFirst != blockFirstInst.end()) {
 					minInst = std::min(minInst, itFirst->second);
 				}
-				if (itLast != bbLastInst.end()) {
+				if (itLast != blockLastInst.end()) {
 					maxInst = std::max(maxInst, itLast->second);
 				}
 			}
-			loopBodyMinInst[bb] = minInst;
-			loopBodyMaxInst[bb] = maxInst;
+			if (minInst == std::numeric_limits<int>::max() || maxInst == std::numeric_limits<int>::min()) {
+				continue;
+			}
+			loopRanges.push_back({body, minInst, maxInst + 1});
 		}
 
-		// 扩展循环头中使用的、在循环外定义的值
 		for (auto * interval : intervals) {
-			int defPoint = interval->getStart();
-			if (defPoint >= std::numeric_limits<int>::max()) {
-				defPoint = 0; // 形参等隐式定义在0处
+			Value * value = interval->getVReg();
+			auto defsIt = valueDefs.find(value);
+			auto usesIt = valueUses.find(value);
+			if (usesIt == valueUses.end() || usesIt->second.empty()) {
+				continue;
 			}
 
-			const auto & usePositions = interval->getUsePositions();
-			for (int usePos : usePositions) {
-				BasicBlock * useBB = nullptr;
-				for (auto & [inst, num] : instNumbering) {
-					if (num == usePos) {
-						useBB = inst->getParentBlock();
-						break;
+			for (const auto & loop : loopRanges) {
+				bool usedInLoop = false;
+				bool usedOutsideLoop = false;
+				bool usedAtOrAfterLoop = false;
+				for (const auto & use : usesIt->second) {
+					if (use.block != nullptr && loop.body->find(use.block) != loop.body->end()) {
+						usedInLoop = true;
+					} else {
+						usedOutsideLoop = true;
+					}
+					if (use.pos >= loop.start) {
+						usedAtOrAfterLoop = true;
 					}
 				}
-				if (useBB == nullptr || !loopInfo->isLoopHeader(useBB)) {
-					continue;
+
+				bool hasDefBeforeLoop = defsIt == valueDefs.end();
+				bool hasDefInsideLoop = false;
+				if (defsIt != valueDefs.end()) {
+					for (const auto & def : defsIt->second) {
+						if (def.block == nullptr || def.pos < loop.start) {
+							hasDefBeforeLoop = true;
+						}
+						if (def.block != nullptr && loop.body->find(def.block) != loop.body->end()) {
+							hasDefInsideLoop = true;
+						}
+					}
 				}
 
-				int bodyMin = loopBodyMinInst[useBB];
-				// 仅当值定义在循环体外部时，才需要扩展到循环体末尾
-				if (defPoint >= bodyMin) {
-					continue; // 值在循环体内定义，寄存器分配可正确处理
+				if ((hasDefBeforeLoop && (usedInLoop || usedAtOrAfterLoop)) ||
+					(hasDefInsideLoop && usedOutsideLoop)) {
+					interval->addSegment(loop.start, loop.end);
 				}
-
-				int maxInst = loopBodyMaxInst[useBB];
-				if (maxInst > interval->getEnd()) {
-					interval->addSegment(defPoint, maxInst + 1);
-				}
-				break;
 			}
 		}
 	}

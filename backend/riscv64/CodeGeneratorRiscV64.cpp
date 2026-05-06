@@ -152,7 +152,7 @@ void CodeGeneratorRiscV64::genHeader()
 void CodeGeneratorRiscV64::genDataSection()
 {
 	std::fprintf(fp, ".text\n");
-
+	// 输出全局变量定义
 	bool emittedDataSection = false;
 	for (auto * var: module->getGlobalVariables()) {
 		// BSS段变量使用.comm伪指令
@@ -170,6 +170,7 @@ void CodeGeneratorRiscV64::genDataSection()
 		std::fprintf(fp, ".size %s, %d\n", var->getName().c_str(), var->getValueType()->getSize());
 		std::fprintf(fp, "%s:\n", var->getName().c_str());
 		if (var->getInitKind() == GlobalVariable::InitKind::Float) {
+			// 在整数寄存器中存储浮点数的IEEE 754位模式
 			float fval = var->getInitFloatValue();
 			std::uint32_t bits = 0;
 			std::memcpy(&bits, &fval, sizeof(bits));

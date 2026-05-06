@@ -41,17 +41,17 @@ void LoopInfo::discoverLoop(BasicBlock * header, BasicBlock * backEdgeSrc)
 {
     // 同一个 header 可能对应多条回边，需要把各回边发现的 body 合并起来
     Loop * loop = nullptr;
-    for (auto & existing : loops) {
-        if (existing.header == header) {
-            loop = &existing;
+    for (auto & existingLoop : loops) {
+        if (existingLoop.header == header) {
+            loop = &existingLoop;
             break;
         }
     }
 
     if (loop == nullptr) {
+        loopHeaders.insert(header);
         loops.push_back({header, {header}});
         loop = &loops.back();
-        loopHeaders.insert(header);
     }
 
     // 从回边源出发，反向遍历 CFG，收集所有可到达 header 的节点（不经过 header）
