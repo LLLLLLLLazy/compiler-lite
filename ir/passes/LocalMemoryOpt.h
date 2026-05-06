@@ -1,11 +1,11 @@
 ///
 /// @file LocalMemoryOpt.h
-/// @brief 单基本块局部内存访问优化 pass
+/// @brief 局部内存访问优化 pass
 ///
 /// 仅对可规范化为非逃逸局部对象槽位的 load/store 做保守优化：
 ///   1. 同址 store-to-load forwarding
 ///   2. 冗余 load 消除
-///   3. 局部 dead store elimination
+///   3. 精确槽位的 dead store elimination
 ///
 
 #pragma once
