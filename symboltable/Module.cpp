@@ -36,6 +36,8 @@ Module::Module(std::string _name) : name(std::move(_name))
     (void) newFunction("putfloat", VoidType::getType(), {new FormalParam{floatType, ""}}, true);
     (void) newFunction("getfarray", IntegerType::getTypeInt32(), {new FormalParam{floatPtrType, ""}}, true);
     (void) newFunction("putfarray", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt32(), ""}, new FormalParam{floatPtrType, ""}}, true);
+    (void) newFunction("_sysy_starttime", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt32(), ""}}, true);
+    (void) newFunction("_sysy_stoptime", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt32(), ""}}, true);
 }
 
 /// @brief 进入一层新的作用域

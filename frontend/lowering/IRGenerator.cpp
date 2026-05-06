@@ -1546,27 +1546,40 @@ Value * IRGenerator::visitExpr(ast_node * node)
 Value * IRGenerator::visitFuncCall(ast_node * node)
 {
     std::string funcName = node->sons[0]->name;
+    std::vector<Value *> args;
+    if (funcName == "starttime" || funcName == "stoptime") {
+        ast_node * paramsNode = node->sons[1];
+        if (!paramsNode->sons.empty()) {
+            minic_log(LOG_ERROR, "函数(%s)参数个数不匹配", funcName.c_str());
+            return nullptr;
+        }
+        const int64_t lineNo = node->sons[0]->line_no >= 0 ? node->sons[0]->line_no : 0;
+        args.push_back(module->newConstInt32(static_cast<int32_t>(lineNo)));
+        funcName = (funcName == "starttime") ? "_sysy_starttime" : "_sysy_stoptime";
+    }
+
     Function * calledFunc = module->findFunction(funcName);
     if (!calledFunc) {
         minic_log(LOG_ERROR, "函数(%s)未定义或声明", funcName.c_str());
         return nullptr;
     }
 
-    std::vector<Value *> args;
     ast_node * paramsNode = node->sons[1];
-    for (std::size_t i = 0; i < paramsNode->sons.size(); ++i) {
-        auto * argNode = paramsNode->sons[i];
-        Value * argValue = visitExpr(argNode);
-        if (!argValue) {
-            return nullptr;
-        }
-        if (i < calledFunc->getParams().size()) {
-            argValue = convertValueToType(argValue, calledFunc->getParams()[i]->getType());
+    if (args.empty()) {
+        for (std::size_t i = 0; i < paramsNode->sons.size(); ++i) {
+            auto * argNode = paramsNode->sons[i];
+            Value * argValue = visitExpr(argNode);
             if (!argValue) {
                 return nullptr;
             }
+            if (i < calledFunc->getParams().size()) {
+                argValue = convertValueToType(argValue, calledFunc->getParams()[i]->getType());
+                if (!argValue) {
+                    return nullptr;
+                }
+            }
+            args.push_back(argValue);
         }
-        args.push_back(argValue);
     }
 
     if (args.size() != calledFunc->getParams().size()) {

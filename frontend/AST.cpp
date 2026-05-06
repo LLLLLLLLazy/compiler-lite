@@ -27,7 +27,7 @@
 /// @param _node_type 节点类型
 /// @param _line_no 行号
 ast_node::ast_node(ast_operator_type _node_type, Type * _type, int64_t _line_no)
-	: node_type(_node_type), line_no(-1), type(_type)
+	: node_type(_node_type), line_no(_line_no), type(_type)
 {}
 
 /// @brief 构造函数
