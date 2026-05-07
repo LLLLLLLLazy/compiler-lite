@@ -114,10 +114,10 @@ bool isSameLiveLocationSet(const LiveLocationSet & lhs, const LiveLocationSet & 
     return true;
 }
 
-/// @brief 记录一次潜在内存读取，避免将已被读取的 store 当作 dead store
+/// @brief 记录一次 local conservative DSE 视角下的内存读取
 /// @param location 被读取的位点
 /// @param pendingStores 当前候选 dead store 集合
-void observeRead(const MemoryLocation & location, PendingStoreMap & pendingStores)
+void observeLocalDeadStoreRead(const MemoryLocation & location, PendingStoreMap & pendingStores)
 {
     if (!location.isKnownObject()) {
         return;
@@ -211,6 +211,23 @@ std::unordered_set<AllocaInst *> collectPreciseOnlyAllocas(
     }
 
     return preciseOnlyAllocas;
+}
+
+/// @brief 收集需要交给 local conservative DSE 的对象
+/// @param trackableAllocas 非逃逸对象集合
+/// @param preciseOnlyAllocas 可安全参与 whole-function DSE 的对象集合
+/// @return 仅能依赖 local DSE 的对象集合
+std::unordered_set<AllocaInst *> collectLocalDSEAllocas(
+    const std::unordered_set<AllocaInst *> & trackableAllocas,
+    const std::unordered_set<AllocaInst *> & preciseOnlyAllocas)
+{
+    std::unordered_set<AllocaInst *> localDSEAllocas;
+    for (auto * alloca : trackableAllocas) {
+        if (preciseOnlyAllocas.find(alloca) == preciseOnlyAllocas.end()) {
+            localDSEAllocas.insert(alloca);
+        }
+    }
+    return localDSEAllocas;
 }
 
 /// @brief 计算块入口的可用值状态 meet
@@ -337,14 +354,14 @@ void solveAvailableValueDataflow(const std::vector<BasicBlock *> & rpo,
     } while (changed);
 }
 
-/// @brief 按 whole-function 可用值状态重写 load 指令
+/// @brief 按 whole-function 可用值状态重写 load
 /// @param func 待优化函数
 /// @param trackableAllocas 非逃逸对象集合
 /// @param inStates 每个基本块的入口状态
 /// @return true 表示至少替换了一条 load
 bool rewriteLoadsFromAvailableValues(Function * func,
-                                     const std::unordered_set<AllocaInst *> & trackableAllocas,
-                                     const BlockAvailableStateMap & inStates)
+                                    const std::unordered_set<AllocaInst *> & trackableAllocas,
+                                    const BlockAvailableStateMap & inStates)
 {
     if (func == nullptr) {
         return false;
@@ -405,11 +422,77 @@ bool rewriteLoadsFromAvailableValues(Function * func,
     return changed;
 }
 
-/// @brief 块内 dead store 消除，保留同块冗余 store 优化
+/// @brief 按 whole-function 可用值状态删除写回同值的冗余 store
 /// @param func 待优化函数
 /// @param trackableAllocas 非逃逸对象集合
+/// @param inStates 每个基本块的入口状态
 /// @return true 表示至少删除了一条 store
-bool eliminateLocalDeadStores(Function * func, const std::unordered_set<AllocaInst *> & trackableAllocas)
+bool eliminateSameValueStores(Function * func,
+                              const std::unordered_set<AllocaInst *> & trackableAllocas,
+                              const BlockAvailableStateMap & inStates)
+{
+    if (func == nullptr) {
+        return false;
+    }
+
+    bool changed = false;
+    for (auto * bb : func->getBlocks()) {
+        AvailableValueMap availableValues;
+        auto inIt = inStates.find(bb);
+        if (inIt != inStates.end()) {
+            availableValues = inIt->second;
+        }
+
+        for (auto * inst : bb->getInstructions()) {
+            if (inst == nullptr || inst->isDead()) {
+                continue;
+            }
+
+            if (auto * load = dynamic_cast<LoadInst *>(inst)) {
+                MemoryLocation location = normalizeMemoryLocation(load->getPointerOperand());
+                if (!isTrackableObject(location, trackableAllocas) || !location.isPrecise()) {
+                    continue;
+                }
+
+                if (availableValues.find(location) == availableValues.end()) {
+                    availableValues[location] = load;
+                }
+                continue;
+            }
+
+            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+                MemoryLocation location = normalizeMemoryLocation(store->getPointerOperand());
+                if (!isTrackableObject(location, trackableAllocas)) {
+                    continue;
+                }
+
+                if (!location.isPrecise()) {
+                    eraseAvailableValuesForObject(availableValues, location.object);
+                    continue;
+                }
+
+                auto availableIt = availableValues.find(location);
+                if (availableIt != availableValues.end() && availableIt->second == store->getValueOperand()) {
+                    store->clearOperands();
+                    store->setDead(true);
+                    changed = true;
+                    continue;
+                }
+
+                availableValues[location] = store->getValueOperand();
+            }
+        }
+    }
+
+    return changed;
+}
+
+/// @brief 块内 conservative dead store 消除
+/// @param func 待优化函数
+/// @param localDSEAllocas 仅能依赖 local DSE 的对象集合
+/// @return true 表示至少删除了一条 store
+bool eliminateLocalConservativeDeadStores(Function * func,
+                                          const std::unordered_set<AllocaInst *> & localDSEAllocas)
 {
     if (func == nullptr) {
         return false;
@@ -426,17 +509,17 @@ bool eliminateLocalDeadStores(Function * func, const std::unordered_set<AllocaIn
 
             if (auto * load = dynamic_cast<LoadInst *>(inst)) {
                 MemoryLocation location = normalizeMemoryLocation(load->getPointerOperand());
-                if (!isTrackableObject(location, trackableAllocas)) {
+                if (!isTrackableObject(location, localDSEAllocas)) {
                     continue;
                 }
 
-                observeRead(location, pendingStores);
+                observeLocalDeadStoreRead(location, pendingStores);
                 continue;
             }
 
             if (auto * store = dynamic_cast<StoreInst *>(inst)) {
                 MemoryLocation location = normalizeMemoryLocation(store->getPointerOperand());
-                if (!isTrackableObject(location, trackableAllocas)) {
+                if (!isTrackableObject(location, localDSEAllocas)) {
                     continue;
                 }
 
@@ -559,13 +642,13 @@ void solveLiveLocationDataflow(const std::vector<BasicBlock *> & rpo,
     } while (changed);
 }
 
-/// @brief 依据 whole-function 活跃集合删除跨块 dead store
+/// @brief 依据 whole-function 活跃集合删除 precise dead store
 /// @param func 待优化函数
 /// @param reachableBlocks 可达块集合
 /// @param preciseOnlyAllocas 可做 whole-function DSE 的对象集合
 /// @param liveOutStates 每个基本块的出口活跃集合
 /// @return true 表示至少删除了一条 store
-bool eliminateWholeFunctionDeadStores(Function * func,
+bool eliminateGlobalPreciseDeadStores(Function * func,
                                       const ReachableBlockSet & reachableBlocks,
                                       const std::unordered_set<AllocaInst *> & preciseOnlyAllocas,
                                       const BlockLiveStateMap & liveOutStates)
@@ -624,6 +707,58 @@ bool eliminateWholeFunctionDeadStores(Function * func,
     return changed;
 }
 
+/// @brief 执行基于 whole-function 可用值的 load/store 化简
+/// @param func 待优化函数
+/// @param rpo CFG 逆后序列表
+/// @param reachableBlocks 可达块集合
+/// @param trackableAllocas 非逃逸对象集合
+/// @return true 表示至少删除或替换了一条 load/store
+bool runAvailableValueOptimizations(Function * func,
+                                    const std::vector<BasicBlock *> & rpo,
+                                    const ReachableBlockSet & reachableBlocks,
+                                    const std::unordered_set<AllocaInst *> & trackableAllocas)
+{
+    BlockAvailableStateMap inAvailableStates;
+    BlockAvailableStateMap outAvailableStates;
+    solveAvailableValueDataflow(rpo, reachableBlocks, trackableAllocas, inAvailableStates, outAvailableStates);
+
+    bool changed = false;
+    changed = rewriteLoadsFromAvailableValues(func, trackableAllocas, inAvailableStates) || changed;
+    changed = eliminateSameValueStores(func, trackableAllocas, inAvailableStates) || changed;
+    return changed;
+}
+
+/// @brief 按 local/global 两层职责执行 dead store elimination
+/// @param func 待优化函数
+/// @param rpo CFG 逆后序列表
+/// @param reachableBlocks 可达块集合
+/// @param localDSEAllocas 仅能依赖 local DSE 的对象集合
+/// @param preciseOnlyAllocas 可安全参与 whole-function DSE 的对象集合
+/// @return true 表示至少删除了一条 store
+bool eliminateDeadStores(Function * func,
+                         const std::vector<BasicBlock *> & rpo,
+                         const ReachableBlockSet & reachableBlocks,
+                         const std::unordered_set<AllocaInst *> & localDSEAllocas,
+                         const std::unordered_set<AllocaInst *> & preciseOnlyAllocas)
+{
+    bool changed = false;
+
+    if (!localDSEAllocas.empty()) {
+        changed = eliminateLocalConservativeDeadStores(func, localDSEAllocas) || changed;
+    }
+
+    if (preciseOnlyAllocas.empty()) {
+        return changed;
+    }
+
+    BlockLiveStateMap liveInStates;
+    BlockLiveStateMap liveOutStates;
+    solveLiveLocationDataflow(rpo, reachableBlocks, preciseOnlyAllocas, liveInStates, liveOutStates);
+    changed = eliminateGlobalPreciseDeadStores(func, reachableBlocks, preciseOnlyAllocas, liveOutStates)
+              || changed;
+    return changed;
+}
+
 } // namespace
 
 /// @brief 构造局部内存优化器
@@ -677,22 +812,12 @@ bool LocalMemoryOpt::run()
     const auto & rpo = dt.getRPO();
     const ReachableBlockSet reachableBlocks = collectReachableBlocks(dt);
     const auto preciseOnlyAllocas = collectPreciseOnlyAllocas(func, trackableAllocas);
+    const auto localDSEAllocas = collectLocalDSEAllocas(trackableAllocas, preciseOnlyAllocas);
 
     bool changed = false;
 
-    BlockAvailableStateMap inAvailableStates;
-    BlockAvailableStateMap outAvailableStates;
-    solveAvailableValueDataflow(rpo, reachableBlocks, trackableAllocas, inAvailableStates, outAvailableStates);
-    changed = rewriteLoadsFromAvailableValues(func, trackableAllocas, inAvailableStates) || changed;
-
-    // 有些槽位对于整个 function 来说是 not precise 的，但在某些块内可能是 precise 的，
-    // 因此 local DSE 后再 whole-function DSE 可能会多一些机会
-    changed = eliminateLocalDeadStores(func, trackableAllocas) || changed;
-
-    BlockLiveStateMap liveInStates;
-    BlockLiveStateMap liveOutStates;
-    solveLiveLocationDataflow(rpo, reachableBlocks, preciseOnlyAllocas, liveInStates, liveOutStates);
-    changed = eliminateWholeFunctionDeadStores(func, reachableBlocks, preciseOnlyAllocas, liveOutStates) || changed;
+    changed = runAvailableValueOptimizations(func, rpo, reachableBlocks, trackableAllocas) || changed;
+    changed = eliminateDeadStores(func, rpo, reachableBlocks, localDSEAllocas, preciseOnlyAllocas) || changed;
 
     return sweepDeadInstructions() || changed;
 }

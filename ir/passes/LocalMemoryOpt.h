@@ -7,6 +7,11 @@
 ///   2. 冗余 load 消除
 ///   3. 精确槽位的 dead store elimination
 ///
+/// 判断'同值'靠的是同一个 SSA Value (?)，而不是更强的值等价分析，所以不是 GVN 那种级别的冗余识别
+/// 下一步要引入 alias analysis 那套东西：
+/// mustAlias
+/// mayAlias
+/// notAlias
 
 #pragma once
 
