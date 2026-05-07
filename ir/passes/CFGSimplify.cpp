@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "BasicBlock.h"
+#include "CFGStateCleanup.h"
 #include "BranchInst.h"
 #include "CondBranchInst.h"
 #include "Function.h"
@@ -249,7 +250,8 @@ bool CFGSimplify::run()
     bool changed = false;
     bool localChanged = false;
     do {
-        localChanged = false;
+        localChanged = sanitizeCFGState(func);
+        changed = localChanged || changed;
         std::vector<BasicBlock *> snapshot = func->getBlocks();
         for (auto * bb : snapshot) {
             auto & blocks = func->getBlocks();

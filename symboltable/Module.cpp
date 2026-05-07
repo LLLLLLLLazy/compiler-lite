@@ -5,6 +5,7 @@
 
 #include "Module.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -121,6 +122,26 @@ void Module::insertGlobalValueDirectly(GlobalVariable * val)
 {
     globalVariableMap.emplace(val->getName(), val);
     globalVariableVector.push_back(val);
+}
+
+/// @brief 从模块中移除一个全局变量
+/// @param val 待移除的全局变量
+/// @return true 表示已成功移除
+bool Module::removeGlobalVariable(GlobalVariable * val)
+{
+    if (val == nullptr) {
+        return false;
+    }
+
+    auto vectorIt = std::find(globalVariableVector.begin(), globalVariableVector.end(), val);
+    if (vectorIt == globalVariableVector.end()) {
+        return false;
+    }
+
+    globalVariableMap.erase(val->getName());
+    globalVariableVector.erase(vectorIt);
+    delete val;
+    return true;
 }
 
 /// @brief 直接把整数类型常量插入模块容器

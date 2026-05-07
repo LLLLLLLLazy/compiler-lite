@@ -32,6 +32,7 @@
 #include "CFGSimplify.h"
 #include "ConstProp.h"
 #include "DeadInstElim.h"
+#include "GlobalToLocal.h"
 #include "InstCombine.h"
 #include "LICM.h"
 #include "LocalMemoryOpt.h"
@@ -376,6 +377,11 @@ static int compile(std::string inputFile, std::string outputFile)
 		}
 
 		if (gOptLevel > 0) {
+
+			// 将仅出现在 main 中的全局标量下沉到 main 中
+			GlobalToLocal globalToLocal(module);
+			globalToLocal.run();
+
 			// 将局部数组的常量下标元素拆成独立标量槽位
 			for (auto * func : module->getFunctionList()) {
 				if (!func->isBuiltin() && !func->getBlocks().empty()) {

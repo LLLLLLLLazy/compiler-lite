@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "BasicBlock.h"
+#include "CFGStateCleanup.h"
 #include "Function.h"
 #include "Instruction.h"
 #include "PhiInst.h"
@@ -50,9 +51,11 @@ bool UnreachableBlockElim::run()
         return false;
     }
 
+    bool changed = sanitizeCFGState(func);
+
     BasicBlock * entry = func->getEntryBlock();
     if (!entry) {
-        return false;
+        return changed;
     }
 
     std::unordered_set<BasicBlock *> reachable;
@@ -81,7 +84,7 @@ bool UnreachableBlockElim::run()
     }
 
     if (deadBlocks.empty()) {
-        return false;
+        return changed;
     }
 
     for (auto * deadBB : deadBlocks) {

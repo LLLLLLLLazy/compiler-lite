@@ -2,10 +2,11 @@
 /// @file DeadInstElim.h
 /// @brief 死指令删除 pass
 ///
-/// 当前实现专注于无副作用 SSA 纯值指令的递归删除，覆盖：
-///   1. 识别“无 use 且无副作用”的平凡死指令
-///   2. 沿 def-use 链回溯传播新的死指令
-///   3. 在基本块中统一清扫已标记的死指令
+/// Mark-Sweep，覆盖：
+///   1. 从副作用、返回和无条件跳转出发标记活指令
+///   2. 沿 def-use 链追踪活值依赖
+///   3. 基于 CFG 后支配关系保留真正控制活代码的条件跳转
+///   4. 将死条件跳转改写为无条件跳转，并清扫剩余死指令
 ///
 
 #pragma once
@@ -18,7 +19,7 @@ public:
     /// @brief 构造死指令删除器
     explicit DeadInstElim(Function * func);
 
-    /// @brief 对函数原地删除平凡死指令
+    /// @brief 对函数原地执行 CFG 感知的死代码删除
     /// @return 若本轮删除了至少一条指令则返回 true
     bool run();
 

@@ -205,10 +205,14 @@ set(IR_SRCS
 	ir/passes/ConstProp.cpp
 	ir/passes/InstCombine.h
 	ir/passes/InstCombine.cpp
+	ir/passes/CFGStateCleanup.h
+	ir/passes/CFGStateCleanup.cpp
 	ir/passes/CFGSimplify.h
 	ir/passes/CFGSimplify.cpp
 	ir/passes/DeadInstElim.h
 	ir/passes/DeadInstElim.cpp
+	ir/passes/GlobalToLocal.h
+	ir/passes/GlobalToLocal.cpp
 	ir/passes/LocalMemoryOpt.h
 	ir/passes/LocalMemoryOpt.cpp
 	ir/passes/UnreachableBlockElim.h

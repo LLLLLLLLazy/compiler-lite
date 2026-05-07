@@ -61,6 +61,9 @@ public:
         return globalVariableVector;
     }
 
+    /// @brief 从模块中移除一个全局变量
+    bool removeGlobalVariable(GlobalVariable * val);
+
     /// @brief 获取函数列表
     std::vector<Function *> & getFunctionList()
     {

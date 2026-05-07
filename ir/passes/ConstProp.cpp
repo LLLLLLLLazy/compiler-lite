@@ -16,6 +16,7 @@
 
 #include "BasicBlock.h"
 #include "BinaryInst.h"
+#include "CFGStateCleanup.h"
 #include "BranchInst.h"
 #include "CondBranchInst.h"
 #include "ConstFloat.h"
@@ -360,7 +361,8 @@ private:
     /// @return 若基本块可执行则返回 true
     bool isBlockExecutable(BasicBlock * bb) const
     {
-        return bb && executableBlocks.count(bb);
+        return bb && std::find(func->getBlocks().begin(), func->getBlocks().end(), bb) != func->getBlocks().end()
+               && executableBlocks.count(bb);
     }
 
     /// @brief 判断 CFG 边当前是否已被证明可执行
@@ -376,7 +378,8 @@ private:
     /// @param bb 新发现可执行的基本块
     void markBlockExecutable(BasicBlock * bb)
     {
-        if (!bb || !executableBlocks.insert(bb).second) {
+        if (!bb || std::find(func->getBlocks().begin(), func->getBlocks().end(), bb) == func->getBlocks().end()
+            || !executableBlocks.insert(bb).second) {
             return;
         }
 
@@ -391,7 +394,8 @@ private:
     /// @param to 边的终点
     void enqueueEdge(BasicBlock * from, BasicBlock * to)
     {
-        if (!from || !to) {
+        if (!from || !to || std::find(func->getBlocks().begin(), func->getBlocks().end(), from) == func->getBlocks().end()
+            || std::find(func->getBlocks().begin(), func->getBlocks().end(), to) == func->getBlocks().end()) {
             return;
         }
 
@@ -966,6 +970,7 @@ bool ConstProp::run()
         return false;
     }
 
+    bool changed = sanitizeCFGState(func);
     SCCPSolver solver(func, mod);
-    return solver.run();
+    return solver.run() || changed;
 }
