@@ -119,6 +119,8 @@ set(BACKEND_SRCS
 	backend/riscv64/HeuristicSpillStrategy.h
 	backend/riscv64/ScratchAllocator.cpp
 	backend/riscv64/ScratchAllocator.h
+	backend/riscv64/RiscV64Peephole.cpp
+	backend/riscv64/RiscV64Peephole.h
 )
 
 # 中间IR(ir)源代码集合

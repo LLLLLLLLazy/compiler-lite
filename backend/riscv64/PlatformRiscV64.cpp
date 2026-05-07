@@ -42,6 +42,41 @@ const std::string PlatformRiscV64::regName[PlatformRiscV64::maxRegNum] = {
 	"t6",   // x31, 临时寄存器
 };
 
+const std::string PlatformRiscV64::fpRegName[PlatformRiscV64::maxRegNum] = {
+	"ft0",  // f0, 临时浮点寄存器
+	"ft1",  // f1, 临时浮点寄存器
+	"ft2",  // f2, 临时浮点寄存器
+	"ft3",  // f3, 临时浮点寄存器
+	"ft4",  // f4, 临时浮点寄存器
+	"ft5",  // f5, 临时浮点寄存器
+	"ft6",  // f6, 临时浮点寄存器
+	"ft7",  // f7, 临时浮点寄存器
+	"fs0",  // f8, 被调用者保存浮点寄存器
+	"fs1",  // f9, 被调用者保存浮点寄存器
+	"fa0",  // f10, 浮点返回值/第1个浮点参数
+	"fa1",  // f11, 第2个浮点参数
+	"fa2",  // f12, 第3个浮点参数
+	"fa3",  // f13, 第4个浮点参数
+	"fa4",  // f14, 第5个浮点参数
+	"fa5",  // f15, 第6个浮点参数
+	"fa6",  // f16, 第7个浮点参数
+	"fa7",  // f17, 第8个浮点参数
+	"fs2",  // f18, 被调用者保存浮点寄存器
+	"fs3",  // f19, 被调用者保存浮点寄存器
+	"fs4",  // f20, 被调用者保存浮点寄存器
+	"fs5",  // f21, 被调用者保存浮点寄存器
+	"fs6",  // f22, 被调用者保存浮点寄存器
+	"fs7",  // f23, 被调用者保存浮点寄存器
+	"fs8",  // f24, 被调用者保存浮点寄存器
+	"fs9",  // f25, 被调用者保存浮点寄存器
+	"fs10", // f26, 被调用者保存浮点寄存器
+	"fs11", // f27, 被调用者保存浮点寄存器
+	"ft8",  // f28, 临时浮点寄存器
+	"ft9",  // f29, 临时浮点寄存器
+	"ft10", // f30, 临时浮点寄存器
+	"ft11", // f31, 临时浮点寄存器
+};
+
 RegVariable * PlatformRiscV64::intRegVal[PlatformRiscV64::maxRegNum] = {
 	new RegVariable(IntegerType::getTypeInt32(), PlatformRiscV64::regName[0], 0),
 	new RegVariable(IntegerType::getTypeInt32(), PlatformRiscV64::regName[1], 1),

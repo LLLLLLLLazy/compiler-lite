@@ -59,6 +59,9 @@ public:
 	/// @brief 寄存器的名字，按真实x0-x31顺序对应ABI名字
 	static const std::string regName[maxRegNum];
 
+	/// @brief 浮点寄存器名字，按真实f0-f31顺序对应ABI名字
+	static const std::string fpRegName[maxRegNum];
+
 	/// @brief 对每个物理寄存器创建一个RegVariable，供后端调用约定适配使用
 	static RegVariable * intRegVal[PlatformRiscV64::maxRegNum];
 };
