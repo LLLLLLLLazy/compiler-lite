@@ -199,6 +199,8 @@ set(IR_SRCS
 	ir/analysis/DominanceFrontier.cpp
 	ir/analysis/MemoryLocation.h
 	ir/analysis/MemoryLocation.cpp
+	ir/analysis/PostDominatorTree.h
+	ir/analysis/PostDominatorTree.cpp
 	ir/passes/ArrayScalarize.h
 	ir/passes/ArrayScalarize.cpp
 	ir/passes/ConstProp.h
@@ -217,6 +219,8 @@ set(IR_SRCS
 	ir/passes/LocalMemoryOpt.cpp
 	ir/passes/UnreachableBlockElim.h
 	ir/passes/UnreachableBlockElim.cpp
+	ir/passes/PassManager.h
+	ir/passes/PassManager.cpp
 	ir/analysis/LoopInfo.h
 	ir/analysis/LoopInfo.cpp
 	ir/passes/Mem2Reg.h

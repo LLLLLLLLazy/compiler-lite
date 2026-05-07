@@ -263,7 +263,6 @@ bool CFGSimplify::run()
                 || tryThreadThroughEmptyCondBlock(bb)) {
                 localChanged = true;
                 changed = true;
-                break;
             }
         }
     } while (localChanged);
