@@ -1095,7 +1095,31 @@ bool InstSelectorRiscV64::isCompareOnlyUsedByCondBranch(ICmpInst * icmp) const
 		return false;
 	}
 
-	return dynamic_cast<CondBranchInst *>(uses.front()->getUser()) != nullptr;
+	auto * condBr = dynamic_cast<CondBranchInst *>(uses.front()->getUser());
+	if (condBr == nullptr) {
+		return false;
+	}
+
+	// 只有紧邻条件跳转的比较才能折叠为 RISC-V 条件分支。
+	// LICM 等循环优化可能把 icmp 提前到循环外或支配块中，导致 icmp 与 cond_br
+	// 不在同一基本块或不再紧邻。此时若仍折叠，条件分支处会重新读取 icmp 的
+	// 操作数寄存器，但这些寄存器可能已被 icmp 与 cond_br 之间的其他指令覆盖，
+	// 从而产生错误的比较结果。因此要求 icmp 和 cond_br 必须在同一基本块且
+	// 指令序列上紧邻，方可安全折叠。
+	BasicBlock * bb = icmp->getParentBlock();
+	if (bb == nullptr || bb != condBr->getParentBlock()) {
+		return false;
+	}
+
+	const auto & insts = bb->getInstructions();
+	auto condIt = std::find(insts.begin(), insts.end(), static_cast<Instruction *>(condBr));
+	if (condIt == insts.end() || condIt == insts.begin()) {
+		return false;
+	}
+
+	auto prevIt = condIt;
+	--prevIt;
+	return *prevIt == static_cast<Instruction *>(icmp);
 }
 
 bool InstSelectorRiscV64::translateDirectIcmpBranch(ICmpInst * icmp, CondBranchInst * condBr)

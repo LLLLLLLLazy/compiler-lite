@@ -333,9 +333,14 @@ void ILocRiscV64::comment(std::string str)
 }
 
 /*
-	加载立即数 - RISCV64使用li伪指令或lui+addi
+	加载立即数 - RISCV64使用li伪指令或lui+addiw
 	对于12位有符号立即数范围(-2048~2047)，使用li伪指令(汇编器展开为addi)
-	对于超出12位范围的32位常量，使用lui+addi方式
+	对于超出12位范围的32位常量，使用lui+addiw方式
+	注意：RV64 的 lui 会将 20 位立即数左移 12 位后符号扩展到 64 位，
+	若高位为 1（如立即数 2147483647 即 0x7FFFFFFF），符号扩展后会产生错误的
+	64 位负值。使用 addiw 代替 addi，addiw 只取低 32 位结果再符号扩展，
+	从而消除 lui 带来的错误符号扩展，保证装载的 64 位值正确。
+	此前使用 lui+addi 会导致 RV64 上大立即数装载出错。
 */
 void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 {
@@ -344,8 +349,8 @@ void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 		// li rd, imm (汇编器会展开为 addi rd, zero, imm)
 		emit("li", PlatformRiscV64::regName[rs_reg_no], std::to_string(constant));
 	} else {
-		// 超出12位范围，使用lui+addi
-		// lui加载高20位，addi加载低12位
+		// 超出12位范围，使用lui+addiw。
+		// RV64 的 lui 会生成符号扩展后的 64 位值；addiw 可把结果收敛回 i32 语义。
 		const int32_t v32 = static_cast<int32_t>(constant);
 		int32_t lo = v32 & 0xFFF;
 		int32_t hi = v32 - lo;
@@ -356,7 +361,7 @@ void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 		const uint32_t luiImm = (static_cast<uint32_t>(hi >> 12)) & 0xFFFFF;
 
 		emit("lui", PlatformRiscV64::regName[rs_reg_no], std::to_string(luiImm));
-		emit("addi", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[rs_reg_no],
+		emit("addiw", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[rs_reg_no],
 			 std::to_string(lo));
 	}
 }
