@@ -121,3 +121,6 @@ void putf(char a[], ...)
     vfprintf(stdout, a, args);
     va_end(args);
 }
+
+void _sysy_starttime(int lineno) { (void)lineno; }
+void _sysy_stoptime(int lineno) { (void)lineno; }

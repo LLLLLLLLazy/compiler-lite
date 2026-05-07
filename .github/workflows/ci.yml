@@ -65,8 +65,14 @@ jobs:
       - name: Run 2025 LLVM IR full test suite
         run: MINIC_TEST_MODE=llvmir MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh 2025
 
+      - name: Run 2026 LLVM IR full test suite
+        run: MINIC_TEST_MODE=llvmir MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh 2026
+
       - name: Run 2023 RISCV64 asm full test suite
         run: MINIC_RISCV64_TIMEOUT=60 bash ./tools/run-local-riscv64-tests.sh 2023
 
       - name: Run 2025 RISCV64 asm full test suite
         run: MINIC_RISCV64_TIMEOUT=60 bash ./tools/run-local-riscv64-tests.sh 2025
+
+      - name: Run 2026 RISCV64 asm full test suite
+        run: MINIC_RISCV64_TIMEOUT=60 bash ./tools/run-local-riscv64-tests.sh 2026

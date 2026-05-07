@@ -42,6 +42,9 @@ Suites:
   2025              -> tests/2025_function
   2025_perf         -> tests/2025_performance
   2025_performance  -> tests/2025_performance
+  2026              -> tests/2026_function
+  2026_perf         -> tests/2026_performance
+  2026_performance  -> tests/2026_performance
   all               -> all suites above
 
 Environment:
@@ -58,6 +61,7 @@ Environment:
 Examples:
   ./tools/run-local-riscv64-tests.sh 2023 2023_func_00_main
   ./tools/run-local-riscv64-tests.sh 2023
+  ./tools/run-local-riscv64-tests.sh 2025 2025_func_009_BFS.sy
   MINIC_RISCV64_TEST_MODE=assemble ./tools/run-local-riscv64-tests.sh 2023_func_00_main
 USAGE
 }
@@ -103,6 +107,12 @@ suite_dir_from_key() {
 		2025_perf|2025_performance)
 			echo "2025_performance"
 			;;
+		2026|2026_function)
+			echo "2026_function"
+			;;
+		2026_perf|2026_performance)
+			echo "2026_performance"
+			;;
 		*)
 			return 1
 			;;
@@ -110,7 +120,10 @@ suite_dir_from_key() {
 }
 
 infer_suite_from_testcase() {
-	case "$1" in
+	local testcase="${1%.c}"
+	testcase="${testcase%.sy}"
+
+	case "${testcase}" in
 		2023_func_*)
 			echo "2023_function"
 			;;
@@ -120,10 +133,52 @@ infer_suite_from_testcase() {
 		2025_perf_*)
 			echo "2025_performance"
 			;;
+		2026_func_*)
+			echo "2026_function"
+			;;
+		2026_perf_*)
+			echo "2026_performance"
+			;;
 		*)
 			return 1
 			;;
 	esac
+}
+
+strip_source_ext() {
+	local testcase="$1"
+	testcase="${testcase%.c}"
+	testcase="${testcase%.sy}"
+	echo "${testcase}"
+}
+
+find_source_file() {
+	local case_root="$1"
+	local testcase_arg="$2"
+	local testcase
+
+	case "${testcase_arg}" in
+		*.c|*.sy)
+			if [[ -f "${case_root}/${testcase_arg}" ]]; then
+				echo "${case_root}/${testcase_arg}"
+				return 0
+			fi
+			;;
+	esac
+
+	testcase=$(strip_source_ext "${testcase_arg}")
+
+	if [[ -f "${case_root}/${testcase}.c" ]]; then
+		echo "${case_root}/${testcase}.c"
+		return 0
+	fi
+
+	if [[ -f "${case_root}/${testcase}.sy" ]]; then
+		echo "${case_root}/${testcase}.sy"
+		return 0
+	fi
+
+	return 1
 }
 
 write_result_file() {
@@ -152,6 +207,7 @@ run_riscv64_check() {
 	local infile="$2"
 	local outfile="$3"
 	local testcase="$4"
+	local source_name
 	local asmfile="${TMP_DIR}/${testcase}.rv64.s"
 	local objfile="${TMP_DIR}/${testcase}.rv64.o"
 	local exe_file="${TMP_DIR}/${testcase}.rv64"
@@ -159,13 +215,14 @@ run_riscv64_check() {
 	local result_file="${TMP_DIR}/${testcase}.rv64.result"
 	local exit_code=0
 	local t0 t1 t_compile=0 t_assemble=0 t_link=0 t_run=0
+	source_name=$(basename "${cfile}")
 
 	# compile
 	t0=$(date +%s%N)
 	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
 		t1=$(date +%s%N)
 		t_compile=$(( (t1 - t0) / 1000000 ))
-		echo "${testcase}.c compile NG [riscv64]  compile=${t_compile}ms"
+		echo "${source_name} compile NG [riscv64]  compile=${t_compile}ms"
 		return 1
 	fi
 	t1=$(date +%s%N)
@@ -182,13 +239,13 @@ run_riscv64_check() {
 		if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" -c -o "${objfile}" "${asmfile}" >/dev/null 2>&1; then
 			t1=$(date +%s%N)
 			t_assemble=$(( (t1 - t0) / 1000000 ))
-			echo "${testcase}.c assemble NG [riscv64]  compile=${t_compile}ms assemble=${t_assemble}ms"
+			echo "${source_name} assemble NG [riscv64]  compile=${t_compile}ms assemble=${t_assemble}ms"
 			return 1
 		fi
 		t1=$(date +%s%N)
 		t_assemble=$(( (t1 - t0) / 1000000 ))
 
-		printf "%-${STATUS_COL_WIDTH}s %s\n" "${testcase}.c OK [riscv64-assemble]" "compile=${t_compile}ms assemble=${t_assemble}ms"
+		printf "%-${STATUS_COL_WIDTH}s %s\n" "${source_name} OK [riscv64-assemble]" "compile=${t_compile}ms assemble=${t_assemble}ms"
 		return 0
 	fi
 
@@ -197,7 +254,7 @@ run_riscv64_check() {
 	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${STD_C}" >/dev/null 2>&1; then
 		t1=$(date +%s%N)
 		t_link=$(( (t1 - t0) / 1000000 ))
-		echo "${testcase}.c link NG [riscv64]  compile=${t_compile}ms link=${t_link}ms"
+		echo "${source_name} link NG [riscv64]  compile=${t_compile}ms link=${t_link}ms"
 		return 1
 	fi
 	t1=$(date +%s%N)
@@ -218,24 +275,27 @@ run_riscv64_check() {
 	write_result_file "${output_file}" "${exit_code}" "${result_file}"
 
 	if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
-		echo "${testcase}.c NG [riscv64]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
+		echo "${source_name} NG [riscv64]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
 		return 1
 	fi
 
-	printf "%-${STATUS_COL_WIDTH}s %s\n" "${testcase}.c OK [riscv64]" "compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
+	printf "%-${STATUS_COL_WIDTH}s %s\n" "${source_name} OK [riscv64]" "compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
 	return 0
 }
 
 run_testcase() {
 	local suite_dir="$1"
-	local testcase="$2"
+	local testcase_arg="$2"
 	local case_root="${TEST_ROOT}/${suite_dir}"
-	local cfile="${case_root}/${testcase}.c"
+	local testcase
+	local cfile
+	testcase=$(strip_source_ext "${testcase_arg}")
+	cfile=$(find_source_file "${case_root}" "${testcase_arg}")
 	local infile="${case_root}/${testcase}.in"
 	local outfile="${case_root}/${testcase}.out"
 
-	if [[ ! -f "${cfile}" ]]; then
-		echo "${cfile} not found"
+	if [[ -z "${cfile}" || ! -f "${cfile}" ]]; then
+		echo "${case_root}/${testcase}.{c,sy} not found"
 		NG_NUM=$((NG_NUM + 1))
 		return
 	fi
@@ -259,10 +319,16 @@ run_suite() {
 	local cfile=""
 	local testcase=""
 
-	while IFS= read -r cfile; do
-		testcase=$(basename "${cfile}" .c)
+	while IFS= read -r testcase; do
 		run_testcase "${suite_dir}" "${testcase}"
-	done < <(find "${case_root}" -maxdepth 1 -type f -name '*.c' | sort)
+	done < <(
+		find "${case_root}" -maxdepth 1 -type f \( -name '*.c' -o -name '*.sy' \) |
+			while IFS= read -r cfile; do
+				testcase=$(basename "${cfile}")
+				echo "${testcase%.*}"
+			done |
+			sort -u
+	)
 }
 
 if [[ ! -x "${MINIC_BIN}" ]]; then
@@ -307,6 +373,8 @@ elif [[ "${suite_key}" == "all" ]]; then
 	run_suite "2023_function"
 	run_suite "2025_function"
 	run_suite "2025_performance"
+	run_suite "2026_function"
+	run_suite "2026_performance"
 else
 	suite_dir=$(suite_dir_from_key "${suite_key}") || \
 		fail_with_usage "Unknown suite: ${suite_key}"
