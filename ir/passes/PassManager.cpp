@@ -13,6 +13,7 @@
 #include "fixedPointFunctionPass/LICM.h"
 #include "fixedPointFunctionPass/LocalMemoryOpt.h"
 #include "fixedPointFunctionPass/UnreachableBlockElim.h"
+#include "fixedPointFunctionPass/PureCallLoopCache.h"
 #include "functionPass/ArrayScalarize.h"
 #include "functionPass/Mem2Reg.h"
 #include "functionPass/PhiLowering.h"
@@ -87,6 +88,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
 
     registerFixedPointFunctionPass([](Function * func) {
         LICM pass(func);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        PureCallLoopCache pass(func, module);
         return pass.run();
     });
 
