@@ -729,14 +729,16 @@ bool optimizeConvInnerLoops(InstList & code)
 
 } // namespace
 
-bool RiscV64Peephole::run(ILocRiscV64 & iloc)
+bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel)
 {
 	bool changed = false;
 	bool localChanged = false;
 	auto & code = iloc.getCode();
 	do {
 		localChanged = false;
-		localChanged = fuseFMA(code) || localChanged;
+		if (optLevel > 0) {
+			localChanged = fuseFMA(code) || localChanged;
+		}
 		localChanged = optimizeTrsmInnerLoop(code) || localChanged;
 		localChanged = reduceRepeatedTrsmLoopCount(code) || localChanged;
 		localChanged = optimizeConvInnerLoops(code) || localChanged;

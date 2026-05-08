@@ -283,7 +283,7 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	}
 
 	RiscV64Peephole peephole;
-	peephole.run(iloc);
+	peephole.run(iloc, module->getOptLevel());
 
 	// 删除未被引用的基本块标签
 	iloc.deleteUnusedLabel();

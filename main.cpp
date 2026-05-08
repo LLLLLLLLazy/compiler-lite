@@ -418,6 +418,9 @@ static int compile(std::string inputFile, std::string outputFile)
 		// 重新编号IR名称
 		module->renameIR();
 
+		// 将优化级别传递给Module，供后端Peephole使用
+		module->setOptLevel(gOptLevel);
+
 		// 确定汇编输出文件名
 		std::string asmOutputFile = outputFile;
 		size_t dotPos = outputFile.rfind('.');

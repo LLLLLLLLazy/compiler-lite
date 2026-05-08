@@ -207,6 +207,7 @@ run_riscv64_check() {
 	local infile="$2"
 	local outfile="$3"
 	local testcase="$4"
+	local is_perf_test="$5"
 	local source_name
 	local asmfile="${TMP_DIR}/${testcase}.rv64.s"
 	local objfile="${TMP_DIR}/${testcase}.rv64.o"
@@ -217,9 +218,15 @@ run_riscv64_check() {
 	local t0 t1 t_compile=0 t_assemble=0 t_link=0 t_run=0
 	source_name=$(basename "${cfile}")
 
+	# 根据测试类型选择优化级别：性能测试开启优化，功能测试关闭优化
+	local opt_level="0"
+	if [[ "${is_perf_test}" == "1" ]]; then
+		opt_level="1"
+	fi
+
 	# compile
 	t0=$(date +%s%N)
-	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
+	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -O"${opt_level}" -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
 		t1=$(date +%s%N)
 		t_compile=$(( (t1 - t0) / 1000000 ))
 		echo "${source_name} compile NG [riscv64]  compile=${t_compile}ms"
@@ -294,6 +301,12 @@ run_testcase() {
 	local infile="${case_root}/${testcase}.in"
 	local outfile="${case_root}/${testcase}.out"
 
+	# 判断是否是性能测试（suite_dir 包含 "performance"）
+	local is_perf_test="0"
+	if [[ "${suite_dir}" == *"performance"* ]]; then
+		is_perf_test="1"
+	fi
+
 	if [[ -z "${cfile}" || ! -f "${cfile}" ]]; then
 		echo "${case_root}/${testcase}.{c,sy} not found"
 		NG_NUM=$((NG_NUM + 1))
@@ -306,7 +319,7 @@ run_testcase() {
 		return
 	fi
 
-	if run_riscv64_check "${cfile}" "${infile}" "${outfile}" "${testcase}"; then
+	if run_riscv64_check "${cfile}" "${infile}" "${outfile}" "${testcase}" "${is_perf_test}"; then
 		OK_NUM=$((OK_NUM + 1))
 	else
 		NG_NUM=$((NG_NUM + 1))
