@@ -37,6 +37,7 @@ Module::Module(std::string _name) : name(std::move(_name))
     (void) newFunction("putfloat", VoidType::getType(), {new FormalParam{floatType, ""}}, true);
     (void) newFunction("getfarray", IntegerType::getTypeInt32(), {new FormalParam{floatPtrType, ""}}, true);
     (void) newFunction("putfarray", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt32(), ""}, new FormalParam{floatPtrType, ""}}, true);
+    (void) newFunction("putf", VoidType::getType(), {new FormalParam{intPtrType, ""}}, true, true);
     (void) newFunction("_sysy_starttime", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt32(), ""}}, true);
     (void) newFunction("_sysy_stoptime", VoidType::getType(), {new FormalParam{IntegerType::getTypeInt32(), ""}}, true);
 }
@@ -73,10 +74,21 @@ void Module::setCurrentFunction(Function * current)
 /// @param params 形参列表
 /// @param builtin 是否为内建函数
 /// @return 创建成功时返回函数对象，失败时返回空指针
-Function * Module::newFunction(std::string name, Type * returnType, std::vector<FormalParam *> params, bool builtin)
+Function * Module::newFunction(
+    std::string name, Type * returnType, std::vector<FormalParam *> params, bool builtin, bool varArg)
 {
     Function * tempFunc = findFunction(name);
     if (tempFunc) {
+        for (auto * param : params) {
+            delete param;
+        }
+        return nullptr;
+    }
+
+    if (findGlobalVariable(name) != nullptr) {
+        for (auto * param : params) {
+            delete param;
+        }
         return nullptr;
     }
 
@@ -87,7 +99,7 @@ Function * Module::newFunction(std::string name, Type * returnType, std::vector<
     }
 
     auto * type = new FunctionType(returnType, paramsType);
-    tempFunc = new Function(std::move(name), type, builtin);
+    tempFunc = new Function(std::move(name), type, builtin, varArg);
     tempFunc->getParams().assign(params.begin(), params.end());
 
     insertFunctionDirectly(tempFunc);
@@ -247,6 +259,11 @@ Value * Module::newVarValue(Type * type, std::string name)
             minic_log(LOG_ERROR, "变量(%s)已经存在", name.c_str());
             return nullptr;
         }
+
+        if (!currentFunc && findFunction(name) != nullptr) {
+            minic_log(LOG_ERROR, "全局变量(%s)不能与顶层函数同名", name.c_str());
+            return nullptr;
+        }
     } else if (!currentFunc) {
         minic_log(LOG_ERROR, "变量名为空");
         return nullptr;
@@ -261,6 +278,19 @@ Value * Module::newVarValue(Type * type, std::string name)
 
     scopeStack->insertValue(retVal);
     return retVal;
+}
+
+/// @brief 创建一个不进入用户作用域的合成全局变量
+/// @param type 全局变量类型
+/// @param name 全局变量名称
+/// @return 创建成功时返回全局变量对象，失败时返回空指针
+GlobalVariable * Module::newSyntheticGlobalVariable(Type * type, std::string name)
+{
+    if (name.empty() || findFunction(name) != nullptr || findGlobalVariable(name) != nullptr) {
+        return nullptr;
+    }
+
+    return newGlobalVariable(type, std::move(name));
 }
 
 /// @brief 按名称查找变量值对象
@@ -355,6 +385,13 @@ std::string Module::toIRString()
                 }
                 line += param->getType()->toString();
                 first = false;
+            }
+
+            if (func->isVarArg()) {
+                if (!first) {
+                    line += ", ";
+                }
+                line += "...";
             }
 
             line += ")\n";

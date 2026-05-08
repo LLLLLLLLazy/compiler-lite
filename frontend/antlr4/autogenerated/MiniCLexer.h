@@ -18,8 +18,8 @@ public:
     T_MUL = 18, T_DIV = 19, T_MOD = 20, T_NOT = 21, T_LAND = 22, T_LOR = 23, 
     T_IF = 24, T_ELSE = 25, T_WHILE = 26, T_BREAK = 27, T_CONTINUE = 28, 
     T_RETURN = 29, T_CONST = 30, T_INT = 31, T_FLOAT = 32, T_VOID = 33, 
-    T_ID = 34, T_FLOAT_LITERAL = 35, T_DIGIT = 36, LINE_COMMENT = 37, BLOCK_COMMENT = 38, 
-    WS = 39
+    T_ID = 34, T_STRING_LITERAL = 35, T_FLOAT_LITERAL = 36, T_DIGIT = 37, 
+    LINE_COMMENT = 38, BLOCK_COMMENT = 39, WS = 40
   };
 
   explicit MiniCLexer(antlr4::CharStream *input);

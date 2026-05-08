@@ -39,6 +39,9 @@ string getNodeName(ast_node * astnode)
 		case ast_operator_type::AST_OP_LEAF_LITERAL_FLOAT:
 			nodeName = to_string(astnode->float_val);
 			break;
+		case ast_operator_type::AST_OP_LEAF_STRING_LITERAL:
+			nodeName = "\"" + astnode->name + "\"";
+			break;
 		case ast_operator_type::AST_OP_LEAF_VAR_ID:
 			nodeName = astnode->name;
 			break;

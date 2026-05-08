@@ -25,6 +25,55 @@
 
 namespace {
 
+std::string decodeStringLiteralToken(const std::string & text)
+{
+	std::string decoded;
+	if (text.size() < 2) {
+		return decoded;
+	}
+
+	decoded.reserve(text.size() - 2);
+	for (std::size_t index = 1; index + 1 < text.size(); ++index) {
+		char ch = text[index];
+		if (ch != '\\') {
+			decoded.push_back(ch);
+			continue;
+		}
+
+		if (index + 1 >= text.size() - 1) {
+			decoded.push_back('\\');
+			break;
+		}
+
+		char escaped = text[++index];
+		switch (escaped) {
+			case 'n':
+				decoded.push_back('\n');
+				break;
+			case 't':
+				decoded.push_back('\t');
+				break;
+			case 'r':
+				decoded.push_back('\r');
+				break;
+			case '0':
+				decoded.push_back('\0');
+				break;
+			case '\\':
+				decoded.push_back('\\');
+				break;
+			case '"':
+				decoded.push_back('"');
+				break;
+			default:
+				decoded.push_back(escaped);
+				break;
+		}
+	}
+
+	return decoded;
+}
+
 ast_node * makeEmptyStmtNode()
 {
 	auto * node = ast_node::New(ast_operator_type::AST_OP_BLOCK);
@@ -327,7 +376,7 @@ std::any MiniCCSTVisitor::visitReturnStatement(MiniCParser::ReturnStatementConte
 
 std::any MiniCCSTVisitor::visitIfStatement(MiniCParser::IfStatementContext * ctx)
 {
-	auto condNode = std::any_cast<ast_node *>(visitExpr(ctx->expr()));
+	auto condNode = std::any_cast<ast_node *>(visitCond(ctx->cond()));
 	auto thenNode = ensureStatementNode(std::any_cast<ast_node *>(visitStatement(ctx->statement(0))));
 
 	ast_node * elseNode = nullptr;
@@ -340,10 +389,15 @@ std::any MiniCCSTVisitor::visitIfStatement(MiniCParser::IfStatementContext * ctx
 
 std::any MiniCCSTVisitor::visitWhileStatement(MiniCParser::WhileStatementContext * ctx)
 {
-	auto condNode = std::any_cast<ast_node *>(visitExpr(ctx->expr()));
+	auto condNode = std::any_cast<ast_node *>(visitCond(ctx->cond()));
 	auto bodyNode = ensureStatementNode(std::any_cast<ast_node *>(visitStatement(ctx->statement())));
 
 	return ast_node::New(ast_operator_type::AST_OP_WHILE, condNode, bodyNode);
+}
+
+std::any MiniCCSTVisitor::visitCond(MiniCParser::CondContext * ctx)
+{
+	return visitLOrExp(ctx->lOrExp());
 }
 
 std::any MiniCCSTVisitor::visitBreakStatement(MiniCParser::BreakStatementContext * ctx)
@@ -362,9 +416,9 @@ std::any MiniCCSTVisitor::visitContinueStatement(MiniCParser::ContinueStatementC
 /// @param ctx CST上下文
 std::any MiniCCSTVisitor::visitExpr(MiniCParser::ExprContext * ctx)
 {
-	// 识别产生式：expr: lOrExp;
+	// 识别产生式：expr: addExp;
 
-	return visitLOrExp(ctx->lOrExp());
+	return visitAddExp(ctx->addExp());
 }
 
 std::any MiniCCSTVisitor::visitLOrExp(MiniCParser::LOrExpContext * ctx)
@@ -753,18 +807,27 @@ std::any MiniCCSTVisitor::visitBasicType(MiniCParser::BasicTypeContext * ctx)
 
 std::any MiniCCSTVisitor::visitRealParamList(MiniCParser::RealParamListContext * ctx)
 {
-	// 识别的文法产生式：realParamList : expr (T_COMMA expr)*;
+	// 识别的文法产生式：realParamList : realParam (T_COMMA realParam)*;
 
 	auto paramListNode = ast_node::New(ast_operator_type::AST_OP_FUNC_REAL_PARAMS);
 
-	for (auto paramCtx: ctx->expr()) {
-
-		auto paramNode = std::any_cast<ast_node *>(visitExpr(paramCtx));
-
+	for (auto * paramCtx: ctx->realParam()) {
+		auto paramNode = std::any_cast<ast_node *>(visitRealParam(paramCtx));
 		paramListNode->insert_son_node(paramNode);
 	}
 
 	return paramListNode;
+}
+
+std::any MiniCCSTVisitor::visitRealParam(MiniCParser::RealParamContext * ctx)
+{
+	if (ctx->expr()) {
+		return visitExpr(ctx->expr());
+	}
+
+	const std::string tokenText = ctx->T_STRING_LITERAL()->getText();
+	const int64_t lineNo = static_cast<int64_t>(ctx->T_STRING_LITERAL()->getSymbol()->getLine());
+	return ast_node::NewStringLiteral(decodeStringLiteralToken(tokenText), lineNo);
 }
 
 std::any MiniCCSTVisitor::visitExpressionStatement(MiniCParser::ExpressionStatementContext * ctx)

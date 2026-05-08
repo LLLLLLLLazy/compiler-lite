@@ -284,6 +284,13 @@ std::string LLVMIREmitter::formatFunctionSignature(Function * function, bool wit
         firstParam = false;
     }
 
+    if (function->isVarArg()) {
+        if (!firstParam) {
+            signature += ", ";
+        }
+        signature += "...";
+    }
+
     signature += ")";
     return signature;
 }

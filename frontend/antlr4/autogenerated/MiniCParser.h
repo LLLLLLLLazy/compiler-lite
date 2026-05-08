@@ -18,8 +18,8 @@ public:
     T_MUL = 18, T_DIV = 19, T_MOD = 20, T_NOT = 21, T_LAND = 22, T_LOR = 23, 
     T_IF = 24, T_ELSE = 25, T_WHILE = 26, T_BREAK = 27, T_CONTINUE = 28, 
     T_RETURN = 29, T_CONST = 30, T_INT = 31, T_FLOAT = 32, T_VOID = 33, 
-    T_ID = 34, T_FLOAT_LITERAL = 35, T_DIGIT = 36, LINE_COMMENT = 37, BLOCK_COMMENT = 38, 
-    WS = 39
+    T_ID = 34, T_STRING_LITERAL = 35, T_FLOAT_LITERAL = 36, T_DIGIT = 37, 
+    LINE_COMMENT = 38, BLOCK_COMMENT = 39, WS = 40
   };
 
   enum {
@@ -28,10 +28,10 @@ public:
     RuleBlock = 7, RuleBlockItemList = 8, RuleBlockItem = 9, RuleConstDecl = 10, 
     RuleVarDecl = 11, RuleConstDef = 12, RuleBasicType = 13, RuleVarDef = 14, 
     RuleArrayDefDims = 15, RuleInitVal = 16, RuleStatement = 17, RuleExpr = 18, 
-    RuleLOrExp = 19, RuleLAndExp = 20, RuleEqExp = 21, RuleEqOp = 22, RuleRelExp = 23, 
-    RuleRelOp = 24, RuleAddExp = 25, RuleAddOp = 26, RuleMulExp = 27, RuleMulOp = 28, 
-    RuleUnaryExp = 29, RuleUnaryOp = 30, RulePrimaryExp = 31, RuleRealParamList = 32, 
-    RuleLVal = 33
+    RuleCond = 19, RuleLOrExp = 20, RuleLAndExp = 21, RuleEqExp = 22, RuleEqOp = 23, 
+    RuleRelExp = 24, RuleRelOp = 25, RuleAddExp = 26, RuleAddOp = 27, RuleMulExp = 28, 
+    RuleMulOp = 29, RuleUnaryExp = 30, RuleUnaryOp = 31, RulePrimaryExp = 32, 
+    RuleRealParam = 33, RuleRealParamList = 34, RuleLVal = 35
   };
 
   explicit MiniCParser(antlr4::TokenStream *input);
@@ -70,6 +70,7 @@ public:
   class InitValContext;
   class StatementContext;
   class ExprContext;
+  class CondContext;
   class LOrExpContext;
   class LAndExpContext;
   class EqExpContext;
@@ -83,6 +84,7 @@ public:
   class UnaryExpContext;
   class UnaryOpContext;
   class PrimaryExpContext;
+  class RealParamContext;
   class RealParamListContext;
   class LValContext; 
 
@@ -381,7 +383,7 @@ public:
 
     antlr4::tree::TerminalNode *T_WHILE();
     antlr4::tree::TerminalNode *T_L_PAREN();
-    ExprContext *expr();
+    CondContext *cond();
     antlr4::tree::TerminalNode *T_R_PAREN();
     StatementContext *statement();
 
@@ -456,7 +458,7 @@ public:
 
     antlr4::tree::TerminalNode *T_IF();
     antlr4::tree::TerminalNode *T_L_PAREN();
-    ExprContext *expr();
+    CondContext *cond();
     antlr4::tree::TerminalNode *T_R_PAREN();
     std::vector<StatementContext *> statement();
     StatementContext* statement(size_t i);
@@ -471,7 +473,7 @@ public:
   public:
     ExprContext(antlr4::ParserRuleContext *parent, size_t invokingState);
     virtual size_t getRuleIndex() const override;
-    LOrExpContext *lOrExp();
+    AddExpContext *addExp();
 
 
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
@@ -479,6 +481,19 @@ public:
   };
 
   ExprContext* expr();
+
+  class  CondContext : public antlr4::ParserRuleContext {
+  public:
+    CondContext(antlr4::ParserRuleContext *parent, size_t invokingState);
+    virtual size_t getRuleIndex() const override;
+    LOrExpContext *lOrExp();
+
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+   
+  };
+
+  CondContext* cond();
 
   class  LOrExpContext : public antlr4::ParserRuleContext {
   public:
@@ -687,12 +702,26 @@ public:
 
   PrimaryExpContext* primaryExp();
 
+  class  RealParamContext : public antlr4::ParserRuleContext {
+  public:
+    RealParamContext(antlr4::ParserRuleContext *parent, size_t invokingState);
+    virtual size_t getRuleIndex() const override;
+    ExprContext *expr();
+    antlr4::tree::TerminalNode *T_STRING_LITERAL();
+
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+   
+  };
+
+  RealParamContext* realParam();
+
   class  RealParamListContext : public antlr4::ParserRuleContext {
   public:
     RealParamListContext(antlr4::ParserRuleContext *parent, size_t invokingState);
     virtual size_t getRuleIndex() const override;
-    std::vector<ExprContext *> expr();
-    ExprContext* expr(size_t i);
+    std::vector<RealParamContext *> realParam();
+    RealParamContext* realParam(size_t i);
     std::vector<antlr4::tree::TerminalNode *> T_COMMA();
     antlr4::tree::TerminalNode* T_COMMA(size_t i);
 

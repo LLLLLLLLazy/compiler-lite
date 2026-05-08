@@ -119,6 +119,10 @@ public:
     return visitChildren(ctx);
   }
 
+  virtual std::any visitCond(MiniCParser::CondContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
   virtual std::any visitLOrExp(MiniCParser::LOrExpContext *ctx) override {
     return visitChildren(ctx);
   }
@@ -168,6 +172,10 @@ public:
   }
 
   virtual std::any visitPrimaryExp(MiniCParser::PrimaryExpContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
+  virtual std::any visitRealParam(MiniCParser::RealParamContext *ctx) override {
     return visitChildren(ctx);
   }
 

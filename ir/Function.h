@@ -18,7 +18,7 @@ class Function : public GlobalValue {
 
 public:
     /// @brief 构造函数对象
-    explicit Function(std::string _name, FunctionType * _type, bool _builtin = false);
+    explicit Function(std::string _name, FunctionType * _type, bool _builtin = false, bool _varArg = false);
 
     /// @brief 析构函数
     ~Function() override;
@@ -31,6 +31,12 @@ public:
 
     /// @brief 判断函数是否为内建函数
     bool isBuiltin();
+
+    /// @brief 判断函数是否是可变参数函数
+    [[nodiscard]] bool isVarArg() const
+    {
+        return varArg;
+    }
 
     /// @brief 将函数转换为 IR 文本
     void toString(std::string & str);
@@ -84,6 +90,7 @@ private:
     Type * returnType = nullptr;
     std::vector<FormalParam *> params;
     bool builtIn = false;
+    bool varArg = false;
     std::vector<LocalVariable *> varsVector;
     std::vector<Value *> detachedValues;
     BasicBlock * entryBlock = nullptr;
