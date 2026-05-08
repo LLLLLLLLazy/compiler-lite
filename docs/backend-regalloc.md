@@ -10,7 +10,8 @@ flowchart TD
     BuiltinCheck -- "Yes" --> Return(["直接返回"])
     BuiltinCheck -- "No" --> BuildPool["构建可用物理寄存器池<br>buildRegisterPool(func)<br>t0-t2, a0-a7, s1-s11, t5-t6"]
 
-    BuildPool --> DomTree["构建支配树<br>DominatorTree(func)"]
+    BuildPool --> BuildFloatPool["构建可用浮点寄存器池<br>buildFloatRegisterPool(func)<br>ft0-ft7, fa0-fa7, ft8-ft11 (20个caller-saved FPR)"]
+    BuildFloatPool --> DomTree["构建支配树<br>DominatorTree(func)"]
     DomTree --> LoopInfo["循环分析<br>LoopInfo(func, domTree)"]
     LoopInfo --> SetDepth["设置基本块循环深度<br>bb->setLoopDepth()"]
 
@@ -166,20 +167,35 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start(["tryAssignFreeReg(interval)"]) --> GetNode["获取interval在干涉图中的节点编号"]
-    GetNode --> GetUsed["获取干涉邻居已占用的寄存器集合<br>graph->getInterferingRegs()"]
-    GetUsed --> NextReg["遍历可用寄存器池availableRegs"]
-    NextReg --> CanAssign{{"canAssignReg()<br>caller-saved且跨越调用?"}}
+    Start(["tryAssignFreeReg(interval)"]) --> Classify{{"isFloatInterval()?"}}
+    Classify -- "float" --> GetNodeF["获取干涉图节点编号"]
+    Classify -- "int" --> GetNodeI["获取干涉图节点编号"]
 
-    CanAssign -- "不可分配" --> NextReg
-    CanAssign -- "可分配" --> NotUsed{{"该寄存器不在usedRegs中?"}}
+    GetNodeF --> GetUsedF["获取FPR干涉邻居已占用寄存器<br>getInterferingRegsForClass(node, ..., wantFloat=true)"]
+    GetNodeI --> GetUsedI["获取GPR干涉邻居已占用寄存器<br>getInterferingRegsForClass(node, ..., wantFloat=false)"]
 
-    NotUsed -- "Yes" --> Assign["assignPhysicalReg()<br>分配该寄存器给interval"]
-    Assign --> Success(["返回 true"])
+    GetUsedF --> NextRegF["遍历FPR寄存器池availableFloatRegs"]
+    GetUsedI --> NextRegI["遍历GPR寄存器池availableRegs"]
 
-    NotUsed -- "No" --> MoreReg{{"还有更多寄存器?"}}
-    MoreReg -- "Yes" --> NextReg
-    MoreReg -- "No" --> Fail(["返回 false"])
+    NextRegF --> CanAssignF{{"canAssignReg()<br>caller-saved FPR且跨越调用?"}}
+    NextRegI --> CanAssignI{{"canAssignReg()<br>caller-saved GPR且跨越调用?"}}
+
+    CanAssignF -- "不可分配" --> NextRegF
+    CanAssignF -- "可分配" --> NotUsedF{{"该寄存器不在usedRegs中?"}}
+    CanAssignI -- "不可分配" --> NextRegI
+    CanAssignI -- "可分配" --> NotUsedI{{"该寄存器不在usedRegs中?"}}
+
+    NotUsedF -- "Yes" --> AssignF["assignPhysicalReg()<br>分配该FPR给interval"]
+    NotUsedF -- "No" --> MoreRegF{{"还有更多FPR?"}}
+    NotUsedI -- "Yes" --> AssignI["assignPhysicalReg()<br>分配该GPR给interval"]
+    NotUsedI -- "No" --> MoreRegI{{"还有更多GPR?"}}
+
+    AssignF --> Success(["返回 true"])
+    AssignI --> Success
+    MoreRegF -- "Yes" --> NextRegF
+    MoreRegF -- "No" --> Fail(["返回 false"])
+    MoreRegI -- "Yes" --> NextRegI
+    MoreRegI -- "No" --> Fail
 
     %%Node styles
     classDef default fill:#E2EAFE4F,stroke:#5A88F6AF
@@ -188,12 +204,10 @@ flowchart TD
 
     %%Link styles
     linkStyle default stroke:#666666AF,stroke-width:2px
-    linkStyle 4 stroke:#339933AF,stroke-width:2px
-    linkStyle 5 stroke:#DD3333AF,stroke-width:2px
 
     %%Node classes
     class Success,Fail endNode
-    class CanAssign,NotUsed,MoreReg decisionNode
+    class Classify,CanAssignF,CanAssignI,NotUsedF,NotUsedI,MoreRegF,MoreRegI decisionNode
 ```
 
 ## tryEvictAndAssign 详细流程
@@ -243,6 +257,8 @@ flowchart TD
 
 ## 可用寄存器池
 
+### 通用寄存器 (GPR)
+
 | 类别 | 寄存器 | 编号 | 说明 |
 |------|--------|------|------|
 | caller-saved | t0-t2 | 5,6,7 | 临时寄存器 |
@@ -251,3 +267,25 @@ flowchart TD
 | caller-saved | t5-t6 | 30,31 | 临时寄存器 |
 | **保留** | zero,ra,sp,gp,tp,s0/fp | - | 不参与分配 |
 | **保留** | t3-t4 | 28,29 | 保留为scratch寄存器 |
+
+### 浮点寄存器 (FPR)
+
+| 类别 | 寄存器 | 编号 | 说明 |
+|------|--------|------|------|
+| caller-saved | ft0-ft7 | 0-7 | 临时寄存器 |
+| caller-saved | fa0-fa7 | 10-17 | 参数/返回值寄存器 |
+| caller-saved | ft8-ft11 | 28-31 | 临时寄存器 |
+| **callee-saved (未启用)** | fs0-fs1 | 8-9 | 保存寄存器 (当前不参与分配) |
+| **callee-saved (未启用)** | fs2-fs11 | 18-27 | 保存寄存器 (当前不参与分配) |
+
+> **注意**：GPR和FPR都使用0-31编号，编号相同不代表同一物理资源。干涉集合必须通过 `getInterferingRegsForClass()` 按类别过滤。
+
+## 相关文档
+
+| 文档 | 内容 |
+|------|------|
+| [后端整体流程](backend-overview.md) | 编译流水线、函数级代码生成、栈帧布局 |
+| [指令选择与代码输出](backend-instselect.md) | IR指令翻译分派、操作数加载/存储 |
+| [活跃性分析流程](liveness-analysis-flowchart.md) | 活跃区间计算、数据流方程、下游消费 |
+| [常量除法优化](backend-const-div-opt.md) | 2的幂次移位、Magic Number算法、强度消减 |
+| [浮点寄存器分配](backend-fpregalloc.md) | FPR池构建、类别区分、临时FPR借用、并行移动解析 |

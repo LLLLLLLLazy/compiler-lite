@@ -66,11 +66,13 @@ flowchart TD
         Downstream --> SpillMgr("SpillManager: 溢出代码插入<br>为溢出区间分配栈槽<br>定义点后插入StoreInst(spill)<br>使用点前插入LoadInst(reload)")
         Downstream --> LocalTmp("LocalTempManager: 临时寄存器管理<br>isLiveAllocatedReg()判断寄存器是否承载live值<br>borrow()借用时避开活跃值")
         Downstream --> ScratchAlloc("ScratchAllocator: Scratch寄存器分配<br>isRegOccupiedByIR()检查与IR活跃值冲突")
+        Downstream --> FloatTmp("浮点临时寄存器管理<br>borrowFloatTemp(): 遍历FPR池避开活跃值<br>isFloatRegLiveAt(): 查询FPR活跃性<br>emitFloatRegMoves(): 解析FPR并行移动")
     end
 
     SpillMgr --> End(["结束: 活跃性分析完成, 寄存器分配结果可用"])
     LocalTmp --> End
     ScratchAlloc --> End
+    FloatTmp --> End
 
     %%Node styles
     classDef default fill:#E2EAFE4F,stroke:#5A88F6AF
@@ -92,3 +94,13 @@ flowchart TD
     style Phase3 fill:#E2EAFE3F,stroke:#6666669F,stroke-width:1px,stroke-dasharray: 5 5
     style Phase4 fill:#E2EAFE3F,stroke:#6666669F,stroke-width:1px,stroke-dasharray: 5 5
 ```
+
+## 相关文档
+
+| 文档 | 内容 |
+|------|------|
+| [后端整体流程](backend-overview.md) | 编译流水线、函数级代码生成、栈帧布局 |
+| [指令选择与代码输出](backend-instselect.md) | IR指令翻译分派、操作数加载/存储 |
+| [寄存器分配详细流程](backend-regalloc.md) | Greedy分配器、tryAssignFreeReg、tryEvictAndAssign |
+| [常量除法优化](backend-const-div-opt.md) | 2的幂次移位、Magic Number算法、强度消减 |
+| [浮点寄存器分配](backend-fpregalloc.md) | FPR池构建、类别区分、临时FPR借用、并行移动解析 |

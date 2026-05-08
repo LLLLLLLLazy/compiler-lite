@@ -207,6 +207,9 @@ set(IR_SRCS
 	ir/passes/ArrayScalarize.cpp
 	ir/passes/ConstProp.h
 	ir/passes/ConstProp.cpp
+	# 跨过程常量实参传播 pass
+	ir/passes/InterproceduralConstProp.h
+	ir/passes/InterproceduralConstProp.cpp
 	ir/passes/InstCombine.h
 	ir/passes/InstCombine.cpp
 	ir/passes/CFGStateCleanup.h
@@ -229,6 +232,12 @@ set(IR_SRCS
 	ir/passes/Mem2Reg.cpp
 	ir/passes/LICM.h
 	ir/passes/LICM.cpp
+	# 保守小函数内联 pass
+	ir/passes/SmallFunctionInline.h
+	ir/passes/SmallFunctionInline.cpp
+	# 尾递归消除 pass
+	ir/passes/TailRecursionElim.h
+	ir/passes/TailRecursionElim.cpp
 	ir/passes/PhiLowering.h
 	ir/passes/PhiLowering.cpp
 )

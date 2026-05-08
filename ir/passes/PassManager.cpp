@@ -18,6 +18,9 @@
 #include "Module.h"
 #include "PhiLowering.h"
 #include "UnreachableBlockElim.h"
+#include "InterproceduralConstProp.h"
+#include "SmallFunctionInline.h"
+#include "TailRecursionElim.h"
 
 namespace {
 
@@ -40,6 +43,16 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
     }
 
     registerModulePass([](Module * currentModule) {
+        InterproceduralConstProp pass(currentModule);
+        return pass.run();
+    });
+
+    registerModulePass([](Module * currentModule) {
+        SmallFunctionInline pass(currentModule);
+        return pass.run();
+    });
+
+    registerModulePass([](Module * currentModule) {
         GlobalToLocal pass(currentModule);
         return pass.run();
     });
@@ -53,6 +66,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         Mem2Reg pass(func, module);
         pass.run();
         return false;
+    });
+
+    registerFunctionPass([](Function * func) {
+        TailRecursionElim pass(func);
+        return pass.run();
     });
 
     maxFixedPointRounds = kDefaultMaxFixedPointRounds;

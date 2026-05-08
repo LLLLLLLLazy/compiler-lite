@@ -101,7 +101,6 @@ void Value::replaceAllUseWith(Value * new_val)
         for (int32_t index = 0; index < user->getOperandsNum(); ++index) {
             if (user->getOperand(index) == this) {
                 user->setOperand(index, new_val);
-                break;
             }
         }
     }

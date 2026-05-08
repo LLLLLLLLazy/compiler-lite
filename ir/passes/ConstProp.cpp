@@ -24,10 +24,13 @@
 #include "FCmpInst.h"
 #include "FPToSIInst.h"
 #include "Function.h"
+#include "GlobalVariable.h"
 #include "ICmpInst.h"
 #include "Instruction.h"
+#include "LoadInst.h"
 #include "PhiInst.h"
 #include "SIToFPInst.h"
+#include "StoreInst.h"
 #include "Value.h"
 #include "ZExtInst.h"
 #include "Module.h"
@@ -703,6 +706,70 @@ private:
         return LatticeValue::getUnknown();
     }
 
+    /// @brief 判断全局标量是否被任意函数直接写入
+    /// @param global 待检查的全局变量
+    /// @return true 表示该全局变量被 store 改写过
+    bool isGlobalStored(GlobalVariable * global) const
+    {
+        if (!global || !mod) {
+            return true;
+        }
+
+        for (auto * function : mod->getFunctionList()) {
+            if (!function || function->isBuiltin()) {
+                continue;
+            }
+
+            for (auto * bb : function->getBlocks()) {
+                for (auto * inst : bb->getInstructions()) {
+                    auto * store = dynamic_cast<StoreInst *>(inst);
+                    if (store && store->getPointerOperand() == global) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// @brief 计算只读全局标量 load 的 lattice 值
+    /// @param inst 待求值的 load 指令
+    /// @return 若可证明为只读标量则返回初始化常量，否则返回 overdefined
+    LatticeValue evaluateLoad(LoadInst * inst) const
+    {
+        if (!inst) {
+            return LatticeValue::getOverdefined();
+        }
+
+        auto * global = dynamic_cast<GlobalVariable *>(inst->getPointerOperand());
+        if (!global || isGlobalStored(global)) {
+            return LatticeValue::getOverdefined();
+        }
+
+        Type * valueType = global->getValueType();
+        if (!valueType || (!valueType->isIntegerType() && !valueType->isFloatType())) {
+            return LatticeValue::getOverdefined();
+        }
+
+        switch (global->getInitKind()) {
+            case GlobalVariable::InitKind::Zero:
+                return valueType->isFloatType() ? LatticeValue::getFloatConstant(0.0f)
+                                                : LatticeValue::getIntegerConstant(0);
+
+            case GlobalVariable::InitKind::Int:
+                return valueType->isIntegerType() ? LatticeValue::getIntegerConstant(global->getInitIntValue())
+                                                  : LatticeValue::getOverdefined();
+
+            case GlobalVariable::InitKind::Float:
+                return valueType->isFloatType() ? LatticeValue::getFloatConstant(global->getInitFloatValue())
+                                                : LatticeValue::getOverdefined();
+
+            default:
+                return LatticeValue::getOverdefined();
+        }
+    }
+
     /// @brief 根据指令种类分发具体的 lattice 求值逻辑
     /// @param inst 待求值的指令
     /// @return 该指令结果值的 lattice 状态
@@ -751,6 +818,9 @@ private:
 
             case IRInstOperator::IRINST_OP_FPTOSI:
                 return evaluateFPToSI(dynamic_cast<FPToSIInst *>(inst));
+
+            case IRInstOperator::IRINST_OP_LOAD:
+                return evaluateLoad(dynamic_cast<LoadInst *>(inst));
 
             case IRInstOperator::IRINST_OP_COPY:
                 return getValueState(inst->getOperand(0));

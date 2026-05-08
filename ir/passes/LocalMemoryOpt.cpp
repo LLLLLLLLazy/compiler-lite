@@ -5,6 +5,7 @@
 
 #include "LocalMemoryOpt.h"
 
+#include <algorithm>
 #include <iterator>
 #include <unordered_map>
 
@@ -159,6 +160,109 @@ bool sweepDeadInstructions(Function * func)
     }
 
     return removed;
+}
+
+/// @brief 提升只有一次入口 store 的非逃逸 alloca，覆盖 mem2reg 不处理的指针临时槽
+///
+/// 对于只在入口基本块被 store 一次、且所有 load 都在该 store 之后的非逃逸 alloca，
+/// 直接将所有 load 替换为 store 的值操作数，并删除 store 和 alloca。
+/// 这能处理 mem2reg 无法提升的指针临时槽场景。
+///
+/// @param func 待优化函数
+/// @param trackableAllocas 非逃逸 alloca 集合
+/// @return true 表示至少替换了一条 load 或删除了一条 store/alloca
+bool promoteSingleEntryStoreAllocas(Function * func, const std::unordered_set<AllocaInst *> & trackableAllocas)
+{
+    if (!func || !func->getEntryBlock()) {
+        return false;
+    }
+
+    bool changed = false;
+    BasicBlock * entry = func->getEntryBlock();
+    for (auto * alloca : trackableAllocas) {
+        if (!alloca || alloca->isDead()) {
+            continue;
+        }
+
+        StoreInst * onlyStore = nullptr;
+        std::vector<LoadInst *> loads;
+        bool valid = true;
+
+        for (auto * use : alloca->getUseList()) {
+            auto * inst = dynamic_cast<Instruction *>(use->getUser());
+            if (!inst || inst->isDead()) {
+                continue;
+            }
+
+            if (auto * load = dynamic_cast<LoadInst *>(inst)) {
+                if (load->getPointerOperand() != alloca) {
+                    valid = false;
+                    break;
+                }
+                loads.push_back(load);
+                continue;
+            }
+
+            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+                if (store->getPointerOperand() != alloca || store->getValueOperand() == alloca) {
+                    valid = false;
+                    break;
+                }
+                if (onlyStore != nullptr) {
+                    valid = false;
+                    break;
+                }
+                onlyStore = store;
+                continue;
+            }
+
+            valid = false;
+            break;
+        }
+
+        if (!valid || !onlyStore || onlyStore->getParentBlock() != entry || loads.empty()) {
+            continue;
+        }
+
+        auto & entryInsts = entry->getInstructions();
+        auto storeIt = std::find(entryInsts.begin(), entryInsts.end(), static_cast<Instruction *>(onlyStore));
+        if (storeIt == entryInsts.end()) {
+            continue;
+        }
+
+        bool storeDominatesLoads = true;
+        for (auto * load : loads) {
+            if (load->getParentBlock() != entry) {
+                continue;
+            }
+
+            auto loadIt = std::find(entryInsts.begin(), entryInsts.end(), static_cast<Instruction *>(load));
+            if (loadIt != entryInsts.end() && std::distance(entryInsts.begin(), loadIt) < std::distance(entryInsts.begin(), storeIt)) {
+                storeDominatesLoads = false;
+                break;
+            }
+        }
+
+        if (!storeDominatesLoads) {
+            continue;
+        }
+
+        Value * replacement = onlyStore->getValueOperand();
+        for (auto * load : loads) {
+            load->replaceAllUseWith(replacement);
+            load->clearOperands();
+            load->setDead(true);
+            changed = true;
+        }
+
+        onlyStore->clearOperands();
+        onlyStore->setDead(true);
+        alloca->clearOperands();
+        alloca->setDead(true);
+        changed = true;
+    }
+
+    return changed;
 }
 
 /// @brief 收集从入口块可达的基本块集合
@@ -368,6 +472,23 @@ bool rewriteLoadsFromAvailableValues(Function * func,
     }
 
     bool changed = false;
+    // 转发映射：记录已被替换的 load 指令到其替换值的对应关系，
+    // 用于后续 store 的可用值也通过转发链解析到最终源值
+    std::unordered_map<Value *, Value *> forwardedValues;
+    // 解析转发链：沿 forwardedValues 递归查找最终源值，避免使用已被删除的 load 作为可用值
+    auto resolveForwardedValue = [&forwardedValues](Value * value) {
+        Value * current = value;
+        std::unordered_set<Value *> visited;
+        while (current != nullptr && visited.insert(current).second) {
+            auto it = forwardedValues.find(current);
+            if (it == forwardedValues.end()) {
+                break;
+            }
+            current = it->second;
+        }
+        return current == nullptr ? value : current;
+    };
+
     for (auto * bb : func->getBlocks()) {
         AvailableValueMap availableValues;
         auto inIt = inStates.find(bb);
@@ -392,7 +513,11 @@ bool rewriteLoadsFromAvailableValues(Function * func,
 
                 auto availableIt = availableValues.find(location);
                 if (availableIt != availableValues.end()) {
-                    load->replaceAllUseWith(availableIt->second);
+                    // 将 load 替换为转发解析后的最终可用值
+                    Value * replacement = resolveForwardedValue(availableIt->second);
+                    load->replaceAllUseWith(replacement);
+                    // 记录转发关系，后续 store 遇到该 load 作为可用值时也能解析到最终源值
+                    forwardedValues[load] = replacement;
                     load->clearOperands();
                     load->setDead(true);
                     changed = true;
@@ -414,7 +539,8 @@ bool rewriteLoadsFromAvailableValues(Function * func,
                     continue;
                 }
 
-                availableValues[location] = store->getValueOperand();
+                // store 更新可用值时，也通过转发链解析，确保可用值指向最终源值而非已删除的 load
+                availableValues[location] = resolveForwardedValue(store->getValueOperand());
             }
         }
     }
@@ -815,6 +941,8 @@ bool LocalMemoryOpt::run()
     const auto localDSEAllocas = collectLocalDSEAllocas(trackableAllocas, preciseOnlyAllocas);
 
     bool changed = false;
+    // 先提升只有一次入口 store 的 alloca，覆盖 mem2reg 不处理的指针临时槽
+    changed = promoteSingleEntryStoreAllocas(func, trackableAllocas) || changed;
 
     changed = runAvailableValueOptimizations(func, rpo, reachableBlocks, trackableAllocas) || changed;
     changed = eliminateDeadStores(func, rpo, reachableBlocks, localDSEAllocas, preciseOnlyAllocas) || changed;

@@ -7,7 +7,9 @@
 
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <unordered_set>
+#include <unordered_map>
 
 #include "BasicBlock.h"
 #include "BinaryInst.h"
@@ -16,6 +18,7 @@
 #include "CopyInst.h"
 #include "FPToSIInst.h"
 #include "Function.h"
+#include "GetElementPtrInst.h"
 #include "Instruction.h"
 #include "IntegerType.h"
 #include "Module.h"
@@ -99,6 +102,29 @@ Value * getForwardedCopySource(Value * value)
     return current;
 }
 
+struct GEPKey {
+    Value * base = nullptr;
+    Value * index = nullptr;
+    Type * type = nullptr;
+    bool decayArray = false;
+
+    bool operator==(const GEPKey & other) const
+    {
+        return base == other.base && index == other.index && type == other.type && decayArray == other.decayArray;
+    }
+};
+
+struct GEPKeyHash {
+    std::size_t operator()(const GEPKey & key) const
+    {
+        std::size_t result = std::hash<Value *>{}(key.base);
+        result ^= std::hash<Value *>{}(key.index) << 1U;
+        result ^= std::hash<Type *>{}(key.type) << 2U;
+        result ^= std::hash<bool>{}(key.decayArray) << 3U;
+        return result;
+    }
+};
+
 } // namespace
 
 /// @brief 构造 InstCombine
@@ -119,6 +145,11 @@ bool InstCombine::run()
     bool localChanged = false;
     do {
         localChanged = false;
+
+        if (eliminateRedundantGEPs()) {
+            localChanged = true;
+            changed = true;
+        }
 
         for (auto * bb : func->getBlocks()) {
             for (auto * inst : bb->getInstructions()) {
@@ -175,6 +206,37 @@ bool InstCombine::trySimplifyInstruction(Instruction * inst)
     }
 
     return false;
+}
+
+/// @brief 消除同一基本块内重复的 GEP 地址计算
+/// @return 若至少删除一条 GEP 则返回 true
+bool InstCombine::eliminateRedundantGEPs()
+{
+    bool changed = false;
+    for (auto * bb : func->getBlocks()) {
+        std::unordered_map<GEPKey, GetElementPtrInst *, GEPKeyHash> availableGEPs;
+        for (auto * inst : bb->getInstructions()) {
+            if (!inst || inst->isDead()) {
+                continue;
+            }
+
+            auto * gep = dynamic_cast<GetElementPtrInst *>(inst);
+            if (!gep) {
+                continue;
+            }
+
+            GEPKey key{gep->getBasePointer(), gep->getIndexOperand(), gep->getType(), gep->isArrayDecayGEP()};
+            auto it = availableGEPs.find(key);
+            if (it != availableGEPs.end() && !it->second->isDead()) {
+                changed = replaceInstWithValue(gep, it->second) || changed;
+                continue;
+            }
+
+            availableGEPs.emplace(key, gep);
+        }
+    }
+
+    return changed;
 }
 
 /// @brief 用现有值替换指令结果并删除旧指令

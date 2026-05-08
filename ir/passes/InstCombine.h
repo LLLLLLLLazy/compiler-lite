@@ -18,6 +18,7 @@ class BinaryInst;
 class CopyInst;
 class FPToSIInst;
 class Function;
+class GetElementPtrInst;
 class Instruction;
 class Module;
 class PhiInst;
@@ -39,6 +40,10 @@ private:
     /// @param inst 待化简的指令
     /// @return 若成功化简则返回 true
     bool trySimplifyInstruction(Instruction * inst);
+
+    /// @brief 消除同一基本块内重复的 GEP 地址计算
+    /// @return 若至少删除一条 GEP 则返回 true
+    bool eliminateRedundantGEPs();
 
     /// @brief 用现有值替换指令结果并删除旧指令
     /// @param inst 待替换的指令
