@@ -7,16 +7,21 @@
 
 #include <algorithm>
 #include <iterator>
+#include <unordered_map>
 #include <utility>
 
+#include "AllocaInst.h"
 #include "BasicBlock.h"
 #include "BranchInst.h"
+#include "CallInst.h"
 #include "CondBranchInst.h"
 #include "DominatorTree.h"
 #include "Function.h"
 #include "Instruction.h"
+#include "LoadInst.h"
 #include "LoopInfo.h"
 #include "PhiInst.h"
+#include "StoreInst.h"
 #include "Use.h"
 #include "Value.h"
 
@@ -74,6 +79,119 @@ bool needsExitDominance(IRInstOperator op)
         default:
             return false;
     }
+}
+
+/// @brief 函数纯度分析状态枚举，用于 LICM 判断调用是否可安全外提
+enum class FunctionPurityState {
+    Unknown,   ///< 尚未分析
+    Visiting,  ///< 正在访问（用于检测递归）
+    Pure,      ///< 纯函数：无副作用，可安全外提
+    Impure,    ///< 非纯函数：有副作用，不可外提
+};
+
+/// @brief 函数纯度分析器
+///
+/// 通过递归分析函数体中的指令来判断函数是否为纯函数。
+/// 纯函数的判定条件：不包含 store 指令、所有调用也都是纯函数调用、
+/// 其余指令均无副作用。用于 LICM 判断循环内的函数调用是否可安全外提。
+class FunctionPurity {
+public:
+    bool isPure(Function * function)
+    {
+        if (!function || function->isBuiltin() || function->getBlocks().empty()) {
+            return false;
+        }
+
+        auto it = states.find(function);
+        if (it != states.end()) {
+            return it->second == FunctionPurityState::Pure;
+        }
+
+        states[function] = FunctionPurityState::Visiting;
+        bool pure = true;
+        for (auto * bb : function->getBlocks()) {
+            for (auto * inst : bb->getInstructions()) {
+                if (!isInstructionAllowed(inst)) {
+                    pure = false;
+                    break;
+                }
+            }
+            if (!pure) {
+                break;
+            }
+        }
+
+        states[function] = pure ? FunctionPurityState::Pure : FunctionPurityState::Impure;
+        return pure;
+    }
+
+private:
+    bool isInstructionAllowed(Instruction * inst)
+    {
+        if (!inst || inst->isDead() || inst->isTerminator()) {
+            return true;
+        }
+
+        if (dynamic_cast<AllocaInst *>(inst) || dynamic_cast<LoadInst *>(inst)) {
+            return true;
+        }
+
+        if (dynamic_cast<StoreInst *>(inst)) {
+            return false;
+        }
+
+        if (auto * call = dynamic_cast<CallInst *>(inst)) {
+            auto it = states.find(call->getCallee());
+            if (it != states.end() && it->second == FunctionPurityState::Visiting) {
+                return false;
+            }
+            return isPure(call->getCallee());
+        }
+
+        return !inst->mayHaveSideEffects();
+    }
+
+    std::unordered_map<Function *, FunctionPurityState> states;  ///< 函数到纯度状态的映射
+};
+
+/// @brief 判断指令是否为纯函数调用（用于 LICM 候选判断）
+/// @param inst 待检查的指令
+/// @return true 表示该指令是纯函数调用且有返回值
+bool isPureCall(Instruction * inst)
+{
+    auto * call = dynamic_cast<CallInst *>(inst);
+    if (!call || !call->hasResultValue()) {
+        return false;
+    }
+
+    FunctionPurity purity;
+    return purity.isPure(call->getCallee());
+}
+
+/// @brief 判断循环体是否可能写入内存
+///
+/// 遍历循环体中的所有指令，若存在 store 指令或非纯函数调用，
+/// 则认为循环可能修改内存，此时纯函数调用不可安全外提
+/// （因为外提后可能改变调用与内存写入的相对顺序）。
+/// @param loopBody 循环体基本块集合
+/// @return true 表示循环可能写入内存
+bool loopMayWriteMemory(const std::unordered_set<BasicBlock *> & loopBody)
+{
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            if (!inst || inst->isDead()) {
+                continue;
+            }
+            if (inst->mayWriteMemory()) {
+                return true;
+            }
+            auto * call = dynamic_cast<CallInst *>(inst);
+            if (call && !isPureCall(call)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -217,6 +335,12 @@ bool LICM::tryHoistLoop(BasicBlock * header,
                 }
 
                 if (!isHoistableInstruction(inst)) {
+                    continue;
+                }
+
+                // 若候选指令是函数调用，且循环体可能写入内存，则不可外提
+                // 因为外提后调用与内存写入的相对顺序可能改变，破坏语义
+                if (dynamic_cast<CallInst *>(inst) && loopMayWriteMemory(loopBody)) {
                     continue;
                 }
 
@@ -436,6 +560,11 @@ bool LICM::isHoistableInstruction(Instruction * inst) const
         return false;
     }
 
+    // 函数调用指令：仅当被调用函数是纯函数时才允许外提
+    if (dynamic_cast<CallInst *>(inst)) {
+        return isPureCall(inst);
+    }
+
     return isPureLoopInvariantOp(inst->getOp());
 }
 
@@ -446,6 +575,11 @@ bool LICM::requiresExitDominance(Instruction * inst) const
 {
     if (!inst) {
         return false;
+    }
+
+    // 函数调用始终需要退出点支配，因为调用可能抛异常或产生副作用
+    if (dynamic_cast<CallInst *>(inst)) {
+        return true;
     }
 
     return needsExitDominance(inst->getOp());

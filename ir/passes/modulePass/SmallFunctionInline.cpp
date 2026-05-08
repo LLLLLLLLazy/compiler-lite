@@ -3,8 +3,8 @@
 /// @brief 保守的小函数内联优化 pass 实现。
 ///
 /// 对满足体积和结构约束的 callee 进行内联展开：
-///   - 叶子函数（不调用其他用户函数）：最多 4 个基本块、18 条指令
-///   - 优先名称函数（如 sigmoid/exp 等）：最多 64 个基本块、300 条指令
+///   - 冷路径叶子函数：较小阈值
+///   - 循环内热点调用点或单调用点叶子函数：按结构阈值适度放宽
 /// 内联后删除 call 指令，将 callee 体复制到 caller 中，
 /// 用 phi 节点合并多个返回值，使后续 mem2reg/LICM/SCCP 能跨函数体优化。
 ///
@@ -25,12 +25,14 @@
 #include "CallInst.h"
 #include "CondBranchInst.h"
 #include "CopyInst.h"
+#include "DominatorTree.h"
 #include "FCmpInst.h"
 #include "FPToSIInst.h"
 #include "Function.h"
 #include "GetElementPtrInst.h"
 #include "ICmpInst.h"
 #include "LoadInst.h"
+#include "LoopInfo.h"
 #include "Module.h"
 #include "PhiInst.h"
 #include "ReturnInst.h"
@@ -42,33 +44,20 @@ namespace {
 
 /// @brief 内联最大轮次，防止无限循环
 constexpr int32_t kMaxInlineRounds = 256;
-/// @brief 优先名称函数允许的最大基本块数
-constexpr int32_t kPriorityMaxBlocks = 64;
-/// @brief 优先名称函数允许的最大指令数
-constexpr int32_t kPriorityMaxInsts = 300;
-/// @brief 叶子函数允许的最大基本块数
-constexpr int32_t kLeafMaxBlocks = 4;
-/// @brief 叶子函数允许的最大指令数
-constexpr int32_t kLeafMaxInsts = 18;
+/// @brief 冷路径叶子函数允许的最大基本块数
+constexpr int32_t kColdLeafMaxBlocks = 4;
+/// @brief 冷路径叶子函数允许的最大指令数
+constexpr int32_t kColdLeafMaxInsts = 32;
+/// @brief 循环内热点叶子函数允许的最大基本块数
+constexpr int32_t kHotLeafMaxBlocks = 8;
+/// @brief 循环内热点叶子函数允许的最大指令数
+constexpr int32_t kHotLeafMaxInsts = 96;
+/// @brief 单调用点叶子函数允许的最大基本块数
+constexpr int32_t kSingleCallLeafMaxBlocks = 8;
+/// @brief 单调用点叶子函数允许的最大指令数
+constexpr int32_t kSingleCallLeafMaxInsts = 128;
 /// @brief 被内联函数的 alloca 总字节数上限，防止栈帧膨胀
 constexpr int32_t kMaxAllocaBytes = 128;
-
-/// @brief 优先内联的函数名称集合，这些函数即使较大也允许内联
-const std::unordered_set<std::string> kPriorityInlineNames = {
-    "getNumPos",
-    "min",
-    "f",
-    "fun",
-    "max",
-    "sigmoid",
-    "exp",
-};
-
-/// @brief 判断函数名是否属于优先内联集合
-bool isPriorityName(const std::string & name)
-{
-    return kPriorityInlineNames.find(name) != kPriorityInlineNames.end();
-}
 
 /// @brief 统计函数中的指令总数
 /// @param func 目标函数
@@ -127,6 +116,65 @@ bool hasNonSelfUserCall(Function * func)
     }
 
     return false;
+}
+
+/// @brief 判断函数体内是否包含自然循环
+/// @param func 目标函数
+/// @return true 表示函数内存在循环
+/// @brief 判断函数体内是否包含自然循环
+///
+/// 通过构建支配树和循环信息来判断函数是否包含循环。
+/// 包含循环的函数内联后可能导致代码膨胀且不利于后续优化，因此不予内联。
+/// @param func 目标函数
+/// @return true 表示函数内存在循环
+bool containsNaturalLoop(Function * func)
+{
+    if (!func || func->getBlocks().empty()) {
+        return false;
+    }
+
+    DominatorTree domTree(func);
+    LoopInfo loopInfo(func, &domTree);
+    for (auto * bb : func->getBlocks()) {
+        if (loopInfo.isLoopHeader(bb)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// @brief 统计模块中直接调用某个函数的调用点数量
+/// @param mod 所属模块
+/// @param callee 被调用函数
+/// @return 直接调用点个数
+/// @brief 统计模块中直接调用某个函数的调用点数量
+///
+/// 遍历模块中所有非内置函数，统计直接调用 callee 的调用点个数。
+/// 用于判断 callee 是否为单调用点函数：单调用点函数内联后不会增加代码体积。
+/// @param mod 所属模块
+/// @param callee 被调用函数
+/// @return 直接调用点个数
+int32_t countDirectCallSites(Module * mod, Function * callee)
+{
+    if (!mod || !callee) {
+        return 0;
+    }
+
+    int32_t count = 0;
+    for (auto * function : mod->getFunctionList()) {
+        if (!function || function->isBuiltin()) {
+            continue;
+        }
+        for (auto * bb : function->getBlocks()) {
+            for (auto * inst : bb->getInstructions()) {
+                auto * call = dynamic_cast<CallInst *>(inst);
+                if (call && call->getCallee() == callee) {
+                    ++count;
+                }
+            }
+        }
+    }
+    return count;
 }
 
 /// @brief 判断指令是否属于内联支持的指令类型
@@ -234,6 +282,9 @@ bool SmallFunctionInline::inlineFirstCall()
             continue;
         }
 
+        // 为当前 caller 构建支配树和循环信息，用于判断调用点是否在循环内
+        DominatorTree domTree(caller);
+        LoopInfo loopInfo(caller, &domTree);
         std::vector<BasicBlock *> blocks = caller->getBlocks();
         for (auto * bb : blocks) {
             std::vector<Instruction *> insts(bb->getInstructions().begin(), bb->getInstructions().end());
@@ -243,7 +294,8 @@ bool SmallFunctionInline::inlineFirstCall()
                     continue;
                 }
 
-                if (shouldInlineCallee(caller, call->getCallee())) {
+                // 根据调用点所在循环深度决定内联阈值
+                if (shouldInlineCallee(caller, call, loopInfo.getLoopDepth(bb))) {
                     return inlineCall(call);
                 }
             }
@@ -255,10 +307,12 @@ bool SmallFunctionInline::inlineFirstCall()
 
 /// @brief 判断 callee 是否满足内联条件
 /// @param caller 调用方函数
-/// @param callee 被调用方函数
+/// @param call 调用点
+/// @param callLoopDepth 调用点所在循环深度
 /// @return true 表示可以内联该 callee
-bool SmallFunctionInline::shouldInlineCallee(Function * caller, Function * callee) const
+bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call, int32_t callLoopDepth) const
 {
+    Function * callee = call ? call->getCallee() : nullptr;
     if (!caller || !callee || callee->isBuiltin() || callee == caller || callee->getBlocks().empty()) {
         return false;
     }
@@ -268,6 +322,11 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, Function * calle
     }
 
     if (getAllocaBytes(callee) > kMaxAllocaBytes) {
+        return false;
+    }
+
+    // 包含循环的函数内联后可能导致代码膨胀，不予内联
+    if (containsNaturalLoop(callee)) {
         return false;
     }
 
@@ -281,11 +340,29 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, Function * calle
 
     int32_t blockCount = static_cast<int32_t>(callee->getBlocks().size());
     int32_t instCount = countInstructions(callee);
-    if (isPriorityName(callee->getName())) {
-        return blockCount <= kPriorityMaxBlocks && instCount <= kPriorityMaxInsts;
+
+    // 非叶子函数（调用了其他用户函数）不予内联，避免内联链过长
+    if (hasNonSelfUserCall(callee)) {
+        return false;
     }
 
-    return !hasNonSelfUserCall(callee) && blockCount <= kLeafMaxBlocks && instCount <= kLeafMaxInsts;
+    // 冷路径叶子函数：使用最保守的阈值
+    if (blockCount <= kColdLeafMaxBlocks && instCount <= kColdLeafMaxInsts) {
+        return true;
+    }
+
+    // 循环内热点调用点：适度放宽阈值，因为消除调用开销在循环中收益更大
+    if (callLoopDepth > 0 && blockCount <= kHotLeafMaxBlocks && instCount <= kHotLeafMaxInsts) {
+        return true;
+    }
+
+    // 单调用点叶子函数：内联后不会增加总体代码体积，可进一步放宽阈值
+    if (countDirectCallSites(mod, callee) == 1 && blockCount <= kSingleCallLeafMaxBlocks &&
+        instCount <= kSingleCallLeafMaxInsts) {
+        return true;
+    }
+
+    return false;
 }
 
 /// @brief 克隆指令的外壳（不填充操作数），用于内联时复制 callee 指令

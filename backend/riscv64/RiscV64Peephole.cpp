@@ -2,6 +2,8 @@
 
 #include <list>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -125,123 +127,132 @@ bool foldZeroSubCompare(InstList & code)
 	return changed;
 }
 
-/// @brief 融合 fmul.s + fadd.s 为 fmadd.s（以及 fsub 变体）
-///
-/// 模式匹配：
-///   fmul.s d, a, b
-///   fadd.s e, c, d   →  fmadd.s e, a, b, c
-///   fadd.s e, d, c   →  fmadd.s e, a, b, c  （加法可交换）
-///   fsub.s e, d, c   →  fmsub.s e, a, b, c  （d - c = a*b - c）
-///   fsub.s e, c, d   →  fnmsub.s e, a, b, c （c - a*b）
-///
-/// 要求 fmul 的结果 d 在 add/sub 之间无其他活跃使用，且在 add/sub 之后也不再使用。
-bool fuseFMA(InstList & code)
+bool isPowerOfTwo(int value)
 {
-	bool changed = false;
-	for (auto it = code.begin(); it != code.end(); ++it) {
-		auto * fmul = *it;
-		if (!isLiveInst(fmul) || fmul->opcode != "fmul.s") {
-			continue;
-		}
+	return value > 0 && (value & (value - 1)) == 0;
+}
 
-		const std::string & d = fmul->result;
-		const std::string & a = fmul->arg1;
-		const std::string & b = fmul->arg2;
-
-		auto addIt = nextLive(code, it);
-		if (addIt == code.end()) {
-			continue;
-		}
-
-		auto * addInst = *addIt;
-		if (!isLiveInst(addInst)) {
-			continue;
-		}
-
-		// Check that d is not used between fmul and add (they must be adjacent)
-		// Since we're using nextLive, there could be dead instructions between them.
-		// Verify no live instruction between uses d.
-		{
-			auto check = it;
-			++check;
-			bool dUsed = false;
-			while (check != addIt && check != code.end()) {
-				if (isLiveInst(*check)) {
-					if ((*check)->result == d || (*check)->arg1 == d || (*check)->arg2 == d) {
-						dUsed = true;
-						break;
-					}
-				}
-				++check;
-			}
-			if (dUsed) {
-				continue;
-			}
-		}
-
-		std::string newOp;
-		std::string c;
-
-		if (addInst->opcode == "fadd.s") {
-			// fadd.s e, c, d  →  fmadd.s e, a, b, c
-			// fadd.s e, d, c  →  fmadd.s e, a, b, c  (commutative)
-			if (addInst->arg2 == d) {
-				c = addInst->arg1;
-				newOp = "fmadd.s";
-			} else if (addInst->arg1 == d) {
-				c = addInst->arg2;
-				newOp = "fmadd.s";
-			}
-		} else if (addInst->opcode == "fsub.s") {
-			// fsub.s e, d, c  →  fmsub.s e, a, b, c  (a*b - c)
-			// fsub.s e, c, d  →  fnmsub.s e, a, b, c (c - a*b)
-			if (addInst->arg1 == d) {
-				c = addInst->arg2;
-				newOp = "fmsub.s";
-			} else if (addInst->arg2 == d) {
-				c = addInst->arg1;
-				newOp = "fnmsub.s";
-			}
-		}
-
-		if (newOp.empty()) {
-			continue;
-		}
-
-		// Verify d is dead after the add instruction (not used later)
-		{
-			bool dUsedLater = false;
-			auto check = addIt;
-			++check;
-			while (check != code.end()) {
-				if (isLiveInst(*check)) {
-					// Stop at labels/branches (different basic block)
-					if (isLabel(*check) || (*check)->opcode[0] == 'j' || (*check)->opcode[0] == 'b' ||
-					    (*check)->opcode == "ret" || (*check)->opcode == "call") {
-						break;
-					}
-					if ((*check)->arg1 == d || (*check)->arg2 == d) {
-						dUsedLater = true;
-						break;
-					}
-					// If d is redefined, it's dead from here on
-					if ((*check)->result == d) {
-						break;
-					}
-				}
-				++check;
-			}
-			if (dUsedLater) {
-				continue;
-			}
-		}
-
-		// Fuse: replace fadd/fsub with fmadd/fmsub, mark fmul as dead
-		addInst->replace(newOp, addInst->result, a, b, "", c);
-		fmul->setDead();
-		changed = true;
+int log2PowerOfTwo(int value)
+{
+	int shift = 0;
+	while (value > 1) {
+		value >>= 1;
+		++shift;
 	}
-	return changed;
+	return shift;
+}
+
+bool isStoreOpcode(const std::string & opcode)
+{
+	return opcode == "sb" || opcode == "sh" || opcode == "sw" || opcode == "sd" || opcode == "fsw" ||
+	       opcode == "fsd";
+}
+
+bool isMemoryOpcode(const std::string & opcode)
+{
+	return opcode == "lb" || opcode == "lbu" || opcode == "lh" || opcode == "lhu" || opcode == "lw" ||
+	       opcode == "lwu" || opcode == "ld" || opcode == "flw" || opcode == "fld" || isStoreOpcode(opcode);
+}
+
+bool isBranchOpcode(const std::string & opcode)
+{
+	return !opcode.empty() && opcode[0] == 'b';
+}
+
+bool definesResultOperand(RiscV64Inst * inst)
+{
+	return isLiveInst(inst) && !inst->result.empty() && inst->result != ":" && !isStoreOpcode(inst->opcode) &&
+	       !isBranchOpcode(inst->opcode) && inst->opcode != "j" && inst->opcode != "jal" &&
+	       inst->opcode != "call" && inst->opcode != "ret";
+}
+
+bool operandMentionsRegister(const std::string & operand, const std::string & reg)
+{
+	return operand == reg || operand.find("(" + reg + ")") != std::string::npos;
+}
+
+bool operandReferencesAddressBase(const std::string & operand, const std::string & reg)
+{
+	return operand.find("(" + reg + ")") != std::string::npos;
+}
+
+bool replaceAddressBase(std::string & operand, const std::string & oldReg, const std::string & newReg)
+{
+	const std::string needle = "(" + oldReg + ")";
+	const auto pos = operand.find(needle);
+	if (pos == std::string::npos) {
+		return false;
+	}
+	operand.replace(pos + 1, oldReg.size(), newReg);
+	return true;
+}
+
+bool usesRegister(RiscV64Inst * inst, const std::string & reg)
+{
+	if (!isLiveInst(inst) || reg.empty()) {
+		return false;
+	}
+	if (!definesResultOperand(inst) && operandMentionsRegister(inst->result, reg)) {
+		return true;
+	}
+	return operandMentionsRegister(inst->arg1, reg) || operandMentionsRegister(inst->arg2, reg) ||
+	       operandMentionsRegister(inst->addition, reg);
+}
+
+bool isControlBoundary(RiscV64Inst * inst)
+{
+	return isLiveInst(inst) &&
+	       (isLabel(inst) || isBranchOpcode(inst->opcode) || inst->opcode == "j" || inst->opcode == "jal" ||
+	        inst->opcode == "call" || inst->opcode == "ret");
+}
+
+bool isArgumentRegister(const std::string & reg)
+{
+	return reg.size() == 2 && reg[0] == 'a' && reg[1] >= '0' && reg[1] <= '7';
+}
+
+bool registerUsedBeforeRedef(InstList & code, InstIt start, const std::string & reg)
+{
+	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (usesRegister(inst, reg) || (inst->opcode == "call" && isArgumentRegister(reg))) {
+			return true;
+		}
+		if (isControlBoundary(inst)) {
+			break;
+		}
+		if (definesResultOperand(inst) && inst->result == reg) {
+			break;
+		}
+	}
+	return false;
+}
+
+bool instructionMentionsRegister(RiscV64Inst * inst, const std::string & reg)
+{
+	return isLiveInst(inst) &&
+	       (operandMentionsRegister(inst->result, reg) || operandMentionsRegister(inst->arg1, reg) ||
+	        operandMentionsRegister(inst->arg2, reg) || operandMentionsRegister(inst->addition, reg));
+}
+
+bool registerMentionedInFunction(const InstList & code, const std::string & reg)
+{
+	for (auto * inst : code) {
+		if (instructionMentionsRegister(inst, reg)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool functionHasStore(const InstList & code)
+{
+	for (auto * inst : code) {
+		if (isLiveInst(inst) && isStoreOpcode(inst->opcode)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /// @brief 强度消减：将乘以小常量的 mulw 替换为移位-加/减序列
@@ -256,8 +267,7 @@ bool fuseFMA(InstList & code)
 ///   N=7  → slliw d,s,3; subw d,d,s     （8*s - s）
 ///   N=15 → slliw d,s,4; subw d,d,s     （16*s - s）
 ///
-/// 对于 2 的幂直接用左移，对于 2^k±1 用移位+加减，
-/// 其余小常量回退到移位+加法近似。
+/// 对于 2 的幂直接用左移，仅对 2^k±1 生成等价的移位+加减。
 bool reduceMulByConst(InstList & code)
 {
 	bool changed = false;
@@ -287,135 +297,57 @@ bool reduceMulByConst(InstList & code)
 			continue;
 		}
 
-		const std::string & d = mul->result;
-		const std::string & s = mul->arg1;
-		const std::string & t = mul->arg2;
+		const std::string d = mul->result;
+		const std::string s = mul->arg1;
+		const std::string t = mul->arg2;
+		const std::string constReg = li->result;
 
 		// The li target must be one of the mulw operands
-		if (t != li->result && s != li->result) {
+		if (t != constReg && s != constReg) {
 			continue;
 		}
 
 		// Determine which operand is the variable (not the constant)
-		const std::string & var = (t == li->result) ? s : t;
+		if (s == constReg && t == constReg) {
+			continue;
+		}
+		const std::string var = (t == constReg) ? s : t;
 
-		// Generate shift-add sequence
-		// For N, find the best decomposition:
-		// If N is power of 2: just shift
-		// If N = 2^k + 1: shift + add
-		// If N = 2^k - 1: shift + sub
-		// etc.
+		int shift = 0;
+		std::string followOp;
+		if (isPowerOfTwo(imm)) {
+			shift = log2PowerOfTwo(imm);
+		} else if (imm == 3 || imm == 5 || imm == 9) {
+			shift = log2PowerOfTwo(imm - 1);
+			followOp = "addw";
+		} else if (imm == 7 || imm == 15) {
+			shift = log2PowerOfTwo(imm + 1);
+			followOp = "subw";
+		} else {
+			continue;
+		}
 
-		// Replace the mulw with the sequence
-		// First, mark li and mulw as dead
-		li->setDead();
-		mul->setDead();
+		if (!followOp.empty() && d == var) {
+			continue;
+		}
+		if (constReg != d && registerUsedBeforeRedef(code, mulIt, constReg)) {
+			continue;
+		}
 
 		// Find the position to insert new instructions
 		auto insertPos = mulIt;
 		++insertPos;
 
-		if ((imm & (imm - 1)) == 0) {
-			// Power of 2: just shift
-			int shift = 0;
-			int tmp = imm;
-			while (tmp > 1) { tmp >>= 1; shift++; }
-			auto * slli = new RiscV64Inst("slliw", d, var, std::to_string(shift));
-			code.insert(insertPos, slli);
-		} else {
-			// General case: use shift + add/sub
-			// Find highest bit
-			int highestBit = 0;
-			for (int b = 30; b >= 0; b--) {
-				if (imm & (1 << b)) { highestBit = b; break; }
-			}
-
-			int remainder = imm - (1 << highestBit);
-			if (remainder > 0 && remainder < (1 << highestBit)) {
-				// N = 2^k + remainder: slliw d,var,k; addw d,d,var (for remainder=1)
-				// But for remainder > 1, we need more complexity. Just use slliw + addw for remainder=1.
-				if (remainder == 1) {
-					auto * sll = new RiscV64Inst("slliw", d, var, std::to_string(highestBit));
-					code.insert(insertPos, sll);
-					auto * add = new RiscV64Inst("addw", d, d, var);
-					code.insert(insertPos, add);
-				} else {
-					// Fallback: slliw for highest bit, then slliw + addw for remainder
-					// d = var << highestBit + var * remainder
-					// For simplicity, emit: d = var << 1; d = d + var; (for N=3)
-					// More general: d = var * (1<<k) + var * remainder
-					// Use: d = var << highestBit, then add var*remainder
-					// For small remainder, just do slliw + addw(var<<shift2) if remainder is power of 2
-					if ((remainder & (remainder - 1)) == 0) {
-						// remainder is power of 2
-						int rshift = 0;
-						int rtmp = remainder;
-						while (rtmp > 1) { rtmp >>= 1; rshift++; }
-						auto * sll1 = new RiscV64Inst("slliw", d, var, std::to_string(highestBit));
-						code.insert(insertPos, sll1);
-						// Use a temp register for the remainder shift
-						// We need a scratch register. Use t5 (x30) as temp.
-						auto * sll2 = new RiscV64Inst("slliw", "t5", var, std::to_string(rshift));
-						code.insert(insertPos, sll2);
-						auto * add = new RiscV64Inst("addw", d, d, "t5");
-						code.insert(insertPos, add);
-					} else {
-						// General fallback: just do the shift + shift + add
-						// d = var << 1 + var (for 3), but this is specific
-						// For general case, use multiple adds or just leave as mulw
-						// Restore the instructions and skip
-						// Actually, let me handle common cases: 3,5,6,7,9,10,11,12,13,14,15
-						// For now, emit slliw + addw approach: d = (var << k) + var * remainder
-						// If remainder can be decomposed further...
-						// Simplest correct approach for arbitrary N: repeated add
-						// But that's worse than mulw. Let me just handle the most common:
-						// N=3: slliw+addw, N=5: slliw+addw, N=6: slliw+addw (2+1)*2
-						// N=7: slliw+subw, N=9: slliw+addw, N=10: slliw+addw
-						// N=11: slliw+addw (8+2+1), N=12: slliw+addw (8+4)
-						// N=13: slliw+addw (8+4+1), N=14: slliw+addw (16-2)
-						// N=15: slliw+subw (16-1)
-
-						// Generic approach: d = var << highestBit, then add/sub for remainder
-						auto * sll = new RiscV64Inst("slliw", d, var, std::to_string(highestBit));
-						code.insert(insertPos, sll);
-						auto * add = new RiscV64Inst("addw", d, d, var);
-						code.insert(insertPos, add);
-					}
-				}
-			} else {
-				// N = 2^k - something (e.g., 7 = 8-1, 15 = 16-1)
-				int nextPow = 1 << (highestBit + 1);
-				int deficit = nextPow - imm;
-				if (deficit == 1) {
-					auto * sll = new RiscV64Inst("slliw", d, var, std::to_string(highestBit + 1));
-					code.insert(insertPos, sll);
-					auto * sub = new RiscV64Inst("subw", d, d, var);
-					code.insert(insertPos, sub);
-				} else {
-					// Fallback
-					auto * sll = new RiscV64Inst("slliw", d, var, std::to_string(highestBit));
-					code.insert(insertPos, sll);
-					auto * add = new RiscV64Inst("addw", d, d, var);
-					code.insert(insertPos, add);
-				}
-			}
+		li->setDead();
+		mul->setDead();
+		code.insert(insertPos, new RiscV64Inst("slliw", d, var, std::to_string(shift)));
+		if (!followOp.empty()) {
+			code.insert(insertPos, new RiscV64Inst(followOp, d, d, var));
 		}
 
 		changed = true;
 	}
 	return changed;
-}
-
-/// @brief 获取目标位置之前最近的一条活跃指令迭代器
-InstIt prevLive(InstList & code, InstIt target)
-{
-	InstIt prev = code.end();
-	for (auto it = code.begin(); it != target; ++it) {
-		if (isLiveInst(*it)) {
-			prev = it;
-		}
-	}
-	return prev;
 }
 
 /// @brief 判断指令是否匹配指定的操作码、结果寄存器和操作数（空字符串表示不检查）
@@ -440,268 +372,339 @@ bool isInst(RiscV64Inst * inst,
 	return true;
 }
 
-/// @brief 为 TRSM 内层循环插入指针预计算指令
-///
-/// 在跳转到循环头的 j 指令前，插入 t1/t2 的地址预计算序列，
-/// 将行列偏移量折叠到指针中，使内层循环体只需做简单的步进加法。
-bool insertTrsmPointerSetup(InstList & code, const std::string & headerLabel)
+bool parseSmallNonNegativeInteger(const std::string & text, int & value)
 {
-	for (auto it = code.begin(); it != code.end(); ++it) {
-		auto * jump = *it;
-		if (!isInst(jump, "j", headerLabel)) {
-			continue;
-		}
-
-		auto mvIt = prevLive(code, it);
-		if (mvIt == code.end() || !isInst(*mvIt, "mv", "a1", "t0")) {
-			continue;
-		}
-		auto addIt = prevLive(code, mvIt);
-		if (addIt == code.end() || !isInst(*addIt, "addw", "t0", "a0", "t0")) {
-			continue;
-		}
-		auto liIt = prevLive(code, addIt);
-		if (liIt == code.end() || !isInst(*liIt, "li", "t0", "1")) {
-			continue;
-		}
-
-		code.insert(it, new RiscV64Inst("mv", "t2", "a6"));
-		code.insert(it, new RiscV64Inst("mv", "t3", "a1"));
-		code.insert(it, new RiscV64Inst("slli", "t3", "t3", "12"));
-		code.insert(it, new RiscV64Inst("add", "t2", "t2", "t3"));
-		code.insert(it, new RiscV64Inst("mv", "t3", "a3"));
-		code.insert(it, new RiscV64Inst("slli", "t3", "t3", "2"));
-		code.insert(it, new RiscV64Inst("add", "t2", "t2", "t3"));
-		code.insert(it, new RiscV64Inst("mv", "t1", "a5"));
-		code.insert(it, new RiscV64Inst("mv", "t3", "a1"));
-		code.insert(it, new RiscV64Inst("slli", "t3", "t3", "12"));
-		code.insert(it, new RiscV64Inst("add", "t1", "t1", "t3"));
-		code.insert(it, new RiscV64Inst("mv", "t3", "a0"));
-		code.insert(it, new RiscV64Inst("slli", "t3", "t3", "2"));
-		code.insert(it, new RiscV64Inst("add", "t1", "t1", "t3"));
-		code.insert(it, new RiscV64Inst("li", "t5", "4096"));
-		return true;
+	try {
+		value = std::stoi(text);
+	} catch (...) {
+		return false;
 	}
-	return false;
+	return value >= 0;
 }
 
-/// @brief 替换 TRSM 内层循环体为优化后的精简指令序列
+/// @brief 在循环体中查找索引变量的单位步长更新指令
 ///
-/// 将原始循环体替换为：flw+flw+fnmsub.s+fsw+指针步进+计数器更新+跳回循环头，
-/// 消除冗余的地址计算和函数调用开销。
-bool replaceTrsmInnerBody(InstList & code, InstIt bodyLabelIt, const std::string & headerLabel)
+/// 匹配两种模式：
+///   1. addi/addiw indexReg, indexReg, 1
+///   2. li tmpReg, 1; addw indexReg, indexReg, tmpReg（或 addw indexReg, tmpReg, indexReg）
+/// @param code 指令列表
+/// @param bodyBegin 循环体起始迭代器
+/// @param latchIt 循环 latch 迭代器
+/// @param indexReg 循环索引寄存器
+/// @param insertBefore [out] 找到的更新指令位置，用于后续插入指针步进指令
+/// @return true 表示找到单位步长更新
+bool findUnitStepUpdate(InstList & code, InstIt bodyBegin, InstIt latchIt, const std::string & indexReg, InstIt & insertBefore)
 {
-	auto insertPos = bodyLabelIt;
-	++insertPos;
-	auto oldBodyIt = insertPos;
-	code.insert(insertPos, new RiscV64Inst("flw", "ft3", "0(t2)"));
-	code.insert(insertPos, new RiscV64Inst("flw", "ft2", "0(t1)"));
-	code.insert(insertPos, new RiscV64Inst("fnmsub.s", "ft3", "ft2", "ft1", "", "ft3"));
-	code.insert(insertPos, new RiscV64Inst("fsw", "ft3", "0(t2)"));
-	code.insert(insertPos, new RiscV64Inst("add", "t2", "t2", "t5"));
-	code.insert(insertPos, new RiscV64Inst("add", "t1", "t1", "t5"));
-	code.insert(insertPos, new RiscV64Inst("li", "t0", "1"));
-	code.insert(insertPos, new RiscV64Inst("addw", "t0", "a1", "t0"));
-	code.insert(insertPos, new RiscV64Inst("mv", "a1", "t0"));
-	code.insert(insertPos, new RiscV64Inst("j", headerLabel));
-
-	auto it = oldBodyIt;
-	while (it != code.end()) {
+	for (auto it = bodyBegin; it != latchIt && it != code.end(); it = nextLive(code, it)) {
 		auto * inst = *it;
-		if (isLiveInst(inst)) {
-			inst->setDead();
-			if (inst->opcode == "j" && inst->result == headerLabel) {
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+
+		if ((inst->opcode == "addi" || inst->opcode == "addiw") && inst->result == indexReg &&
+		    inst->arg1 == indexReg && inst->arg2 == "1") {
+			insertBefore = it;
+			return true;
+		}
+
+		if (!isInst(inst, "li") || inst->arg1 != "1") {
+			continue;
+		}
+
+		const std::string oneReg = inst->result;
+		auto addIt = nextLive(code, it);
+		if (addIt == code.end()) {
+			continue;
+		}
+		auto * add = *addIt;
+		if (!isLiveInst(add) || add->opcode != "addw") {
+			continue;
+		}
+		const bool addIndexOne = add->arg1 == indexReg && add->arg2 == oneReg;
+		const bool addOneIndex = add->arg1 == oneReg && add->arg2 == indexReg;
+		if (!addIndexOne && !addOneIndex) {
+			continue;
+		}
+
+		if (add->result == indexReg) {
+			insertBefore = it;
+			return true;
+		}
+
+		for (auto scan = nextLive(code, addIt); scan != latchIt && scan != code.end(); scan = nextLive(code, scan)) {
+			auto * scanInst = *scan;
+			if (!isLiveInst(scanInst)) {
+				continue;
+			}
+			if (isInst(scanInst, "mv", indexReg, add->result)) {
+				insertBefore = it;
 				return true;
 			}
-		}
-		++it;
-	}
-	return false;
-}
-
-/// @brief 优化 TRSM 内层循环：识别 trsm 标签的循环结构，预计算指针并替换循环体
-/// @return true 表示成功优化了至少一个 TRSM 内层循环
-bool optimizeTrsmInnerLoop(InstList & code)
-{
-	for (auto headerIt = code.begin(); headerIt != code.end(); ++headerIt) {
-		auto * header = *headerIt;
-		if (!isLabel(header) || header->opcode.find("trsm") == std::string::npos) {
-			continue;
-		}
-
-		auto bltIt = nextLive(code, headerIt);
-		auto exitJumpIt = nextLive(code, bltIt);
-		if (bltIt == code.end() || exitJumpIt == code.end()) {
-			continue;
-		}
-
-		auto * blt = *bltIt;
-		auto * exitJump = *exitJumpIt;
-		if (!isInst(blt, "blt", "a1", "a4") || !isInst(exitJump, "j")) {
-			continue;
-		}
-
-		const std::string headerLabel = header->opcode;
-		const std::string bodyLabel = blt->arg2;
-		if (bodyLabel.empty()) {
-			continue;
-		}
-
-		InstIt bodyLabelIt = code.end();
-		for (auto it = exitJumpIt; it != code.end(); ++it) {
-			if (isLabel(*it) && (*it)->opcode == bodyLabel) {
-				bodyLabelIt = it;
+			if (definesResultOperand(scanInst) && scanInst->result == add->result) {
 				break;
 			}
 		}
-		if (bodyLabelIt == code.end()) {
-			continue;
-		}
-
-		auto firstBody = nextLive(code, bodyLabelIt);
-		if (firstBody != code.end() && isInst(*firstBody, "flw", "ft3", "0(t2)")) {
-			continue;
-		}
-
-		if (!insertTrsmPointerSetup(code, headerLabel)) {
-			continue;
-		}
-		return replaceTrsmInnerBody(code, bodyLabelIt, headerLabel);
 	}
 	return false;
 }
 
-/// @brief 减少 TRSM 外层循环的重复迭代次数
-///
-/// 识别 li t3,5 + blt t3,... 的循环头，若后续存在 trsm 调用，
-/// 则将迭代次数从 5 降为 1，避免重复执行已由内层循环优化覆盖的计算。
-bool reduceRepeatedTrsmLoopCount(InstList & code)
+/// @brief 将内存指令中的地址基寄存器替换为新寄存器
+/// @param inst 待修改的指令
+/// @param oldReg 旧基寄存器
+/// @param newReg 新基寄存器
+/// @return true 表示至少替换了一处
+bool replaceMemoryBase(RiscV64Inst * inst, const std::string & oldReg, const std::string & newReg)
 {
+	if (!isLiveInst(inst) || !isMemoryOpcode(inst->opcode)) {
+		return false;
+	}
+
 	bool changed = false;
-	for (auto it = code.begin(); it != code.end(); ++it) {
-		auto * li = *it;
-		if (!isInst(li, "li", "t3", "5")) {
-			continue;
-		}
-
-		auto bltIt = nextLive(code, it);
-		if (bltIt == code.end() || !isLiveInst(*bltIt) || (*bltIt)->opcode != "blt" || (*bltIt)->arg1 != "t3") {
-			continue;
-		}
-
-		bool sawTrsmCall = false;
-		int scanned = 0;
-		for (auto scan = bltIt; scan != code.end() && scanned < 160; ++scan, ++scanned) {
-			if (isLiveInst(*scan) && (*scan)->opcode == "call" && (*scan)->result == "trsm") {
-				sawTrsmCall = true;
-				break;
-			}
-			if (scan != bltIt && isLabel(*scan) && (*scan)->opcode.find("main") == std::string::npos) {
-				break;
-			}
-		}
-
-		if (!sawTrsmCall) {
-			continue;
-		}
-
-		li->arg1 = "1";
-		changed = true;
-	}
+	changed = replaceAddressBase(inst->result, oldReg, newReg) || changed;
+	changed = replaceAddressBase(inst->arg1, oldReg, newReg) || changed;
+	changed = replaceAddressBase(inst->arg2, oldReg, newReg) || changed;
+	changed = replaceAddressBase(inst->addition, oldReg, newReg) || changed;
 	return changed;
 }
 
-/// @brief 为 Conv 内层循环插入指针预计算指令
+/// @brief 仿射地址链描述：循环内形如 base + index * 2^scale 的地址计算序列
+struct AffineAddressChain {
+    InstIt baseMoveIt;                  ///< mv addrReg, baseReg 指令位置
+    InstIt indexMoveIt;                 ///< mv tmpReg, indexReg 指令位置
+    InstIt shiftIt;                     ///< slli tmpReg, tmpReg, scale 指令位置
+    InstIt addIt;                       ///< add addrReg, addrReg/baseReg, tmpReg 指令位置
+    std::vector<InstIt> memoryUses;     ///< 使用 addrReg 作为基址的内存访问指令列表
+    std::string baseReg;                ///< 数组基址寄存器
+    std::string addrReg;                ///< 计算出的地址寄存器
+    std::string tmpReg;                 ///< 中间临时寄存器
+    std::string pointerReg;             ///< 分配的指针步进寄存器
+    int scale = 0;                      ///< 左移位数（元素大小以2的幂表示）
+    int stride = 0;                     ///< 步进字节数 = 2^scale
+};
+
+/// @brief 匹配循环体内的仿射地址计算链
 ///
-/// 在跳转到循环头的 j 指令前，插入 t1/t0 的地址预计算序列，
-/// 将输入和权重指针的偏移量折叠，使内层循环体只需做步进加法。
-bool insertConvPointerSetup(InstList & code, const std::string & headerLabel)
+/// 识别形如以下指令序列：
+///   mv addrReg, baseReg        // 加载数组基址
+///   mv tmpReg, indexReg        // 复制循环索引
+///   slli tmpReg, tmpReg, k     // 计算字节偏移 = index * 2^k
+///   add addrReg, addrReg, tmpReg  // 最终地址 = base + offset
+/// 并收集后续使用 addrReg 作为内存基址的 load 指令。
+/// @param code 指令列表
+/// @param start 起始扫描位置（应为 mv addrReg, baseReg）
+/// @param latchIt 循环 latch 位置
+/// @param indexReg 循环索引寄存器名
+/// @param chain [out] 匹配成功的仿射地址链
+/// @return true 表示成功匹配一条完整的仿射地址链
+bool matchAffineAddressChain(InstList & code,
+                             InstIt start,
+                             InstIt latchIt,
+                             const std::string & indexReg,
+                             AffineAddressChain & chain)
 {
-	for (auto it = code.begin(); it != code.end(); ++it) {
-		auto * jump = *it;
-		if (!isInst(jump, "j", headerLabel)) {
+	auto * baseMove = *start;
+	if (!isInst(baseMove, "mv") || baseMove->result.empty() || baseMove->arg1.empty()) {
+		return false;
+	}
+
+	auto indexMoveIt = nextLive(code, start);
+	auto shiftIt = nextLive(code, indexMoveIt);
+	auto addIt = nextLive(code, shiftIt);
+	if (indexMoveIt == code.end() || shiftIt == code.end() || addIt == code.end()) {
+		return false;
+	}
+
+	auto * indexMove = *indexMoveIt;
+	auto * shift = *shiftIt;
+	auto * add = *addIt;
+
+	const std::string addrReg = baseMove->result;
+	const std::string baseReg = baseMove->arg1;
+	if (!isInst(indexMove, "mv") || indexMove->arg1 != indexReg || indexMove->result.empty()) {
+		return false;
+	}
+	const std::string tmpReg = indexMove->result;
+
+	int scale = 0;
+	if (!isInst(shift, "slli", tmpReg, tmpReg) || !parseSmallNonNegativeInteger(shift->arg2, scale) ||
+	    scale > 10) {
+		return false;
+	}
+
+	if (!isInst(add, "add", addrReg)) {
+		return false;
+	}
+	const bool addAddrTmp = add->arg1 == addrReg && add->arg2 == tmpReg;
+	const bool addBaseTmp = add->arg1 == baseReg && add->arg2 == tmpReg;
+	const bool addTmpAddr = add->arg1 == tmpReg && add->arg2 == addrReg;
+	const bool addTmpBase = add->arg1 == tmpReg && add->arg2 == baseReg;
+	if (!addAddrTmp && !addBaseTmp && !addTmpAddr && !addTmpBase) {
+		return false;
+	}
+
+	const int stride = 1 << scale;
+	if (stride <= 0 || stride > 2047 || addrReg == indexReg || tmpReg == indexReg || baseReg == indexReg) {
+		return false;
+	}
+
+	std::vector<InstIt> memoryUses;
+	for (auto scan = nextLive(code, addIt); scan != code.end() && scan != latchIt; scan = nextLive(code, scan)) {
+		auto * inst = *scan;
+		if (!isLiveInst(inst)) {
 			continue;
 		}
 
-		auto mvIt = prevLive(code, it);
-		if (mvIt == code.end() || !isInst(*mvIt, "mv", "t2", "t3")) {
-			continue;
+		if (definesResultOperand(inst) && inst->result == addrReg) {
+			break;
 		}
-		auto liIt = prevLive(code, mvIt);
-		if (liIt == code.end() || !isInst(*liIt, "li", "t3", "0")) {
-			continue;
+		if (definesResultOperand(inst) && inst->result == tmpReg) {
+			break;
 		}
 
-		code.insert(it, new RiscV64Inst("mv", "t1", "a2"));
-		code.insert(it, new RiscV64Inst("mv", "t6", "a0"));
-		code.insert(it, new RiscV64Inst("slli", "t6", "t6", "2"));
-		code.insert(it, new RiscV64Inst("add", "t1", "t1", "t6"));
-		code.insert(it, new RiscV64Inst("mv", "t0", "a1"));
-		code.insert(it, new RiscV64Inst("li", "t5", "4"));
-		return true;
+		const bool usesAddr = usesRegister(inst, addrReg);
+		const bool usesTmp = usesRegister(inst, tmpReg);
+		if (usesTmp) {
+			return false;
+		}
+		if (!usesAddr) {
+			continue;
+		}
+		if (!isMemoryOpcode(inst->opcode) || isStoreOpcode(inst->opcode) ||
+		    (!operandReferencesAddressBase(inst->result, addrReg) &&
+		     !operandReferencesAddressBase(inst->arg1, addrReg) &&
+		     !operandReferencesAddressBase(inst->arg2, addrReg) &&
+		     !operandReferencesAddressBase(inst->addition, addrReg))) {
+			return false;
+		}
+		memoryUses.push_back(scan);
+	}
+
+	if (memoryUses.empty()) {
+		return false;
+	}
+
+	chain.baseMoveIt = start;
+	chain.indexMoveIt = indexMoveIt;
+	chain.shiftIt = shiftIt;
+	chain.addIt = addIt;
+	chain.memoryUses = std::move(memoryUses);
+	chain.baseReg = baseReg;
+	chain.addrReg = addrReg;
+	chain.tmpReg = tmpReg;
+	chain.scale = scale;
+	chain.stride = stride;
+	return true;
+}
+
+/// @brief 判断循环体是否包含不安全的控制流或调用指令
+///
+/// 若循环体中存在标签、call、ret、分支或跳转指令，
+/// 则认为该循环体结构过于复杂，不适合进行仿射地址优化。
+/// @param code 指令列表
+/// @param bodyBegin 循环体起始位置
+/// @param latchIt 循环 latch 位置
+/// @return true 表示循环体包含不安全指令
+bool loopBodyHasUnsafeControlOrCall(InstList & code, InstIt bodyBegin, InstIt latchIt)
+{
+	for (auto it = bodyBegin; it != latchIt && it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		if (isLabel(inst) || inst->opcode == "call" || inst->opcode == "ret" || isBranchOpcode(inst->opcode) ||
+		    inst->opcode == "j") {
+			return true;
+		}
 	}
 	return false;
 }
 
-/// @brief 替换 Conv 内层循环体为优化后的精简指令序列
-///
-/// 将原始循环体替换为：flw+flw+fmadd.s+指针步进+计数器更新+跳回循环头，
-/// 利用 FMA 融合乘加指令减少循环内的指令数。
-bool replaceConvInnerBody(InstList & code, InstIt bodyLabelIt, const std::string & headerLabel)
+/// @brief 生成唯一的派生标签名（在原标签后追加 _lsr 后缀）
+/// @param code 指令列表
+/// @param headerLabel 循环头标签名
+/// @return 唯一的派生标签名，无法生成时返回空串
+std::string makeUniqueDerivedLabel(const InstList & code, const std::string & headerLabel)
 {
-	auto insertPos = bodyLabelIt;
-	++insertPos;
-	auto oldBodyIt = insertPos;
-	code.insert(insertPos, new RiscV64Inst("flw", "ft2", "0(t1)"));
-	code.insert(insertPos, new RiscV64Inst("flw", "ft0", "0(t0)"));
-	code.insert(insertPos, new RiscV64Inst("fmadd.s", "ft3", "ft2", "ft0", "", "ft3"));
-	code.insert(insertPos, new RiscV64Inst("add", "t1", "t1", "t5"));
-	code.insert(insertPos, new RiscV64Inst("add", "t0", "t0", "t5"));
-	code.insert(insertPos, new RiscV64Inst("li", "t6", "1"));
-	code.insert(insertPos, new RiscV64Inst("addw", "t2", "t2", "t6"));
-	code.insert(insertPos, new RiscV64Inst("j", headerLabel));
-
-	auto it = oldBodyIt;
-	while (it != code.end()) {
-		auto * inst = *it;
-		if (isLiveInst(inst)) {
-			inst->setDead();
-			if (inst->opcode == "j" && inst->result == headerLabel) {
-				return true;
+	for (int suffix = 0; suffix < 1000; ++suffix) {
+		std::string candidate = headerLabel + "_lsr" + std::to_string(suffix);
+		bool exists = false;
+		for (auto * inst : code) {
+			if (isLiveInst(inst) && isLabel(inst) && inst->opcode == candidate) {
+				exists = true;
+				break;
 			}
 		}
-		++it;
+		if (!exists) {
+			return candidate;
+		}
 	}
-	return false;
+	return "";
 }
 
-/// @brief 优化 Conv 内层循环：识别 kernel_conv_pooling 标签的循环结构，预计算指针并替换循环体
-/// @return true 表示成功优化了至少一个 Conv 内层循环
-bool optimizeConvInnerLoops(InstList & code)
+/// @brief 为各仿射地址链分配互不冲突的指针步进寄存器
+///
+/// 从候选临时寄存器集合 {t4, t5, t6} 中选取在当前函数中未使用的寄存器，
+/// 分配给各仿射地址链作为指针步进寄存器。
+/// @param code 指令列表
+/// @param chains 仿射地址链列表
+/// @return true 表示所有链都成功分配了寄存器
+bool assignPointerRegisters(InstList & code, std::vector<AffineAddressChain> & chains)
 {
+	static const std::vector<std::string> kCandidates = {"t4", "t5", "t6"};
+	std::unordered_set<std::string> reserved;
+	for (auto & chain : chains) {
+		bool assigned = false;
+		for (const auto & reg : kCandidates) {
+			if (reserved.find(reg) != reserved.end() || registerMentionedInFunction(code, reg)) {
+				continue;
+			}
+			chain.pointerReg = reg;
+			reserved.insert(reg);
+			assigned = true;
+			break;
+		}
+		if (!assigned) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/// @brief 通用仿射地址递推优化：把循环内 base + i * stride 地址计算改为指针步进。
+///
+/// 只匹配简单 innermost 计数循环，不读取函数名/标签名语义。触发条件包括：
+///   - 循环头为 blt i,bound,body + j exit，循环体末尾唯一跳回头部；
+///   - i 在循环体中按 +1 更新；
+///   - 地址计算形如 mv addr,base; mv tmp,i; slli tmp,tmp,k; add addr,addr,tmp；
+///   - 临时指针寄存器在当前函数中完全未使用，且循环体内没有 call/额外分支。
+bool reduceAffineAddressRecurrences(InstList & code)
+{
+	if (functionHasStore(code)) {
+		return false;
+	}
+
 	bool changed = false;
 	for (auto headerIt = code.begin(); headerIt != code.end(); ++headerIt) {
 		auto * header = *headerIt;
-		if (!isLabel(header) || header->opcode.find("kernel_conv_pooling") == std::string::npos) {
+		if (!isLabel(header)) {
 			continue;
 		}
 
-		auto liIt = nextLive(code, headerIt);
-		auto bltIt = nextLive(code, liIt);
-		auto exitJumpIt = nextLive(code, bltIt);
-		if (liIt == code.end() || bltIt == code.end() || exitJumpIt == code.end()) {
+		auto branchIt = nextLive(code, headerIt);
+		auto exitJumpIt = nextLive(code, branchIt);
+		if (branchIt == code.end() || exitJumpIt == code.end()) {
 			continue;
 		}
-		if (!isInst(*liIt, "li", "t3", "15") || !isInst(*bltIt, "blt", "t2", "t3") ||
+
+		auto * branch = *branchIt;
+		if (!isLiveInst(branch) || branch->opcode != "blt" || branch->result.empty() || branch->arg2.empty() ||
 		    !isInst(*exitJumpIt, "j")) {
 			continue;
 		}
 
 		const std::string headerLabel = header->opcode;
-		const std::string bodyLabel = (*bltIt)->arg2;
-		if (bodyLabel.empty()) {
-			continue;
-		}
+		const std::string bodyLabel = branch->arg2;
+		const std::string indexReg = branch->result;
 
 		InstIt bodyLabelIt = code.end();
 		for (auto it = exitJumpIt; it != code.end(); ++it) {
@@ -714,15 +717,64 @@ bool optimizeConvInnerLoops(InstList & code)
 			continue;
 		}
 
-		auto firstBody = nextLive(code, bodyLabelIt);
-		if (firstBody != code.end() && isInst(*firstBody, "flw", "ft2", "0(t1)")) {
+		auto bodyBegin = nextLive(code, bodyLabelIt);
+		InstIt latchIt = code.end();
+		for (auto it = bodyBegin; it != code.end(); it = nextLive(code, it)) {
+			if (it != bodyBegin && isLabel(*it)) {
+				break;
+			}
+			if (isInst(*it, "j", headerLabel)) {
+				latchIt = it;
+				break;
+			}
+		}
+		if (latchIt == code.end() || loopBodyHasUnsafeControlOrCall(code, bodyBegin, latchIt)) {
 			continue;
 		}
 
-		if (!insertConvPointerSetup(code, headerLabel)) {
+		InstIt updateInsertIt = code.end();
+		if (!findUnitStepUpdate(code, bodyBegin, latchIt, indexReg, updateInsertIt)) {
 			continue;
 		}
-		changed = replaceConvInnerBody(code, bodyLabelIt, headerLabel) || changed;
+
+		std::vector<AffineAddressChain> chains;
+		for (auto it = bodyBegin; it != latchIt && it != code.end(); it = nextLive(code, it)) {
+			AffineAddressChain chain;
+			if (matchAffineAddressChain(code, it, latchIt, indexReg, chain)) {
+				chains.push_back(std::move(chain));
+			}
+		}
+		if (chains.empty() || !assignPointerRegisters(code, chains)) {
+			continue;
+		}
+
+		const std::string loopEntryLabel = makeUniqueDerivedLabel(code, headerLabel);
+		if (loopEntryLabel.empty()) {
+			continue;
+		}
+
+		auto headerInsertPos = headerIt;
+		++headerInsertPos;
+		for (const auto & chain : chains) {
+			code.insert(headerInsertPos, new RiscV64Inst("slli", chain.pointerReg, indexReg, std::to_string(chain.scale)));
+			code.insert(headerInsertPos, new RiscV64Inst("add", chain.pointerReg, chain.baseReg, chain.pointerReg));
+		}
+		code.insert(headerInsertPos, new RiscV64Inst(loopEntryLabel, ":"));
+		(*latchIt)->result = loopEntryLabel;
+
+		for (const auto & chain : chains) {
+			(*chain.baseMoveIt)->setDead();
+			(*chain.indexMoveIt)->setDead();
+			(*chain.shiftIt)->setDead();
+			(*chain.addIt)->setDead();
+			for (auto memIt : chain.memoryUses) {
+				replaceMemoryBase(*memIt, chain.addrReg, chain.pointerReg);
+			}
+			code.insert(updateInsertIt,
+			            new RiscV64Inst("addi", chain.pointerReg, chain.pointerReg, std::to_string(chain.stride)));
+		}
+
+		return true;
 	}
 	return changed;
 }
@@ -731,17 +783,14 @@ bool optimizeConvInnerLoops(InstList & code)
 
 bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel)
 {
+	(void) optLevel;  // 当前所有窥孔优化均不依赖优化级别
 	bool changed = false;
 	bool localChanged = false;
 	auto & code = iloc.getCode();
 	do {
 		localChanged = false;
-		if (optLevel > 0) {
-			localChanged = fuseFMA(code) || localChanged;
-		}
-		localChanged = optimizeTrsmInnerLoop(code) || localChanged;
-		localChanged = reduceRepeatedTrsmLoopCount(code) || localChanged;
-		localChanged = optimizeConvInnerLoops(code) || localChanged;
+		// 仿射地址递推优化：将循环内 base+i*stride 地址计算改为指针步进
+		localChanged = reduceAffineAddressRecurrences(code) || localChanged;
 		localChanged = reduceMulByConst(code) || localChanged;
 		localChanged = foldZeroSubCompare(code) || localChanged;
 		localChanged = removeSelfMoves(code) || localChanged;

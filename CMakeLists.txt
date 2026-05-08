@@ -239,6 +239,8 @@ set(IR_SRCS
 	ir/passes/functionPass/TailRecursionElim.cpp
 	ir/passes/functionPass/PhiLowering.h
 	ir/passes/functionPass/PhiLowering.cpp
+	ir/passes/fixedPointFunctionPass/PureCallLoopCache.h
+	ir/passes/fixedPointFunctionPass/PureCallLoopCache.cpp
 )
 
 # 符号表等共通化代码集合
