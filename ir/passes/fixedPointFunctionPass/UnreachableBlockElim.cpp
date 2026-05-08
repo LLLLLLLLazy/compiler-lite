@@ -10,10 +10,10 @@
 #include <vector>
 
 #include "BasicBlock.h"
-#include "CFGStateCleanup.h"
 #include "Function.h"
 #include "Instruction.h"
 #include "PhiInst.h"
+#include "toolPass/CFGStateCleanup.h"
 
 namespace {
 

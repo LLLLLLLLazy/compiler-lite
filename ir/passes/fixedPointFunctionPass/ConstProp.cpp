@@ -16,7 +16,6 @@
 
 #include "BasicBlock.h"
 #include "BinaryInst.h"
-#include "CFGStateCleanup.h"
 #include "BranchInst.h"
 #include "CondBranchInst.h"
 #include "ConstFloat.h"
@@ -34,6 +33,7 @@
 #include "Value.h"
 #include "ZExtInst.h"
 #include "Module.h"
+#include "toolPass/CFGStateCleanup.h"
 
 namespace {
 

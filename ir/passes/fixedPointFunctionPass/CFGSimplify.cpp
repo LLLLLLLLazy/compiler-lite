@@ -17,13 +17,13 @@
 #include <vector>
 
 #include "BasicBlock.h"
-#include "CFGStateCleanup.h"
 #include "BranchInst.h"
 #include "CondBranchInst.h"
 #include "Function.h"
 #include "Instruction.h"
 #include "PhiInst.h"
 #include "Value.h"
+#include "toolPass/CFGStateCleanup.h"
 
 namespace {
 

@@ -203,46 +203,42 @@ set(IR_SRCS
 	ir/analysis/MemoryLocation.cpp
 	ir/analysis/PostDominatorTree.h
 	ir/analysis/PostDominatorTree.cpp
-	ir/passes/ArrayScalarize.h
-	ir/passes/ArrayScalarize.cpp
-	ir/passes/ConstProp.h
-	ir/passes/ConstProp.cpp
-	# 跨过程常量实参传播 pass
-	ir/passes/InterproceduralConstProp.h
-	ir/passes/InterproceduralConstProp.cpp
-	# 纯函数调用公共子表达式消除 pass
-	ir/passes/PureCallCSE.h
-	ir/passes/PureCallCSE.cpp
-	ir/passes/InstCombine.h
-	ir/passes/InstCombine.cpp
-	ir/passes/CFGStateCleanup.h
-	ir/passes/CFGStateCleanup.cpp
-	ir/passes/CFGSimplify.h
-	ir/passes/CFGSimplify.cpp
-	ir/passes/DeadInstElim.h
-	ir/passes/DeadInstElim.cpp
-	ir/passes/GlobalToLocal.h
-	ir/passes/GlobalToLocal.cpp
-	ir/passes/LocalMemoryOpt.h
-	ir/passes/LocalMemoryOpt.cpp
-	ir/passes/UnreachableBlockElim.h
-	ir/passes/UnreachableBlockElim.cpp
+	ir/passes/functionPass/ArrayScalarize.h
+	ir/passes/functionPass/ArrayScalarize.cpp
+	ir/passes/fixedPointFunctionPass/ConstProp.h
+	ir/passes/fixedPointFunctionPass/ConstProp.cpp
+	ir/passes/modulePass/InterproceduralConstProp.h
+	ir/passes/modulePass/InterproceduralConstProp.cpp
+	ir/passes/functionPass/PureCallCSE.h
+	ir/passes/functionPass/PureCallCSE.cpp
+	ir/passes/fixedPointFunctionPass/InstCombine.h
+	ir/passes/fixedPointFunctionPass/InstCombine.cpp
+	ir/passes/toolPass/CFGStateCleanup.h
+	ir/passes/toolPass/CFGStateCleanup.cpp
+	ir/passes/fixedPointFunctionPass/CFGSimplify.h
+	ir/passes/fixedPointFunctionPass/CFGSimplify.cpp
+	ir/passes/fixedPointFunctionPass/DeadInstElim.h
+	ir/passes/fixedPointFunctionPass/DeadInstElim.cpp
+	ir/passes/modulePass/GlobalToLocal.h
+	ir/passes/modulePass/GlobalToLocal.cpp
+	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.h
+	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.cpp
+	ir/passes/fixedPointFunctionPass/UnreachableBlockElim.h
+	ir/passes/fixedPointFunctionPass/UnreachableBlockElim.cpp
 	ir/passes/PassManager.h
 	ir/passes/PassManager.cpp
 	ir/analysis/LoopInfo.h
 	ir/analysis/LoopInfo.cpp
-	ir/passes/Mem2Reg.h
-	ir/passes/Mem2Reg.cpp
-	ir/passes/LICM.h
-	ir/passes/LICM.cpp
-	# 保守小函数内联 pass
-	ir/passes/SmallFunctionInline.h
-	ir/passes/SmallFunctionInline.cpp
-	# 尾递归消除 pass
-	ir/passes/TailRecursionElim.h
-	ir/passes/TailRecursionElim.cpp
-	ir/passes/PhiLowering.h
-	ir/passes/PhiLowering.cpp
+	ir/passes/functionPass/Mem2Reg.h
+	ir/passes/functionPass/Mem2Reg.cpp
+	ir/passes/fixedPointFunctionPass/LICM.h
+	ir/passes/fixedPointFunctionPass/LICM.cpp
+	ir/passes/modulePass/SmallFunctionInline.h
+	ir/passes/modulePass/SmallFunctionInline.cpp
+	ir/passes/functionPass/TailRecursionElim.h
+	ir/passes/functionPass/TailRecursionElim.cpp
+	ir/passes/functionPass/PhiLowering.h
+	ir/passes/functionPass/PhiLowering.cpp
 )
 
 # 符号表等共通化代码集合

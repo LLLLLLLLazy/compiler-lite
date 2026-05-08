@@ -14,13 +14,13 @@
 
 #include "BasicBlock.h"
 #include "BranchInst.h"
-#include "CFGStateCleanup.h"
 #include "CondBranchInst.h"
 #include "Function.h"
 #include "Instruction.h"
 #include "PostDominatorTree.h"
 #include "PhiInst.h"
 #include "Value.h"
+#include "toolPass/CFGStateCleanup.h"
 
 namespace {
 
