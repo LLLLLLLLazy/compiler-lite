@@ -210,6 +210,9 @@ set(IR_SRCS
 	# 跨过程常量实参传播 pass
 	ir/passes/InterproceduralConstProp.h
 	ir/passes/InterproceduralConstProp.cpp
+	# 纯函数调用公共子表达式消除 pass
+	ir/passes/PureCallCSE.h
+	ir/passes/PureCallCSE.cpp
 	ir/passes/InstCombine.h
 	ir/passes/InstCombine.cpp
 	ir/passes/CFGStateCleanup.h

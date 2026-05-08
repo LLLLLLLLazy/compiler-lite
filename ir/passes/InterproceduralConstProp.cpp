@@ -15,7 +15,11 @@
 #include "ConstFloat.h"
 #include "ConstInteger.h"
 #include "Function.h"
+#include "GlobalVariable.h"
+#include "LoadInst.h"
 #include "Module.h"
+#include "StoreInst.h"
+#include "Type.h"
 #include "Value.h"
 
 namespace {
@@ -26,6 +30,78 @@ namespace {
 bool isSupportedConstant(Value * value)
 {
     return dynamic_cast<ConstInteger *>(value) != nullptr || dynamic_cast<ConstFloat *>(value) != nullptr;
+}
+
+/// @brief 判断全局标量是否在模块中被直接写入
+bool isGlobalStored(Module * mod, GlobalVariable * global)
+{
+    if (!mod || !global) {
+        return true;
+    }
+
+    for (auto * function : mod->getFunctionList()) {
+        if (!function || function->isBuiltin()) {
+            continue;
+        }
+
+        for (auto * bb : function->getBlocks()) {
+            for (auto * inst : bb->getInstructions()) {
+                auto * store = dynamic_cast<StoreInst *>(inst);
+                if (store && store->getPointerOperand() == global) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+/// @brief 将只读全局标量初值物化成常量 Value
+Value * materializeReadOnlyGlobal(Module * mod, GlobalVariable * global)
+{
+    if (!mod || !global || isGlobalStored(mod, global)) {
+        return nullptr;
+    }
+
+    Type * valueType = global->getValueType();
+    if (!valueType || (!valueType->isIntegerType() && !valueType->isFloatType())) {
+        return nullptr;
+    }
+
+    switch (global->getInitKind()) {
+        case GlobalVariable::InitKind::Zero:
+            return valueType->isFloatType() ? static_cast<Value *>(mod->newConstFloat(0.0f))
+                                            : static_cast<Value *>(mod->newConstInteger(valueType, 0));
+
+        case GlobalVariable::InitKind::Int:
+            return valueType->isIntegerType()
+                       ? static_cast<Value *>(mod->newConstInteger(valueType, global->getInitIntValue()))
+                       : nullptr;
+
+        case GlobalVariable::InitKind::Float:
+            return valueType->isFloatType() ? static_cast<Value *>(mod->newConstFloat(global->getInitFloatValue()))
+                                            : nullptr;
+
+        default:
+            return nullptr;
+    }
+}
+
+/// @brief 将支持的实参解析为常量，包含字面常量与只读全局标量 load
+Value * resolveConstantArg(Module * mod, Value * value)
+{
+    if (isSupportedConstant(value)) {
+        return value;
+    }
+
+    auto * load = dynamic_cast<LoadInst *>(value);
+    auto * global = load != nullptr ? dynamic_cast<GlobalVariable *>(load->getPointerOperand()) : nullptr;
+    if (!global) {
+        return nullptr;
+    }
+
+    return materializeReadOnlyGlobal(mod, global);
 }
 
 /// @brief 判断两个常量值是否在数值上完全相等
@@ -92,8 +168,8 @@ bool InterproceduralConstProp::run()
 
                     sawCall = true;
                     for (std::size_t i = 0; i < constantArgs.size(); ++i) {
-                        Value * arg = call->getArg(static_cast<int32_t>(i));
-                        if (!isSupportedConstant(arg)) {
+                        Value * arg = resolveConstantArg(mod, call->getArg(static_cast<int32_t>(i)));
+                        if (!arg) {
                             overdefined[i] = true;
                             continue;
                         }

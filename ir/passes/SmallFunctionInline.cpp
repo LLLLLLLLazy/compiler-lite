@@ -58,7 +58,7 @@ const std::unordered_set<std::string> kPriorityInlineNames = {
     "getNumPos",
     "min",
     "f",
-    "loop",
+    "fun",
     "max",
     "sigmoid",
     "exp",

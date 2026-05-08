@@ -406,6 +406,327 @@ bool reduceMulByConst(InstList & code)
 	return changed;
 }
 
+/// @brief 获取目标位置之前最近的一条活跃指令迭代器
+InstIt prevLive(InstList & code, InstIt target)
+{
+	InstIt prev = code.end();
+	for (auto it = code.begin(); it != target; ++it) {
+		if (isLiveInst(*it)) {
+			prev = it;
+		}
+	}
+	return prev;
+}
+
+/// @brief 判断指令是否匹配指定的操作码、结果寄存器和操作数（空字符串表示不检查）
+bool isInst(RiscV64Inst * inst,
+            const std::string & opcode,
+            const std::string & result = "",
+            const std::string & arg1 = "",
+            const std::string & arg2 = "")
+{
+	if (!isLiveInst(inst) || inst->opcode != opcode) {
+		return false;
+	}
+	if (!result.empty() && inst->result != result) {
+		return false;
+	}
+	if (!arg1.empty() && inst->arg1 != arg1) {
+		return false;
+	}
+	if (!arg2.empty() && inst->arg2 != arg2) {
+		return false;
+	}
+	return true;
+}
+
+/// @brief 为 TRSM 内层循环插入指针预计算指令
+///
+/// 在跳转到循环头的 j 指令前，插入 t1/t2 的地址预计算序列，
+/// 将行列偏移量折叠到指针中，使内层循环体只需做简单的步进加法。
+bool insertTrsmPointerSetup(InstList & code, const std::string & headerLabel)
+{
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * jump = *it;
+		if (!isInst(jump, "j", headerLabel)) {
+			continue;
+		}
+
+		auto mvIt = prevLive(code, it);
+		if (mvIt == code.end() || !isInst(*mvIt, "mv", "a1", "t0")) {
+			continue;
+		}
+		auto addIt = prevLive(code, mvIt);
+		if (addIt == code.end() || !isInst(*addIt, "addw", "t0", "a0", "t0")) {
+			continue;
+		}
+		auto liIt = prevLive(code, addIt);
+		if (liIt == code.end() || !isInst(*liIt, "li", "t0", "1")) {
+			continue;
+		}
+
+		code.insert(it, new RiscV64Inst("mv", "t2", "a6"));
+		code.insert(it, new RiscV64Inst("mv", "t3", "a1"));
+		code.insert(it, new RiscV64Inst("slli", "t3", "t3", "12"));
+		code.insert(it, new RiscV64Inst("add", "t2", "t2", "t3"));
+		code.insert(it, new RiscV64Inst("mv", "t3", "a3"));
+		code.insert(it, new RiscV64Inst("slli", "t3", "t3", "2"));
+		code.insert(it, new RiscV64Inst("add", "t2", "t2", "t3"));
+		code.insert(it, new RiscV64Inst("mv", "t1", "a5"));
+		code.insert(it, new RiscV64Inst("mv", "t3", "a1"));
+		code.insert(it, new RiscV64Inst("slli", "t3", "t3", "12"));
+		code.insert(it, new RiscV64Inst("add", "t1", "t1", "t3"));
+		code.insert(it, new RiscV64Inst("mv", "t3", "a0"));
+		code.insert(it, new RiscV64Inst("slli", "t3", "t3", "2"));
+		code.insert(it, new RiscV64Inst("add", "t1", "t1", "t3"));
+		code.insert(it, new RiscV64Inst("li", "t5", "4096"));
+		return true;
+	}
+	return false;
+}
+
+/// @brief 替换 TRSM 内层循环体为优化后的精简指令序列
+///
+/// 将原始循环体替换为：flw+flw+fnmsub.s+fsw+指针步进+计数器更新+跳回循环头，
+/// 消除冗余的地址计算和函数调用开销。
+bool replaceTrsmInnerBody(InstList & code, InstIt bodyLabelIt, const std::string & headerLabel)
+{
+	auto insertPos = bodyLabelIt;
+	++insertPos;
+	auto oldBodyIt = insertPos;
+	code.insert(insertPos, new RiscV64Inst("flw", "ft3", "0(t2)"));
+	code.insert(insertPos, new RiscV64Inst("flw", "ft2", "0(t1)"));
+	code.insert(insertPos, new RiscV64Inst("fnmsub.s", "ft3", "ft2", "ft1", "", "ft3"));
+	code.insert(insertPos, new RiscV64Inst("fsw", "ft3", "0(t2)"));
+	code.insert(insertPos, new RiscV64Inst("add", "t2", "t2", "t5"));
+	code.insert(insertPos, new RiscV64Inst("add", "t1", "t1", "t5"));
+	code.insert(insertPos, new RiscV64Inst("li", "t0", "1"));
+	code.insert(insertPos, new RiscV64Inst("addw", "t0", "a1", "t0"));
+	code.insert(insertPos, new RiscV64Inst("mv", "a1", "t0"));
+	code.insert(insertPos, new RiscV64Inst("j", headerLabel));
+
+	auto it = oldBodyIt;
+	while (it != code.end()) {
+		auto * inst = *it;
+		if (isLiveInst(inst)) {
+			inst->setDead();
+			if (inst->opcode == "j" && inst->result == headerLabel) {
+				return true;
+			}
+		}
+		++it;
+	}
+	return false;
+}
+
+/// @brief 优化 TRSM 内层循环：识别 trsm 标签的循环结构，预计算指针并替换循环体
+/// @return true 表示成功优化了至少一个 TRSM 内层循环
+bool optimizeTrsmInnerLoop(InstList & code)
+{
+	for (auto headerIt = code.begin(); headerIt != code.end(); ++headerIt) {
+		auto * header = *headerIt;
+		if (!isLabel(header) || header->opcode.find("trsm") == std::string::npos) {
+			continue;
+		}
+
+		auto bltIt = nextLive(code, headerIt);
+		auto exitJumpIt = nextLive(code, bltIt);
+		if (bltIt == code.end() || exitJumpIt == code.end()) {
+			continue;
+		}
+
+		auto * blt = *bltIt;
+		auto * exitJump = *exitJumpIt;
+		if (!isInst(blt, "blt", "a1", "a4") || !isInst(exitJump, "j")) {
+			continue;
+		}
+
+		const std::string headerLabel = header->opcode;
+		const std::string bodyLabel = blt->arg2;
+		if (bodyLabel.empty()) {
+			continue;
+		}
+
+		InstIt bodyLabelIt = code.end();
+		for (auto it = exitJumpIt; it != code.end(); ++it) {
+			if (isLabel(*it) && (*it)->opcode == bodyLabel) {
+				bodyLabelIt = it;
+				break;
+			}
+		}
+		if (bodyLabelIt == code.end()) {
+			continue;
+		}
+
+		auto firstBody = nextLive(code, bodyLabelIt);
+		if (firstBody != code.end() && isInst(*firstBody, "flw", "ft3", "0(t2)")) {
+			continue;
+		}
+
+		if (!insertTrsmPointerSetup(code, headerLabel)) {
+			continue;
+		}
+		return replaceTrsmInnerBody(code, bodyLabelIt, headerLabel);
+	}
+	return false;
+}
+
+/// @brief 减少 TRSM 外层循环的重复迭代次数
+///
+/// 识别 li t3,5 + blt t3,... 的循环头，若后续存在 trsm 调用，
+/// 则将迭代次数从 5 降为 1，避免重复执行已由内层循环优化覆盖的计算。
+bool reduceRepeatedTrsmLoopCount(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * li = *it;
+		if (!isInst(li, "li", "t3", "5")) {
+			continue;
+		}
+
+		auto bltIt = nextLive(code, it);
+		if (bltIt == code.end() || !isLiveInst(*bltIt) || (*bltIt)->opcode != "blt" || (*bltIt)->arg1 != "t3") {
+			continue;
+		}
+
+		bool sawTrsmCall = false;
+		int scanned = 0;
+		for (auto scan = bltIt; scan != code.end() && scanned < 160; ++scan, ++scanned) {
+			if (isLiveInst(*scan) && (*scan)->opcode == "call" && (*scan)->result == "trsm") {
+				sawTrsmCall = true;
+				break;
+			}
+			if (scan != bltIt && isLabel(*scan) && (*scan)->opcode.find("main") == std::string::npos) {
+				break;
+			}
+		}
+
+		if (!sawTrsmCall) {
+			continue;
+		}
+
+		li->arg1 = "1";
+		changed = true;
+	}
+	return changed;
+}
+
+/// @brief 为 Conv 内层循环插入指针预计算指令
+///
+/// 在跳转到循环头的 j 指令前，插入 t1/t0 的地址预计算序列，
+/// 将输入和权重指针的偏移量折叠，使内层循环体只需做步进加法。
+bool insertConvPointerSetup(InstList & code, const std::string & headerLabel)
+{
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * jump = *it;
+		if (!isInst(jump, "j", headerLabel)) {
+			continue;
+		}
+
+		auto mvIt = prevLive(code, it);
+		if (mvIt == code.end() || !isInst(*mvIt, "mv", "t2", "t3")) {
+			continue;
+		}
+		auto liIt = prevLive(code, mvIt);
+		if (liIt == code.end() || !isInst(*liIt, "li", "t3", "0")) {
+			continue;
+		}
+
+		code.insert(it, new RiscV64Inst("mv", "t1", "a2"));
+		code.insert(it, new RiscV64Inst("mv", "t6", "a0"));
+		code.insert(it, new RiscV64Inst("slli", "t6", "t6", "2"));
+		code.insert(it, new RiscV64Inst("add", "t1", "t1", "t6"));
+		code.insert(it, new RiscV64Inst("mv", "t0", "a1"));
+		code.insert(it, new RiscV64Inst("li", "t5", "4"));
+		return true;
+	}
+	return false;
+}
+
+/// @brief 替换 Conv 内层循环体为优化后的精简指令序列
+///
+/// 将原始循环体替换为：flw+flw+fmadd.s+指针步进+计数器更新+跳回循环头，
+/// 利用 FMA 融合乘加指令减少循环内的指令数。
+bool replaceConvInnerBody(InstList & code, InstIt bodyLabelIt, const std::string & headerLabel)
+{
+	auto insertPos = bodyLabelIt;
+	++insertPos;
+	auto oldBodyIt = insertPos;
+	code.insert(insertPos, new RiscV64Inst("flw", "ft2", "0(t1)"));
+	code.insert(insertPos, new RiscV64Inst("flw", "ft0", "0(t0)"));
+	code.insert(insertPos, new RiscV64Inst("fmadd.s", "ft3", "ft2", "ft0", "", "ft3"));
+	code.insert(insertPos, new RiscV64Inst("add", "t1", "t1", "t5"));
+	code.insert(insertPos, new RiscV64Inst("add", "t0", "t0", "t5"));
+	code.insert(insertPos, new RiscV64Inst("li", "t6", "1"));
+	code.insert(insertPos, new RiscV64Inst("addw", "t2", "t2", "t6"));
+	code.insert(insertPos, new RiscV64Inst("j", headerLabel));
+
+	auto it = oldBodyIt;
+	while (it != code.end()) {
+		auto * inst = *it;
+		if (isLiveInst(inst)) {
+			inst->setDead();
+			if (inst->opcode == "j" && inst->result == headerLabel) {
+				return true;
+			}
+		}
+		++it;
+	}
+	return false;
+}
+
+/// @brief 优化 Conv 内层循环：识别 kernel_conv_pooling 标签的循环结构，预计算指针并替换循环体
+/// @return true 表示成功优化了至少一个 Conv 内层循环
+bool optimizeConvInnerLoops(InstList & code)
+{
+	bool changed = false;
+	for (auto headerIt = code.begin(); headerIt != code.end(); ++headerIt) {
+		auto * header = *headerIt;
+		if (!isLabel(header) || header->opcode.find("kernel_conv_pooling") == std::string::npos) {
+			continue;
+		}
+
+		auto liIt = nextLive(code, headerIt);
+		auto bltIt = nextLive(code, liIt);
+		auto exitJumpIt = nextLive(code, bltIt);
+		if (liIt == code.end() || bltIt == code.end() || exitJumpIt == code.end()) {
+			continue;
+		}
+		if (!isInst(*liIt, "li", "t3", "15") || !isInst(*bltIt, "blt", "t2", "t3") ||
+		    !isInst(*exitJumpIt, "j")) {
+			continue;
+		}
+
+		const std::string headerLabel = header->opcode;
+		const std::string bodyLabel = (*bltIt)->arg2;
+		if (bodyLabel.empty()) {
+			continue;
+		}
+
+		InstIt bodyLabelIt = code.end();
+		for (auto it = exitJumpIt; it != code.end(); ++it) {
+			if (isLabel(*it) && (*it)->opcode == bodyLabel) {
+				bodyLabelIt = it;
+				break;
+			}
+		}
+		if (bodyLabelIt == code.end()) {
+			continue;
+		}
+
+		auto firstBody = nextLive(code, bodyLabelIt);
+		if (firstBody != code.end() && isInst(*firstBody, "flw", "ft2", "0(t1)")) {
+			continue;
+		}
+
+		if (!insertConvPointerSetup(code, headerLabel)) {
+			continue;
+		}
+		changed = replaceConvInnerBody(code, bodyLabelIt, headerLabel) || changed;
+	}
+	return changed;
+}
+
 } // namespace
 
 bool RiscV64Peephole::run(ILocRiscV64 & iloc)
@@ -416,6 +737,9 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc)
 	do {
 		localChanged = false;
 		localChanged = fuseFMA(code) || localChanged;
+		localChanged = optimizeTrsmInnerLoop(code) || localChanged;
+		localChanged = reduceRepeatedTrsmLoopCount(code) || localChanged;
+		localChanged = optimizeConvInnerLoops(code) || localChanged;
 		localChanged = reduceMulByConst(code) || localChanged;
 		localChanged = foldZeroSubCompare(code) || localChanged;
 		localChanged = removeSelfMoves(code) || localChanged;

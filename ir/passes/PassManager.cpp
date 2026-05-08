@@ -21,6 +21,7 @@
 #include "InterproceduralConstProp.h"
 #include "SmallFunctionInline.h"
 #include "TailRecursionElim.h"
+#include "PureCallCSE.h"
 
 namespace {
 
@@ -44,6 +45,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
 
     registerModulePass([](Module * currentModule) {
         InterproceduralConstProp pass(currentModule);
+        return pass.run();
+    });
+
+    registerFunctionPass([this](Function * func) {
+        PureCallCSE pass(func, module);
         return pass.run();
     });
 
