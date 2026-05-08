@@ -33,6 +33,9 @@ Suites:
   2025              -> tests/2025_function
   2025_perf         -> tests/2025_performance
   2025_performance  -> tests/2025_performance
+  2026              -> tests/2026_function
+  2026_perf         -> tests/2026_performance
+  2026_performance  -> tests/2026_performance
   all               -> all suites above
 
 Environment:
@@ -98,6 +101,12 @@ suite_dir_from_key() {
         2025_perf|2025_performance)
             echo "2025_performance"
             ;;
+        2026|2026_function)
+            echo "2026_function"
+            ;;
+        2026_perf|2026_performance)
+            echo "2026_performance"
+            ;;
         *)
             return 1
             ;;
@@ -114,6 +123,12 @@ infer_suite_from_testcase() {
             ;;
         2025_perf_*)
             echo "2025_performance"
+            ;;
+        2026_func_*)
+            echo "2026_function"
+            ;;
+        2026_perf_*)
+            echo "2026_performance"
             ;;
         *)
             return 1
@@ -289,12 +304,16 @@ run_testcase() {
     local testcase="$2"
     local case_root="${TEST_ROOT}/${suite_dir}"
     local cfile="${case_root}/${testcase}.c"
+    local syfile="${case_root}/${testcase}.sy"
     local infile="${case_root}/${testcase}.in"
     local outfile="${case_root}/${testcase}.out"
     local failed=0
 
-    if [[ ! -f "${cfile}" ]]; then
-        echo "${cfile} not found"
+    # Support both .c and .sy extensions
+    if [[ -f "${syfile}" ]]; then
+        cfile="${syfile}"
+    elif [[ ! -f "${cfile}" ]]; then
+        echo "${cfile} or ${syfile} not found"
         NG_NUM=$((NG_NUM + 1))
         return
     fi
@@ -336,10 +355,15 @@ run_suite() {
     local cfile=""
     local testcase=""
 
+    # Find both .c and .sy files
     while IFS= read -r cfile; do
-        testcase=$(basename "${cfile}" .c)
+        if [[ "${cfile}" == *.sy ]]; then
+            testcase=$(basename "${cfile}" .sy)
+        else
+            testcase=$(basename "${cfile}" .c)
+        fi
         run_testcase "${suite_dir}" "${testcase}"
-    done < <(find "${case_root}" -maxdepth 1 -type f -name '*.c' | sort)
+    done < <(find "${case_root}" -maxdepth 1 -type f \( -name '*.c' -o -name '*.sy' \) | sort)
 }
 
 if [[ ! -x "${MINIC_BIN}" ]]; then
@@ -386,6 +410,8 @@ elif [[ "${suite_key}" == "all" ]]; then
     run_suite "2023_function"
     run_suite "2025_function"
     run_suite "2025_performance"
+    run_suite "2026_function"
+    run_suite "2026_performance"
 else
     suite_dir=$(suite_dir_from_key "${suite_key}") || \
         fail_with_usage "Unknown suite: ${suite_key}"

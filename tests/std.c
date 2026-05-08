@@ -121,3 +121,16 @@ void putf(char a[], ...)
     vfprintf(stdout, a, args);
     va_end(args);
 }
+
+// Performance timing functions for 2026 tests
+void _sysy_starttime(int lineno)
+{
+    // Placeholder implementation for timing
+    // In a real implementation, this would record the start time
+}
+
+void _sysy_stoptime(int lineno)
+{
+    // Placeholder implementation for timing
+    // In a real implementation, this would record the stop time
+}
