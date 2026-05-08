@@ -33,11 +33,31 @@ struct RegAllocInfo {
 	/// @brief 是否在栈上分配了空间
 	bool hasStackSlot = false;
 
-	/// @brief 判断是否分配了寄存器
-	bool hasReg() const { return regId != -1; }
+	/// @brief 分配的寄存器是否来自浮点寄存器文件
+	bool isFloatReg = false;
+
+	/// @brief 判断是否分配了通用寄存器
+	bool hasReg() const { return regId != -1 && !isFloatReg; }
+
+	/// @brief 判断是否分配了浮点寄存器
+	bool hasFloatReg() const { return regId != -1 && isFloatReg; }
+
+	/// @brief 判断是否分配了任意物理寄存器
+	bool hasAnyReg() const { return regId != -1; }
 
 	/// @brief 设置寄存器分配
-	void setReg(int32_t reg) { regId = reg; }
+	void setReg(int32_t reg)
+	{
+		regId = reg;
+		isFloatReg = false;
+	}
+
+	/// @brief 设置浮点寄存器分配
+	void setFloatReg(int32_t reg)
+	{
+		regId = reg;
+		isFloatReg = true;
+	}
 
 	/// @brief 设置栈位置
 	void setStack(int32_t base, int64_t off)
@@ -201,12 +221,18 @@ public:
 	/// @param disp 偏移
 	void load_base(int rs_reg_no, int base_reg_no, int disp, bool wide = false);
 
+	/// @brief 浮点Load指令，基址寻址 flw fd, offset(base)
+	void load_float_base(int fd_reg_no, int base_reg_no, int disp, int tmp_reg_no);
+
 	/// @brief Store指令，基址寻址 sw src, offset(base)
 	/// @param src_reg_no 源寄存器
 	/// @param base_reg_no 基址寄存器
 	/// @param disp 偏移
 	/// @param tmp_reg_no 可能需要临时寄存器编号
 	void store_base(int src_reg_no, int base_reg_no, int disp, int tmp_reg_no, bool wide = false);
+
+	/// @brief 浮点Store指令，基址寻址 fsw fs, offset(base)
+	void store_float_base(int fs_reg_no, int base_reg_no, int disp, int tmp_reg_no);
 
 	/// @brief 标签指令（用于BasicBlock标签输出）
 	/// @param name 标签名
@@ -227,6 +253,9 @@ public:
 	/// @param src_var 源操作数（Value*）
 	void load_var(int rs_reg_no, Value * src_var);
 
+	/// @brief 加载float变量到浮点寄存器
+	void load_float_var(int fd_reg_no, Value * src_var, int tmp_reg_no);
+
 	/// @brief 加载变量地址到寄存器
 	/// @param rs_reg_no 结果寄存器
 	/// @param var 变量
@@ -245,10 +274,16 @@ public:
 	/// @param tmp_reg_no 临时寄存器编号
 	void store_var(int src_reg_no, Value * dest_var, int tmp_reg_no);
 
+	/// @brief 保存浮点寄存器到float变量
+	void store_float_var(int fs_reg_no, Value * dest_var, int tmp_reg_no);
+
 	/// @brief 寄存器Mov操作 mv rd, rs
 	/// @param rs_reg_no 结果寄存器
 	/// @param src_reg_no 源寄存器
 	void mov_reg(int rs_reg_no, int src_reg_no);
+
+	/// @brief 浮点寄存器Mov操作
+	void fmov_reg(int fd_reg_no, int fs_reg_no);
 
 	/// @brief 调用函数fun call name
 	/// @param name 函数名

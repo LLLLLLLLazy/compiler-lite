@@ -28,6 +28,7 @@
 #include "Instruction.h"
 #include "LocalTempManager.h"
 #include "PlatformRiscV64.h"
+#include "RiscV64Peephole.h"
 #include "ScratchAllocator.h"
 #include "Value.h"
 
@@ -130,6 +131,25 @@ std::vector<int> computeSavedRegs(Function * func, const std::unordered_map<Valu
 	}
 
 	return regs;
+}
+
+bool canOmitLeafFrame(Function * func,
+                      const std::unordered_map<Value *, RegAllocInfo> & allocMap,
+                      const std::vector<int> & savedRegs,
+                      int outgoingArgBytes)
+{
+	if (hasCallInst(func) || outgoingArgBytes != 0) {
+		return false;
+	}
+	if (savedRegs.size() != 1 || savedRegs.front() != RISCV64_FP_REG_NO) {
+		return false;
+	}
+	for (const auto & [_, info] : allocMap) {
+		if (info.hasStackSlot) {
+			return false;
+		}
+	}
+	return true;
 }
 
 } // namespace
@@ -262,6 +282,9 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 		iloc.patchScratchRegs(scratchValues);
 	}
 
+	RiscV64Peephole peephole;
+	peephole.run(iloc, module->getOptLevel());
+
 	// 删除未被引用的基本块标签
 	iloc.deleteUnusedLabel();
 
@@ -306,6 +329,13 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 	currentSavedRegs = computeSavedRegs(func, greedyAllocator.getAllocationMap());
 	// 为未分配寄存器和溢出的变量分配栈槽
 	stackAlloc(func);
+	if (canOmitLeafFrame(func,
+	                     greedyAllocator.getAllocationMap(),
+	                     currentSavedRegs,
+	                     greedyAllocator.getOutgoingArgBytes())) {
+		currentSavedRegs.clear();
+		greedyAllocator.setFrameSize(0);
+	}
 }
 
 /// @brief 栈空间分配，为局部变量、溢出变量和超出寄存器传递的形参分配栈槽
@@ -447,6 +477,8 @@ void CodeGeneratorRiscV64::getIRValueStr(Value * val, std::string & str)
 	// 根据分配结果输出寄存器或栈位置
 	if (it->second.hasReg()) {
 		str = "\t# " + showName + ":" + PlatformRiscV64::regName[it->second.regId];
+	} else if (it->second.hasFloatReg()) {
+		str = "\t# " + showName + ":" + PlatformRiscV64::fpRegName[it->second.regId];
 	} else if (it->second.hasStackSlot) {
 		str = "\t# " + showName + ":" + std::to_string(it->second.offset) + "(" +
 			  PlatformRiscV64::regName[it->second.baseRegId] + ")";

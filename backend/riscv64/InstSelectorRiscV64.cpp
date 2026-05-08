@@ -12,7 +12,10 @@
 #include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <set>
 #include <vector>
 
@@ -21,6 +24,7 @@
 #include "BinaryInst.h"
 #include "BranchInst.h"
 #include "CallInst.h"
+#include "ConstInteger.h"
 #include "CondBranchInst.h"
 #include "CopyInst.h"
 #include "FCmpInst.h"
@@ -36,6 +40,7 @@
 #include "ReturnInst.h"
 #include "SIToFPInst.h"
 #include "StoreInst.h"
+#include "Use.h"
 #include "Value.h"
 #include "ZExtInst.h"
 
@@ -47,15 +52,23 @@ enum class AbiArgLocKind {
 	Stack,
 };
 
+/// @brief RISC-V ABI参数位置。index 对寄存器参数是 a/fa 序号，对栈参数是8字节槽序号。
 struct AbiArgLoc {
 	AbiArgLocKind kind;
 	int index;
 };
 
+/// @brief 按RISC-V整数/浮点独立寄存器计数规则分类实参或形参。
+///
+/// 浮点参数只使用fa0-fa7，超过8个后直接走栈，不能回落到a0-a7。
 AbiArgLoc classifyAbiArg(Type * type, int & intRegCount, int & floatRegCount, int & stackCount)
 {
-	if (type != nullptr && type->isFloatType() && floatRegCount < 8) {
-		return {AbiArgLocKind::FloatReg, floatRegCount++};
+	if (type != nullptr && type->isFloatType()) {
+		if (floatRegCount < 8) {
+			return {AbiArgLocKind::FloatReg, floatRegCount++};
+		}
+		++floatRegCount;
+		return {AbiArgLocKind::Stack, stackCount++};
 	}
 
 	if (intRegCount < 8) {
@@ -70,6 +83,110 @@ struct RegMove {
 	int src = -1;
 	int dst = -1;
 };
+
+/// @brief Hacker's Delight signed division magic参数。
+///
+/// quotient = high32(n * multiplier) 经过符号修正和shift后得到。
+struct SignedMagic {
+	int32_t multiplier = 0;
+	int shift = 0;
+};
+
+ConstInteger * asConstInteger(Value * value)
+{
+	return dynamic_cast<ConstInteger *>(value);
+}
+
+bool isPowerOfTwo(uint64_t value)
+{
+	return value != 0 && (value & (value - 1)) == 0;
+}
+
+int log2PowerOfTwo(uint64_t value)
+{
+	int shift = 0;
+	while (value > 1) {
+		value >>= 1;
+		++shift;
+	}
+	return shift;
+}
+
+bool powerOfTwoDivisorShift(int32_t divisor, int & shift, bool & negative)
+{
+	if (divisor == 0 || divisor == 1 || divisor == -1 || divisor == std::numeric_limits<int32_t>::min()) {
+		return false;
+	}
+
+	const uint32_t absDivisor = static_cast<uint32_t>(divisor < 0 ? -static_cast<int64_t>(divisor) : divisor);
+	if (!isPowerOfTwo(absDivisor)) {
+		return false;
+	}
+
+	shift = log2PowerOfTwo(absDivisor);
+	negative = divisor < 0;
+	return shift > 0 && shift < 31;
+}
+
+bool fitsInt(int64_t value)
+{
+	return value >= static_cast<int64_t>(INT32_MIN) && value <= static_cast<int64_t>(INT32_MAX);
+}
+
+bool isFloatValue(Value * value)
+{
+	return value != nullptr && value->getType() != nullptr && value->getType()->isFloatType();
+}
+
+uint32_t absUnsigned(int32_t value)
+{
+	if (value == std::numeric_limits<int32_t>::min()) {
+		return uint32_t{1} << 31;
+	}
+	return static_cast<uint32_t>(value < 0 ? -static_cast<int64_t>(value) : value);
+}
+
+SignedMagic computeSignedMagic(int32_t divisor)
+{
+	// Algorithm 10-2 from Hacker's Delight. 调用方已排除0、±1和INT_MIN等特例。
+	const uint64_t two31 = uint64_t{1} << 31;
+	const uint32_t absDivisor = absUnsigned(divisor);
+	const uint64_t t = two31 + (static_cast<uint32_t>(divisor) >> 31);
+	const uint64_t anc = t - 1 - (t % absDivisor);
+
+	int p = 31;
+	uint64_t q1 = two31 / anc;
+	uint64_t r1 = two31 - q1 * anc;
+	uint64_t q2 = two31 / absDivisor;
+	uint64_t r2 = two31 - q2 * absDivisor;
+	uint64_t delta = 0;
+
+	do {
+		++p;
+		q1 <<= 1;
+		r1 <<= 1;
+		if (r1 >= anc) {
+			++q1;
+			r1 -= anc;
+		}
+
+		q2 <<= 1;
+		r2 <<= 1;
+		if (r2 >= absDivisor) {
+			++q2;
+			r2 -= absDivisor;
+		}
+
+		delta = absDivisor - r2;
+	} while (q1 < delta || (q1 == delta && r1 == 0));
+
+	int64_t multiplier = static_cast<int64_t>(q2) + 1;
+	if (divisor < 0) {
+		multiplier = -multiplier;
+	}
+
+	return {static_cast<int32_t>(multiplier), p - 32};
+}
 
 } // namespace
 
@@ -170,6 +287,10 @@ void InstSelectorRiscV64::translate(Instruction * inst)
 		outputIRInstruction(inst);
 	}
 
+	if (auto * icmp = dynamic_cast<ICmpInst *>(inst); icmp != nullptr && isCompareOnlyUsedByCondBranch(icmp)) {
+		return;
+	}
+
 	int miStart = iloc.getMachineInstCount();
 	(this->*(handlerIt->second))(inst);
 	assert(tempMgr.allReleased());
@@ -208,6 +329,31 @@ void InstSelectorRiscV64::translate_load(Instruction * inst)
 		return;
 	}
 
+	if (loadInst->getType()->isFloatType()) {
+		int dstReg = getFloatResultReg(inst);
+		bool dstTemp = false;
+		if (dstReg < 0) {
+			std::set<int> excluded;
+			dstReg = borrowFloatTemp(inst, excluded);
+			dstTemp = true;
+		}
+
+		auto addrTmp = tempMgr.borrow(inst);
+		Value * ptrOp = loadInst->getPointerOperand();
+		if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
+			iloc.load_float_var(dstReg, ptrOp, addrTmp.reg());
+		} else {
+			OperandReg ptr = loadOperand(ptrOp, inst, addrTmp.reg());
+			iloc.inst("flw", PlatformRiscV64::fpRegName[dstReg], "0(" + PlatformRiscV64::regName[ptr.reg] + ")");
+			releaseOperand(ptr);
+		}
+		storeFloatResult(inst, dstReg, inst);
+		if (dstTemp) {
+			releaseFloatTemp(dstReg);
+		}
+		return;
+	}
+
 	int dstReg = getResultReg(inst);
 	LocalTempManager::Lease dstLease;
 	if (dstReg < 0) {
@@ -235,6 +381,21 @@ void InstSelectorRiscV64::translate_store(Instruction * inst)
 {
 	auto * storeInst = dynamic_cast<StoreInst *>(inst);
 	if (storeInst == nullptr) {
+		return;
+	}
+
+	if (storeInst->getValueOperand()->getType()->isFloatType()) {
+		FloatOperandReg value = loadFloatOperand(storeInst->getValueOperand(), inst);
+		Value * ptrOp = storeInst->getPointerOperand();
+		auto addrTmp = tempMgr.borrow(inst);
+		if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
+			iloc.store_float_var(value.reg, ptrOp, addrTmp.reg());
+		} else {
+			OperandReg ptr = loadOperand(ptrOp, inst, addrTmp.reg());
+			iloc.inst("fsw", PlatformRiscV64::fpRegName[value.reg], "0(" + PlatformRiscV64::regName[ptr.reg] + ")");
+			releaseOperand(ptr);
+		}
+		releaseFloatOperand(value);
 		return;
 	}
 
@@ -290,11 +451,38 @@ void InstSelectorRiscV64::translate_gep(Instruction * inst)
 	}
 
 	const int elemSize = stepType->getSize();
+	if (auto * constIndex = asConstInteger(gepInst->getIndexOperand())) {
+		const int64_t offset = static_cast<int64_t>(constIndex->getVal()) * elemSize;
+		if (offset != 0) {
+			if (fitsInt(offset) && PlatformRiscV64::constExpr(static_cast<int>(offset))) {
+				iloc.inst("addi", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+				          std::to_string(offset));
+			} else if (fitsInt(offset)) {
+				auto offsetTmp = tempMgr.borrow(inst, dstReg);
+				iloc.load_imm(offsetTmp.reg(), static_cast<int>(offset));
+				iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+				          PlatformRiscV64::regName[offsetTmp.reg()]);
+			} else {
+				auto offsetTmp = tempMgr.borrow(inst, dstReg);
+				iloc.inst("li", PlatformRiscV64::regName[offsetTmp.reg()], std::to_string(offset));
+				iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+				          PlatformRiscV64::regName[offsetTmp.reg()]);
+			}
+		}
+		storeResult(inst, dstReg, inst);
+		return;
+	}
+
 	if (elemSize != 1) {
-		auto mulTmp = tempMgr.borrow(inst, dstReg);
-		iloc.load_imm(mulTmp.reg(), elemSize);
-		iloc.inst("mul", PlatformRiscV64::regName[idxTmp.reg()], PlatformRiscV64::regName[idxTmp.reg()],
-		          PlatformRiscV64::regName[mulTmp.reg()]);
+		if (isPowerOfTwo(static_cast<uint64_t>(elemSize))) {
+			iloc.inst("slli", PlatformRiscV64::regName[idxTmp.reg()], PlatformRiscV64::regName[idxTmp.reg()],
+			          std::to_string(log2PowerOfTwo(static_cast<uint64_t>(elemSize))));
+		} else {
+			auto mulTmp = tempMgr.borrow(inst, dstReg);
+			iloc.load_imm(mulTmp.reg(), elemSize);
+			iloc.inst("mul", PlatformRiscV64::regName[idxTmp.reg()], PlatformRiscV64::regName[idxTmp.reg()],
+			          PlatformRiscV64::regName[mulTmp.reg()]);
+		}
 	}
 
 	iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
@@ -317,25 +505,39 @@ void InstSelectorRiscV64::translate_sub(Instruction * inst)
 /// @brief 翻译mul指令（乘法）
 void InstSelectorRiscV64::translate_mul(Instruction * inst)
 {
+	if (tryTranslateMulByPowerOfTwo(inst)) {
+		return;
+	}
 	translate_binary(inst, "mulw");
 }
 
 /// @brief 翻译div指令（除法）
 void InstSelectorRiscV64::translate_div(Instruction * inst)
 {
+	if (tryTranslateDivBySmallPowerOfTwo(inst)) {
+		return;
+	}
+	if (tryTranslateDivByConstant(inst)) {
+		return;
+	}
 	translate_binary(inst, "divw");
 }
 
 /// @brief 翻译mod指令（取模）
 void InstSelectorRiscV64::translate_mod(Instruction * inst)
 {
+	if (tryTranslateModBySmallPowerOfTwo(inst)) {
+		return;
+	}
+	if (tryTranslateModByConstant(inst)) {
+		return;
+	}
 	translate_binary(inst, "remw");
 }
 
 /// @brief 翻译浮点二元运算的通用实现
 ///
-/// 整数寄存器中存储的是float的IEEE 754位模式，
-/// 需要通过fmv.w.x移到FP寄存器，执行FP运算，再fmv.x.w移回整数寄存器
+/// float SSA值优先保存在FPR中，避免在热点浮点运算中反复fmv.w.x/fmv.x.w。
 void InstSelectorRiscV64::translate_fbinary(Instruction * inst, const std::string & op)
 {
 	auto * binary = dynamic_cast<BinaryInst *>(inst);
@@ -343,29 +545,30 @@ void InstSelectorRiscV64::translate_fbinary(Instruction * inst, const std::strin
 		return;
 	}
 
-	int dstReg = getResultReg(inst);
-	LocalTempManager::Lease dstLease;
+	int dstReg = getFloatResultReg(inst);
+	bool dstTemp = false;
 	if (dstReg < 0) {
-		dstLease = tempMgr.borrow(inst);
-		dstReg = dstLease.reg();
+		dstReg = borrowFloatTemp(inst);
+		dstTemp = true;
 	}
 
-	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+	FloatOperandReg lhs = loadFloatOperand(binary->getLHS(), inst, dstReg);
 	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
-	OperandReg rhs = loadOperand(binary->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
+	FloatOperandReg rhs =
+		loadFloatOperand(binary->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
 
-	// 将操作数从整数寄存器移到FP寄存器
-	iloc.inst("fmv.w.x", "ft0", PlatformRiscV64::regName[lhs.reg]);
-	iloc.inst("fmv.w.x", "ft1", PlatformRiscV64::regName[rhs.reg]);
-	// 执行FP运算
-	iloc.inst(op, "ft0", "ft0", "ft1");
-	// 将结果从FP寄存器移回整数寄存器
-	iloc.inst("fmv.x.w", PlatformRiscV64::regName[dstReg], "ft0");
+	iloc.inst(op,
+	          PlatformRiscV64::fpRegName[dstReg],
+	          PlatformRiscV64::fpRegName[lhs.reg],
+	          PlatformRiscV64::fpRegName[rhs.reg]);
 
-	releaseOperand(rhs);
-	releaseOperand(lhs);
+	releaseFloatOperand(rhs);
+	releaseFloatOperand(lhs);
 
-	storeResult(inst, dstReg, inst);
+	storeFloatResult(inst, dstReg, inst);
+	if (dstTemp) {
+		releaseFloatTemp(dstReg);
+	}
 }
 
 /// @brief 翻译浮点加法
@@ -402,19 +605,21 @@ void InstSelectorRiscV64::translate_sitofp(Instruction * inst)
 		return;
 	}
 
-	int dstReg = getResultReg(inst);
-	LocalTempManager::Lease dstLease;
+	int dstReg = getFloatResultReg(inst);
+	bool dstTemp = false;
 	if (dstReg < 0) {
-		dstLease = tempMgr.borrow(inst);
-		dstReg = dstLease.reg();
+		dstReg = borrowFloatTemp(inst);
+		dstTemp = true;
 	}
 
-	OperandReg src = loadOperand(sitofp->getSource(), inst, dstReg);
-	iloc.inst("fcvt.s.w", "ft0", PlatformRiscV64::regName[src.reg]);
-	iloc.inst("fmv.x.w", PlatformRiscV64::regName[dstReg], "ft0");
+	OperandReg src = loadOperand(sitofp->getSource(), inst);
+	iloc.inst("fcvt.s.w", PlatformRiscV64::fpRegName[dstReg], PlatformRiscV64::regName[src.reg]);
 	releaseOperand(src);
 
-	storeResult(inst, dstReg, inst);
+	storeFloatResult(inst, dstReg, inst);
+	if (dstTemp) {
+		releaseFloatTemp(dstReg);
+	}
 }
 
 /// @brief 翻译float→int转换 (fptosi)
@@ -434,10 +639,9 @@ void InstSelectorRiscV64::translate_fptosi(Instruction * inst)
 		dstReg = dstLease.reg();
 	}
 
-	OperandReg src = loadOperand(fptosi->getSource(), inst, dstReg);
-	iloc.inst("fmv.w.x", "ft0", PlatformRiscV64::regName[src.reg]);
-	iloc.inst("fcvt.w.s", PlatformRiscV64::regName[dstReg], "ft0", "rtz");
-	releaseOperand(src);
+	FloatOperandReg src = loadFloatOperand(fptosi->getSource(), inst);
+	iloc.inst("fcvt.w.s", PlatformRiscV64::regName[dstReg], PlatformRiscV64::fpRegName[src.reg], "rtz");
+	releaseFloatOperand(src);
 
 	storeResult(inst, dstReg, inst);
 }
@@ -476,6 +680,283 @@ void InstSelectorRiscV64::translate_binary(Instruction * inst, const std::string
 	releaseOperand(lhs);
 
 	storeResult(inst, dstReg, inst);
+}
+
+bool InstSelectorRiscV64::tryTranslateMulByPowerOfTwo(Instruction * inst)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	if (binary == nullptr) {
+		return false;
+	}
+
+	Value * valueOperand = nullptr;
+	int32_t multiplier = 0;
+	if (auto * rhsConst = asConstInteger(binary->getRHS())) {
+		valueOperand = binary->getLHS();
+		multiplier = rhsConst->getVal();
+	} else if (auto * lhsConst = asConstInteger(binary->getLHS())) {
+		valueOperand = binary->getRHS();
+		multiplier = lhsConst->getVal();
+	} else {
+		return false;
+	}
+
+	if (multiplier == 0) {
+		int dstReg = getResultReg(inst);
+		LocalTempManager::Lease dstLease;
+		if (dstReg < 0) {
+			dstLease = tempMgr.borrow(inst);
+			dstReg = dstLease.reg();
+		}
+		iloc.load_imm(dstReg, 0);
+		storeResult(inst, dstReg, inst);
+		return true;
+	}
+
+	const int64_t absMultiplier = multiplier < 0 ? -static_cast<int64_t>(multiplier) : multiplier;
+	if (!isPowerOfTwo(static_cast<uint64_t>(absMultiplier))) {
+		return false;
+	}
+
+	const int shift = log2PowerOfTwo(static_cast<uint64_t>(absMultiplier));
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg src = loadOperand(valueOperand, inst, dstReg);
+	if (shift == 0) {
+		if (src.reg != dstReg) {
+			iloc.mov_reg(dstReg, src.reg);
+		}
+	} else {
+		iloc.inst("slliw", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[src.reg],
+		          std::to_string(shift));
+	}
+	releaseOperand(src);
+
+	if (multiplier < 0) {
+		iloc.inst("subw", PlatformRiscV64::regName[dstReg], "zero", PlatformRiscV64::regName[dstReg]);
+	}
+
+	storeResult(inst, dstReg, inst);
+	return true;
+}
+
+bool InstSelectorRiscV64::tryTranslateDivBySmallPowerOfTwo(Instruction * inst)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	auto * divisorConst = binary != nullptr ? asConstInteger(binary->getRHS()) : nullptr;
+	int shift = 0;
+	bool negativeDivisor = false;
+	if (divisorConst == nullptr || !powerOfTwoDivisorShift(divisorConst->getVal(), shift, negativeDivisor)) {
+		return false;
+	}
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+	std::set<int> excluded = {lhs.reg, dstReg};
+	auto bias = tempMgr.borrowExcluding(inst, excluded);
+	const std::string srcName = PlatformRiscV64::regName[lhs.reg];
+	const std::string dstName = PlatformRiscV64::regName[dstReg];
+	const std::string biasName = PlatformRiscV64::regName[bias.reg()];
+
+	// C整数除法向零截断；负数右移会向-∞取整，因此先加(d-1)形式的bias。
+	// bias用srliw从全1符号掩码生成，避免andi超出12-bit立即数范围。
+	iloc.inst("sraiw", biasName, srcName, "31");
+	iloc.inst("srliw", biasName, biasName, std::to_string(32 - shift));
+	iloc.inst("addw", dstName, srcName, biasName);
+	iloc.inst("sraiw", dstName, dstName, std::to_string(shift));
+	if (negativeDivisor) {
+		iloc.inst("subw", dstName, "zero", dstName);
+	}
+
+	releaseOperand(lhs);
+	storeResult(inst, dstReg, inst);
+	return true;
+}
+
+bool InstSelectorRiscV64::tryTranslateModBySmallPowerOfTwo(Instruction * inst)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	auto * divisorConst = binary != nullptr ? asConstInteger(binary->getRHS()) : nullptr;
+	int shift = 0;
+	bool negativeDivisor = false;
+	if (divisorConst == nullptr || !powerOfTwoDivisorShift(divisorConst->getVal(), shift, negativeDivisor)) {
+		return false;
+	}
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+	std::set<int> excluded = {lhs.reg, dstReg};
+	auto quotient = tempMgr.borrowExcluding(inst, excluded);
+	excluded.insert(quotient.reg());
+	auto bias = tempMgr.borrowExcluding(inst, excluded);
+
+	const std::string srcName = PlatformRiscV64::regName[lhs.reg];
+	const std::string qName = PlatformRiscV64::regName[quotient.reg()];
+	const std::string biasName = PlatformRiscV64::regName[bias.reg()];
+	const std::string dstName = PlatformRiscV64::regName[dstReg];
+
+	// 余数按 x - (x / d) * d 生成，保证负数余数符号与RISC-V remw/C语义一致。
+	iloc.inst("sraiw", biasName, srcName, "31");
+	iloc.inst("srliw", biasName, biasName, std::to_string(32 - shift));
+	iloc.inst("addw", qName, srcName, biasName);
+	iloc.inst("sraiw", qName, qName, std::to_string(shift));
+	if (negativeDivisor) {
+		iloc.inst("subw", qName, "zero", qName);
+	}
+	iloc.inst("slliw", qName, qName, std::to_string(shift));
+	if (negativeDivisor) {
+		iloc.inst("subw", qName, "zero", qName);
+	}
+	iloc.inst("subw", dstName, srcName, qName);
+
+	releaseOperand(lhs);
+	storeResult(inst, dstReg, inst);
+	return true;
+}
+
+void InstSelectorRiscV64::emitSignedConstDivQuotient(
+	Instruction * inst,
+	Value * dividend,
+	int32_t divisor,
+	int dstReg)
+{
+	OperandReg lhs = loadOperand(dividend, inst, dstReg);
+	const std::string dstName = PlatformRiscV64::regName[dstReg];
+	const std::string lhsName = PlatformRiscV64::regName[lhs.reg];
+
+	if (divisor == 1) {
+		if (lhs.reg != dstReg) {
+			iloc.mov_reg(dstReg, lhs.reg);
+		}
+		releaseOperand(lhs);
+		return;
+	}
+
+	if (divisor == -1) {
+		iloc.inst("subw", dstName, "zero", lhsName);
+		releaseOperand(lhs);
+		return;
+	}
+
+	if (divisor == std::numeric_limits<int32_t>::min()) {
+		auto divisorTmp = tempMgr.borrowExcluding(inst, {lhs.reg, dstReg});
+		iloc.load_imm(divisorTmp.reg(), divisor);
+		iloc.inst("subw", dstName, lhsName, PlatformRiscV64::regName[divisorTmp.reg()]);
+		iloc.inst("seqz", dstName, dstName);
+		releaseOperand(lhs);
+		return;
+	}
+
+	const SignedMagic magic = computeSignedMagic(divisor);
+	auto magicTmp = tempMgr.borrowExcluding(inst, {lhs.reg, dstReg});
+	iloc.load_imm(magicTmp.reg(), magic.multiplier);
+	iloc.inst("mul", dstName, lhsName, PlatformRiscV64::regName[magicTmp.reg()]);
+	magicTmp.release();
+	iloc.inst("srai", dstName, dstName, "32");
+
+	// magic multiplier符号不同决定是否需要加回/减去被除数。
+	if (divisor > 0 && magic.multiplier < 0) {
+		iloc.inst("addw", dstName, dstName, lhsName);
+	} else if (divisor < 0 && magic.multiplier > 0) {
+		iloc.inst("subw", dstName, dstName, lhsName);
+	}
+
+	if (magic.shift > 0) {
+		iloc.inst("sraiw", dstName, dstName, std::to_string(magic.shift));
+	}
+
+	auto signTmp = tempMgr.borrowExcluding(inst, {lhs.reg, dstReg});
+	iloc.inst("srliw", PlatformRiscV64::regName[signTmp.reg()], dstName, "31");
+	iloc.inst("addw", dstName, dstName, PlatformRiscV64::regName[signTmp.reg()]);
+
+	releaseOperand(lhs);
+}
+
+bool InstSelectorRiscV64::tryTranslateDivByConstant(Instruction * inst)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	auto * divisorConst = binary != nullptr ? asConstInteger(binary->getRHS()) : nullptr;
+	if (divisorConst == nullptr || divisorConst->getVal() == 0) {
+		return false;
+	}
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	emitSignedConstDivQuotient(inst, binary->getLHS(), divisorConst->getVal(), dstReg);
+	storeResult(inst, dstReg, inst);
+	return true;
+}
+
+bool InstSelectorRiscV64::tryTranslateModByConstant(Instruction * inst)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	auto * divisorConst = binary != nullptr ? asConstInteger(binary->getRHS()) : nullptr;
+	if (divisorConst == nullptr || divisorConst->getVal() == 0) {
+		return false;
+	}
+
+	const int32_t divisor = divisorConst->getVal();
+	if (divisor == 1 || divisor == -1) {
+		int dstReg = getResultReg(inst);
+		LocalTempManager::Lease dstLease;
+		if (dstReg < 0) {
+			dstLease = tempMgr.borrow(inst);
+			dstReg = dstLease.reg();
+		}
+		iloc.load_imm(dstReg, 0);
+		storeResult(inst, dstReg, inst);
+		return true;
+	}
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+	LocalTempManager::Lease quotientLease;
+	int quotientReg = dstReg;
+	if (quotientReg == lhs.reg) {
+		quotientLease = tempMgr.borrowExcluding(inst, {lhs.reg, dstReg});
+		quotientReg = quotientLease.reg();
+	}
+	emitSignedConstDivQuotient(inst, binary->getLHS(), divisor, quotientReg);
+
+	auto product = tempMgr.borrowExcluding(inst, {lhs.reg, dstReg, quotientReg});
+	iloc.load_imm(product.reg(), divisor);
+	iloc.inst("mulw", PlatformRiscV64::regName[product.reg()],
+	          PlatformRiscV64::regName[quotientReg],
+	          PlatformRiscV64::regName[product.reg()]);
+	iloc.inst("subw", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[lhs.reg],
+	          PlatformRiscV64::regName[product.reg()]);
+
+	releaseOperand(lhs);
+	storeResult(inst, dstReg, inst);
+	return true;
 }
 
 /// @brief 翻译icmp指令（整数比较）
@@ -557,42 +1038,38 @@ void InstSelectorRiscV64::translate_fcmp(Instruction * inst)
 	}
 	const std::string dst = PlatformRiscV64::regName[dstReg];
 
-	OperandReg lhsOperand = loadOperand(fcmp->getLHS(), inst, dstReg);
-	const int rhsPreferredReg = lhsOperand.reg != dstReg ? dstReg : -1;
-	OperandReg rhsOperand = loadOperand(fcmp->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
+	FloatOperandReg lhsOperand = loadFloatOperand(fcmp->getLHS(), inst);
+	FloatOperandReg rhsOperand = loadFloatOperand(fcmp->getRHS(), inst, lhsOperand.reg);
 
-	const std::string lhs = PlatformRiscV64::regName[lhsOperand.reg];
-	const std::string rhs = PlatformRiscV64::regName[rhsOperand.reg];
-
-	iloc.inst("fmv.w.x", "ft0", lhs);
-	iloc.inst("fmv.w.x", "ft1", rhs);
+	const std::string lhs = PlatformRiscV64::fpRegName[lhsOperand.reg];
+	const std::string rhs = PlatformRiscV64::fpRegName[rhsOperand.reg];
 
 	switch (inst->getOp()) {
 		case IRInstOperator::IRINST_OP_LT_F:
-			iloc.inst("flt.s", dst, "ft0", "ft1");
+			iloc.inst("flt.s", dst, lhs, rhs);
 			break;
 		case IRInstOperator::IRINST_OP_GT_F:
-			iloc.inst("flt.s", dst, "ft1", "ft0");
+			iloc.inst("flt.s", dst, rhs, lhs);
 			break;
 		case IRInstOperator::IRINST_OP_LE_F:
-			iloc.inst("fle.s", dst, "ft0", "ft1");
+			iloc.inst("fle.s", dst, lhs, rhs);
 			break;
 		case IRInstOperator::IRINST_OP_GE_F:
-			iloc.inst("fle.s", dst, "ft1", "ft0");
+			iloc.inst("fle.s", dst, rhs, lhs);
 			break;
 		case IRInstOperator::IRINST_OP_EQ_F:
-			iloc.inst("feq.s", dst, "ft0", "ft1");
+			iloc.inst("feq.s", dst, lhs, rhs);
 			break;
 		case IRInstOperator::IRINST_OP_NE_F:
-			iloc.inst("feq.s", dst, "ft0", "ft1");
+			iloc.inst("feq.s", dst, lhs, rhs);
 			iloc.inst("xori", dst, dst, "1");
 			break;
 		default:
 			break;
 	}
 
-	releaseOperand(rhsOperand);
-	releaseOperand(lhsOperand);
+	releaseFloatOperand(rhsOperand);
+	releaseFloatOperand(lhsOperand);
 
 	storeResult(inst, dstReg, inst);
 }
@@ -607,6 +1084,88 @@ void InstSelectorRiscV64::translate_br(Instruction * inst)
 	}
 }
 
+bool InstSelectorRiscV64::isCompareOnlyUsedByCondBranch(ICmpInst * icmp) const
+{
+	if (icmp == nullptr) {
+		return false;
+	}
+
+	const auto & uses = icmp->getUseList();
+	if (uses.size() != 1 || uses.front() == nullptr) {
+		return false;
+	}
+
+	auto * condBr = dynamic_cast<CondBranchInst *>(uses.front()->getUser());
+	if (condBr == nullptr) {
+		return false;
+	}
+
+	// 只有紧邻条件跳转的比较才能折叠为 RISC-V 条件分支。
+	// LICM 等循环优化可能把 icmp 提前到循环外或支配块中，导致 icmp 与 cond_br
+	// 不在同一基本块或不再紧邻。此时若仍折叠，条件分支处会重新读取 icmp 的
+	// 操作数寄存器，但这些寄存器可能已被 icmp 与 cond_br 之间的其他指令覆盖，
+	// 从而产生错误的比较结果。因此要求 icmp 和 cond_br 必须在同一基本块且
+	// 指令序列上紧邻，方可安全折叠。
+	BasicBlock * bb = icmp->getParentBlock();
+	if (bb == nullptr || bb != condBr->getParentBlock()) {
+		return false;
+	}
+
+	const auto & insts = bb->getInstructions();
+	auto condIt = std::find(insts.begin(), insts.end(), static_cast<Instruction *>(condBr));
+	if (condIt == insts.end() || condIt == insts.begin()) {
+		return false;
+	}
+
+	auto prevIt = condIt;
+	--prevIt;
+	return *prevIt == static_cast<Instruction *>(icmp);
+}
+
+bool InstSelectorRiscV64::translateDirectIcmpBranch(ICmpInst * icmp, CondBranchInst * condBr)
+{
+	if (icmp == nullptr || condBr == nullptr || !isCompareOnlyUsedByCondBranch(icmp)) {
+		return false;
+	}
+
+	OperandReg lhsOperand = loadOperand(icmp->getLHS(), condBr);
+	OperandReg rhsOperand = loadOperand(icmp->getRHS(), condBr, lhsOperand.reg);
+
+	const std::string lhs = PlatformRiscV64::regName[lhsOperand.reg];
+	const std::string rhs = PlatformRiscV64::regName[rhsOperand.reg];
+	const std::string trueLabel = blockLabel(condBr->getTrueDest());
+
+	switch (icmp->getOp()) {
+		case IRInstOperator::IRINST_OP_LT_I:
+			iloc.inst("blt", lhs, rhs, trueLabel);
+			break;
+		case IRInstOperator::IRINST_OP_GT_I:
+			iloc.inst("blt", rhs, lhs, trueLabel);
+			break;
+		case IRInstOperator::IRINST_OP_LE_I:
+			iloc.inst("bge", rhs, lhs, trueLabel);
+			break;
+		case IRInstOperator::IRINST_OP_GE_I:
+			iloc.inst("bge", lhs, rhs, trueLabel);
+			break;
+		case IRInstOperator::IRINST_OP_EQ_I:
+			iloc.inst("beq", lhs, rhs, trueLabel);
+			break;
+		case IRInstOperator::IRINST_OP_NE_I:
+			iloc.inst("bne", lhs, rhs, trueLabel);
+			break;
+		default:
+			releaseOperand(rhsOperand);
+			releaseOperand(lhsOperand);
+			return false;
+	}
+
+	releaseOperand(rhsOperand);
+	releaseOperand(lhsOperand);
+	iloc.jump(blockLabel(condBr->getFalseDest()));
+	return true;
+}
+
 /// @brief 翻译cond_br指令（条件跳转）
 /// @param inst IR指令
 ///
@@ -616,6 +1175,12 @@ void InstSelectorRiscV64::translate_cond_br(Instruction * inst)
 	auto * condBr = dynamic_cast<CondBranchInst *>(inst);
 	if (condBr == nullptr) {
 		return;
+	}
+
+	if (auto * icmp = dynamic_cast<ICmpInst *>(condBr->getCondition())) {
+		if (translateDirectIcmpBranch(icmp, condBr)) {
+			return;
+		}
 	}
 
 	OperandReg cond = loadOperand(condBr->getCondition(), inst);
@@ -635,9 +1200,11 @@ void InstSelectorRiscV64::translate_ret(Instruction * inst)
 		Value *retVal = ret->getReturnValue();
 		Type *retType = retVal->getType();
 		if (retType->isFloatType()) {
-			// float返回值：加载到a0，再移至fa0
-			iloc.load_var(RISCV64_A0_REG_NO, retVal);
-			iloc.inst("fmv.w.x", "fa0", PlatformRiscV64::regName[RISCV64_A0_REG_NO]);
+			FloatOperandReg value = loadFloatOperand(retVal, inst, -1, 10);
+			if (value.reg != 10) {
+				iloc.fmov_reg(10, value.reg);
+			}
+			releaseFloatOperand(value);
 		} else {
 			iloc.load_var(RISCV64_A0_REG_NO, retVal);
 		}
@@ -666,41 +1233,88 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 	// 整数类型参数依次占用 a0-a7，浮点参数依次占用 fa0-fa7
 	// 超出对应寄存器的参数通过栈传递（每个栈槽 8 字节对齐）
 	{
-		int intIdx = 0, floatIdx = 0, stackOffset = 0;
-
+		std::vector<AbiArgLoc> argLocs;
+		std::vector<Type *> argTypes;
+		argLocs.reserve(call->getArgCount());
+		argTypes.reserve(call->getArgCount());
+		int intIdx = 0, floatIdx = 0, stackIdx = 0;
 		for (int i = 0; i < call->getArgCount(); ++i) {
 			Value *arg = call->getArg(i);
 			Type *argType = arg->getType();
 			if (auto *alloca = dynamic_cast<AllocaInst *>(arg)) {
 				argType = alloca->getAllocaType();
 			}
+			argTypes.push_back(argType);
+			argLocs.push_back(classifyAbiArg(argType, intIdx, floatIdx, stackIdx));
+		}
 
-			if (argType->isFloatType()) {
-				if (floatIdx < 8) {
-					OperandReg val = loadOperand(arg, inst);
-					iloc.inst("fmv.w.x", "fa" + std::to_string(floatIdx), PlatformRiscV64::regName[val.reg]);
-					releaseOperand(val);
+		std::vector<FloatRegMove> floatRegMoves;
+		std::vector<std::pair<Value *, int>> deferredFloatLoads;
+		for (int i = 0; i < call->getArgCount(); ++i) {
+			if (!argTypes[i]->isFloatType()) {
+				continue;
+			}
+
+			Value * arg = call->getArg(i);
+			const AbiArgLoc & loc = argLocs[i];
+			if (loc.kind == AbiArgLocKind::FloatReg) {
+				const int destReg = 10 + loc.index;
+				auto allocIt = allocator.getAllocationMap().find(arg);
+				if (allocIt != allocator.getAllocationMap().end() && allocIt->second.hasFloatReg()) {
+					if (allocIt->second.regId != destReg) {
+						floatRegMoves.push_back(FloatRegMove{
+							FloatRegMove::SourceKind::FloatReg,
+							allocIt->second.regId,
+							destReg,
+						});
+					}
 				} else {
-					OperandReg value = loadOperand(arg, inst);
-					auto tmp = tempMgr.borrow(inst, value.reg);
-					iloc.store_base(value.reg, RISCV64_SP_REG_NO, stackOffset, tmp.reg(),
-					                arg->getType()->isPointerType());
-					releaseOperand(value);
-					stackOffset += 8;
+					deferredFloatLoads.push_back({arg, destReg});
 				}
-				floatIdx++;
-			} else {
-				if (intIdx < 8) {
-					iloc.load_var(RISCV64_A0_REG_NO + intIdx, arg);
+			} else if (loc.kind == AbiArgLocKind::Stack) {
+				auto allocIt = allocator.getAllocationMap().find(arg);
+				if (allocIt != allocator.getAllocationMap().end() && allocIt->second.hasFloatReg()) {
+					auto tmp = tempMgr.borrow(inst);
+					iloc.store_float_base(allocIt->second.regId, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg());
 				} else {
-					OperandReg value = loadOperand(arg, inst);
-					auto tmp = tempMgr.borrow(inst, value.reg);
-					iloc.store_base(value.reg, RISCV64_SP_REG_NO, stackOffset, tmp.reg(),
-					                arg->getType()->isPointerType());
-					releaseOperand(value);
-					stackOffset += 8;
+					const int tmpFpr = borrowFloatTemp(inst);
+					auto tmp = tempMgr.borrow(inst);
+					iloc.load_float_var(tmpFpr, arg, tmp.reg());
+					iloc.store_float_base(tmpFpr, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg());
+					releaseFloatTemp(tmpFpr);
 				}
-				intIdx++;
+			}
+		}
+
+		{
+			std::set<int> blockedGprs;
+			for (int reg = RISCV64_A0_REG_NO; reg < RISCV64_A0_REG_NO + 8; ++reg) {
+				blockedGprs.insert(reg);
+			}
+			auto scratch = tempMgr.borrowExcluding(inst, blockedGprs);
+			emitFloatRegMoves(floatRegMoves, scratch.reg());
+		}
+
+		for (const auto & [arg, destReg] : deferredFloatLoads) {
+			auto tmp = tempMgr.borrow(inst);
+			iloc.load_float_var(destReg, arg, tmp.reg());
+		}
+
+		for (int i = 0; i < call->getArgCount(); ++i) {
+			if (argTypes[i]->isFloatType()) {
+				continue;
+			}
+
+			Value * arg = call->getArg(i);
+			const AbiArgLoc & loc = argLocs[i];
+			if (loc.kind == AbiArgLocKind::IntReg) {
+				iloc.load_var(RISCV64_A0_REG_NO + loc.index, arg);
+			} else if (loc.kind == AbiArgLocKind::Stack) {
+				OperandReg value = loadOperand(arg, inst);
+				auto tmp = tempMgr.borrow(inst, value.reg);
+				iloc.store_base(value.reg, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg(),
+				                arg->getType()->isPointerType());
+				releaseOperand(value);
 			}
 		}
 	}
@@ -711,8 +1325,8 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 	// 若有返回值，将a0（或fa0→a0）存储到结果位置
 	if (call->hasResultValue()) {
 		if (call->getType()->isFloatType()) {
-			// float返回值从fa0移至a0整数寄存器
-			iloc.inst("fmv.x.w", PlatformRiscV64::regName[RISCV64_A0_REG_NO], "fa0");
+			storeFloatResult(call, 10, inst);
+			return;
 		}
 		storeResult(call, RISCV64_A0_REG_NO, inst);
 	}
@@ -763,9 +1377,60 @@ void InstSelectorRiscV64::translate_copy(Instruction * inst)
 	}
 
 	Value * dst = copy->getDst() != nullptr ? copy->getDst() : static_cast<Value *>(copy);
+	if (isFloatValue(dst) || isFloatValue(copy->getSource())) {
+		FloatOperandReg src = loadFloatOperand(copy->getSource(), inst);
+		storeFloatResult(dst, src.reg, inst);
+		releaseFloatOperand(src);
+		return;
+	}
+
 	OperandReg src = loadOperand(copy->getSource(), inst);
 	storeResult(dst, src.reg, inst);
 	releaseOperand(src);
+}
+
+void InstSelectorRiscV64::emitFloatRegMoves(std::vector<FloatRegMove> & regMoves, int scratchGpr)
+{
+	while (!regMoves.empty()) {
+		bool progressed = false;
+		for (auto it = regMoves.begin(); it != regMoves.end(); ++it) {
+			bool dstIsStillFloatSource = false;
+			for (const auto & move : regMoves) {
+				if (move.sourceKind == FloatRegMove::SourceKind::FloatReg && move.src == it->dst) {
+					dstIsStillFloatSource = true;
+					break;
+				}
+			}
+
+			if (dstIsStillFloatSource) {
+				continue;
+			}
+
+			if (it->sourceKind == FloatRegMove::SourceKind::FloatReg) {
+				if (it->src != it->dst) {
+					iloc.fmov_reg(it->dst, it->src);
+				}
+			} else {
+				iloc.inst("fmv.w.x", PlatformRiscV64::fpRegName[it->dst], PlatformRiscV64::regName[it->src]);
+			}
+			regMoves.erase(it);
+			progressed = true;
+			break;
+		}
+
+		if (progressed) {
+			continue;
+		}
+
+		const int cycleSrc = regMoves.front().src;
+		iloc.inst("fmv.x.w", PlatformRiscV64::regName[scratchGpr], PlatformRiscV64::fpRegName[cycleSrc]);
+		for (auto & move : regMoves) {
+			if (move.sourceKind == FloatRegMove::SourceKind::FloatReg && move.src == cycleSrc) {
+				move.sourceKind = FloatRegMove::SourceKind::Gpr;
+				move.src = scratchGpr;
+			}
+		}
+	}
 }
 
 /// @brief 生成形参从ABI寄存器到分配位置的移动指令
@@ -880,6 +1545,7 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 	// 浮点入参通过fa0-fa7传递，使用fmv.x.w将浮点寄存器的位模式移动到整数寄存器
 	{
 		int floatIdx = 0;
+		std::vector<FloatRegMove> floatRegMoves;
 		for (auto * param : params) {
 			auto it = allocMap.find(param);
 			if (it == allocMap.end()) {
@@ -892,19 +1558,25 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 			if (floatIdx < 8) {
 				// fa0-fa7: 浮点参数寄存器
 				const std::string fpReg = "fa" + std::to_string(floatIdx);
-				if (it->second.hasReg()) {
+				if (it->second.hasFloatReg()) {
+					if (it->second.regId != 10 + floatIdx) {
+						floatRegMoves.push_back(FloatRegMove{
+							FloatRegMove::SourceKind::FloatReg,
+							10 + floatIdx,
+							it->second.regId,
+						});
+					}
+				} else if (it->second.hasReg()) {
 					// 目标分配了整数寄存器，用fmv.x.w将浮点寄存器位模式移入整数寄存器
 					iloc.inst("fmv.x.w", PlatformRiscV64::regName[it->second.regId], fpReg);
 				} else if (it->second.hasStackSlot) {
-					// 目标在栈上，先移入scratch寄存器，再存入栈
-					iloc.inst("fmv.x.w", PlatformRiscV64::regName[scratchReg], fpReg);
-					iloc.store_base(scratchReg, it->second.baseRegId, it->second.offset,
-					                scratchReg, false);
+					iloc.store_float_base(10 + floatIdx, it->second.baseRegId, it->second.offset, scratchReg);
 				}
 			}
 			// 栈传浮点参数已在 fp+offset 处，无需复制
 			floatIdx++;
 		}
+		emitFloatRegMoves(floatRegMoves, scratchReg);
 	}
 }
 
@@ -916,6 +1588,11 @@ void InstSelectorRiscV64::emitEpilogue()
 	const int frameSize = allocator.getFrameSize();
 	// 获取当前函数实际需要保存的callee-saved寄存器列表
 	const auto & savedRegs = iloc.getSavedRegs();
+	if (frameSize == 0 && savedRegs.empty()) {
+		iloc.inst("ret", "");
+		return;
+	}
+
 	auto tmp = tempMgr.borrow(nullptr);
 
 	// 逆序恢复callee-saved寄存器（与prologue中保存顺序相反）
@@ -975,6 +1652,16 @@ int InstSelectorRiscV64::getResultReg(Value * val) const
 	return -1;
 }
 
+int InstSelectorRiscV64::getFloatResultReg(Value * val) const
+{
+	auto & allocMap = allocator.getAllocationMap();
+	auto it = allocMap.find(val);
+	if (it != allocMap.end() && it->second.hasFloatReg()) {
+		return it->second.regId;
+	}
+	return -1;
+}
+
 /// @brief 获取只读操作数所在寄存器，必要时借用临时寄存器加载
 /// @param val 操作数
 /// @param inst 当前IR指令
@@ -1000,10 +1687,44 @@ InstSelectorRiscV64::loadOperand(Value * val, Instruction * inst, int excludeReg
 	return OperandReg(std::move(reg));
 }
 
+InstSelectorRiscV64::FloatOperandReg
+InstSelectorRiscV64::loadFloatOperand(Value * val, Instruction * inst, int excludeReg, int preferredReg)
+{
+	auto & allocMap = allocator.getAllocationMap();
+	auto it = allocMap.find(val);
+	if (it != allocMap.end() && it->second.hasFloatReg()) {
+		return FloatOperandReg(it->second.regId, false);
+	}
+
+	int reg = -1;
+	bool temp = false;
+	if (preferredReg >= 0 && preferredReg != excludeReg && !isFloatRegLiveAt(preferredReg, inst) &&
+	    borrowedFloatTemps.find(preferredReg) == borrowedFloatTemps.end()) {
+		reg = preferredReg;
+	} else {
+		reg = borrowFloatTemp(inst, {excludeReg});
+		temp = true;
+	}
+
+	auto tmp = tempMgr.borrow(inst);
+	iloc.load_float_var(reg, val, tmp.reg());
+	return FloatOperandReg(reg, temp, std::move(tmp));
+}
+
 /// @brief 释放通过loadOperand借用的临时寄存器
 void InstSelectorRiscV64::releaseOperand(OperandReg & operand)
 {
 	operand.lease.release();
+}
+
+void InstSelectorRiscV64::releaseFloatOperand(FloatOperandReg & operand)
+{
+	operand.gprLease.release();
+	if (operand.temp && operand.reg >= 0) {
+		releaseFloatTemp(operand.reg);
+		operand.temp = false;
+		operand.reg = -1;
+	}
 }
 
 /// @brief 将寄存器值存储到Value的目标位置
@@ -1025,6 +1746,78 @@ void InstSelectorRiscV64::storeResult(Value * val, int srcReg, Instruction * ins
 
 	auto tmp = tempMgr.borrowAfterUses(inst, srcReg);
 	iloc.store_var(srcReg, val, tmp.reg());
+}
+
+void InstSelectorRiscV64::storeFloatResult(Value * val, int srcReg, Instruction * inst)
+{
+	if (val == nullptr) {
+		return;
+	}
+
+	auto & allocMap = allocator.getAllocationMap();
+	auto it = allocMap.find(val);
+	if (it != allocMap.end() && it->second.hasFloatReg()) {
+		if (srcReg != it->second.regId) {
+			iloc.fmov_reg(it->second.regId, srcReg);
+		}
+		return;
+	}
+
+	auto tmp = tempMgr.borrowAfterUses(inst);
+	iloc.store_float_var(srcReg, val, tmp.reg());
+}
+
+int InstSelectorRiscV64::borrowFloatTemp(Instruction * inst, const std::set<int> & excludeRegs)
+{
+	for (int reg : allocator.getAvailableFloatRegs()) {
+		if (excludeRegs.find(reg) != excludeRegs.end()) {
+			continue;
+		}
+		if (borrowedFloatTemps.find(reg) != borrowedFloatTemps.end()) {
+			continue;
+		}
+		if (isFloatRegLiveAt(reg, inst)) {
+			continue;
+		}
+		borrowedFloatTemps.insert(reg);
+		return reg;
+	}
+
+	std::fprintf(stderr, "InstSelectorRiscV64: 无可用的临时浮点寄存器！\n");
+	std::abort();
+}
+
+void InstSelectorRiscV64::releaseFloatTemp(int reg)
+{
+	borrowedFloatTemps.erase(reg);
+}
+
+bool InstSelectorRiscV64::isFloatRegLiveAt(int reg, Instruction * inst) const
+{
+	if (inst == nullptr) {
+		return false;
+	}
+
+	auto instIt = allocator.getInstNumbering().find(inst);
+	if (instIt == allocator.getInstNumbering().end()) {
+		return false;
+	}
+	const int instNum = instIt->second;
+
+	for (const auto & [value, info] : allocator.getAllocationMap()) {
+		if (!info.hasFloatReg() || info.regId != reg) {
+			continue;
+		}
+		auto liveIt = allocator.getValueLiveRanges().find(value);
+		if (liveIt == allocator.getValueLiveRanges().end()) {
+			continue;
+		}
+		if (liveIt->second.first <= instNum && instNum < liveIt->second.second) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 /// @brief 生成基本块对应的标签名

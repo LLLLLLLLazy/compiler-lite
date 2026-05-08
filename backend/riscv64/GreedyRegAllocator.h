@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -110,6 +111,13 @@ public:
 		return availableRegs;
 	}
 
+	/// @brief 获取可用浮点寄存器池
+	/// @return 浮点寄存器编号列表
+	const std::vector<int> & getAvailableFloatRegs() const
+	{
+		return availableFloatRegs;
+	}
+
 	/// @brief 获取指令编号映射（Instruction* -> 编号）
 	/// @return 指令编号映射
 	const std::map<class Instruction *, int> & getInstNumbering() const
@@ -167,6 +175,22 @@ private:
 	/// @return 可用寄存器编号列表
 	std::vector<int> buildRegisterPool(Function * func) const;
 
+	/// @brief 构建可用浮点物理寄存器池
+	std::vector<int> buildFloatRegisterPool(Function * func) const;
+
+	/// @brief 判断活跃区间是否应分配浮点寄存器
+	static bool isFloatInterval(LiveInterval * interval);
+
+	/// @brief 获取活跃区间对应类别的可用寄存器池
+	const std::vector<int> & registerPoolFor(LiveInterval * interval) const;
+
+	/// @brief 获取与某节点干涉且同类别的已分配寄存器集合
+	std::set<int> getInterferingRegsForClass(
+		int node,
+		const std::vector<LiveInterval *> & intervals,
+		InterferenceGraph * graph,
+		bool wantFloat) const;
+
 	/// @brief 判断物理寄存器是否为调用者保存寄存器
 	/// @param reg 物理寄存器编号
 	/// @return 是否会被普通函数调用 clobber
@@ -200,6 +224,9 @@ private:
 
 	/// @brief 可用物理寄存器编号列表
 	std::vector<int> availableRegs;
+
+	/// @brief 可用浮点物理寄存器编号列表
+	std::vector<int> availableFloatRegs;
 
 	/// @brief 寄存器分配映射表：Value* -> RegAllocInfo
 	std::unordered_map<Value *, RegAllocInfo> allocationMap;

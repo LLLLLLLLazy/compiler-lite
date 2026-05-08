@@ -333,9 +333,14 @@ void ILocRiscV64::comment(std::string str)
 }
 
 /*
-	加载立即数 - RISCV64使用li伪指令或lui+addi
+	加载立即数 - RISCV64使用li伪指令或lui+addiw
 	对于12位有符号立即数范围(-2048~2047)，使用li伪指令(汇编器展开为addi)
-	对于超出12位范围的32位常量，使用lui+addi方式
+	对于超出12位范围的32位常量，使用lui+addiw方式
+	注意：RV64 的 lui 会将 20 位立即数左移 12 位后符号扩展到 64 位，
+	若高位为 1（如立即数 2147483647 即 0x7FFFFFFF），符号扩展后会产生错误的
+	64 位负值。使用 addiw 代替 addi，addiw 只取低 32 位结果再符号扩展，
+	从而消除 lui 带来的错误符号扩展，保证装载的 64 位值正确。
+	此前使用 lui+addi 会导致 RV64 上大立即数装载出错。
 */
 void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 {
@@ -344,8 +349,8 @@ void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 		// li rd, imm (汇编器会展开为 addi rd, zero, imm)
 		emit("li", PlatformRiscV64::regName[rs_reg_no], std::to_string(constant));
 	} else {
-		// 超出12位范围，使用lui+addi
-		// lui加载高20位，addi加载低12位
+		// 超出12位范围，使用lui+addiw。
+		// RV64 的 lui 会生成符号扩展后的 64 位值；addiw 可把结果收敛回 i32 语义。
 		const int32_t v32 = static_cast<int32_t>(constant);
 		int32_t lo = v32 & 0xFFF;
 		int32_t hi = v32 - lo;
@@ -356,7 +361,7 @@ void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 		const uint32_t luiImm = (static_cast<uint32_t>(hi >> 12)) & 0xFFFFF;
 
 		emit("lui", PlatformRiscV64::regName[rs_reg_no], std::to_string(luiImm));
-		emit("addi", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[rs_reg_no],
+		emit("addiw", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[rs_reg_no],
 			 std::to_string(lo));
 	}
 }
@@ -393,6 +398,21 @@ void ILocRiscV64::load_base(int rs_reg_no, int base_reg_no, int offset, bool wid
 	}
 }
 
+/// @brief 从基址寻址内存加载单精度float到FPR。
+void ILocRiscV64::load_float_base(int fd_reg_no, int base_reg_no, int offset, int tmp_reg_no)
+{
+	std::string fdReg = PlatformRiscV64::fpRegName[fd_reg_no];
+	std::string base = PlatformRiscV64::regName[base_reg_no];
+
+	if (PlatformRiscV64::isDisp(offset)) {
+		emit("flw", fdReg, std::to_string(offset) + "(" + base + ")");
+	} else {
+		load_imm(tmp_reg_no, offset);
+		emit("add", PlatformRiscV64::regName[tmp_reg_no], base, PlatformRiscV64::regName[tmp_reg_no]);
+		emit("flw", fdReg, "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+	}
+}
+
 /// @brief 基址寻址存储 - RISCV64格式: sw src, offset(base)
 /// @param src_reg_no 源寄存器
 /// @param base_reg_no 基址寄存器
@@ -417,12 +437,34 @@ void ILocRiscV64::store_base(int src_reg_no, int base_reg_no, int disp, int tmp_
 	}
 }
 
+/// @brief 将FPR中的单精度float保存到基址寻址内存。
+void ILocRiscV64::store_float_base(int fs_reg_no, int base_reg_no, int disp, int tmp_reg_no)
+{
+	std::string fsReg = PlatformRiscV64::fpRegName[fs_reg_no];
+	std::string base = PlatformRiscV64::regName[base_reg_no];
+
+	if (PlatformRiscV64::isDisp(disp)) {
+		emit("fsw", fsReg, std::to_string(disp) + "(" + base + ")");
+	} else {
+		load_imm(tmp_reg_no, disp);
+		emit("add", PlatformRiscV64::regName[tmp_reg_no], base, PlatformRiscV64::regName[tmp_reg_no]);
+		emit("fsw", fsReg, "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+	}
+}
+
 /// @brief 寄存器Mov操作 - RISCV64使用mv伪指令
 /// @param rs_reg_no 结果寄存器
 /// @param src_reg_no 源寄存器
 void ILocRiscV64::mov_reg(int rs_reg_no, int src_reg_no)
 {
 	emit("mv", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[src_reg_no]);
+}
+
+/// @brief FPR到FPR复制。RISC-V没有fmv.s三操作数编码，使用fsgnj.s rd,rs,rs。
+void ILocRiscV64::fmov_reg(int fd_reg_no, int fs_reg_no)
+{
+	emit("fsgnj.s", PlatformRiscV64::fpRegName[fd_reg_no], PlatformRiscV64::fpRegName[fs_reg_no],
+	     PlatformRiscV64::fpRegName[fs_reg_no]);
 }
 
 /// @brief 加载变量到寄存器，保证将变量放到reg中
@@ -456,6 +498,8 @@ void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 				// 寄存器不一样才需要mv操作
 				emit("mv", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[src_regId]);
 			}
+		} else if (it != regAllocMap.end() && it->second.hasFloatReg()) {
+			emit("fmv.x.w", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::fpRegName[it->second.regId]);
 		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
 			// 在栈上分配了空间，从栈加载
 			load_base(rs_reg_no, it->second.baseRegId, it->second.offset, wide);
@@ -463,6 +507,36 @@ void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 			// 未找到分配信息，可能是AllocaInst的结果（指针值）
 			// 指针值需要通过栈地址加载
 			minic_log(LOG_ERROR, "ILocRiscV64::load_var: 未找到变量分配信息");
+		}
+	}
+}
+
+/// @brief 加载float值到FPR。
+///
+/// 常量和GPR分配的float值通过fmv.w.x搬运位模式；栈和全局变量使用flw。
+void ILocRiscV64::load_float_var(int fd_reg_no, Value * src_var, int tmp_reg_no)
+{
+	if (Instanceof(constVal, ConstFloat *, src_var)) {
+		std::uint32_t bits = constVal->getBitPattern();
+		load_imm(tmp_reg_no, static_cast<int32_t>(bits));
+		emit("fmv.w.x", PlatformRiscV64::fpRegName[fd_reg_no], PlatformRiscV64::regName[tmp_reg_no]);
+
+	} else if (Instanceof(globalVar, GlobalVariable *, src_var)) {
+		load_symbol(tmp_reg_no, globalVar->getName());
+		emit("flw", PlatformRiscV64::fpRegName[fd_reg_no], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+
+	} else {
+		auto it = regAllocMap.find(src_var);
+		if (it != regAllocMap.end() && it->second.hasFloatReg()) {
+			if (it->second.regId != fd_reg_no) {
+				fmov_reg(fd_reg_no, it->second.regId);
+			}
+		} else if (it != regAllocMap.end() && it->second.hasReg()) {
+			emit("fmv.w.x", PlatformRiscV64::fpRegName[fd_reg_no], PlatformRiscV64::regName[it->second.regId]);
+		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
+			load_float_base(fd_reg_no, it->second.baseRegId, it->second.offset, tmp_reg_no);
+		} else {
+			minic_log(LOG_ERROR, "ILocRiscV64::load_float_var: 未找到变量分配信息");
 		}
 	}
 }
@@ -507,11 +581,38 @@ void ILocRiscV64::store_var(int src_reg_no, Value * dest_var, int tmp_reg_no)
 			if (src_reg_no != dest_reg_id) {
 				emit("mv", PlatformRiscV64::regName[dest_reg_id], PlatformRiscV64::regName[src_reg_no]);
 			}
+		} else if (it != regAllocMap.end() && it->second.hasFloatReg()) {
+			emit("fmv.w.x", PlatformRiscV64::fpRegName[it->second.regId], PlatformRiscV64::regName[src_reg_no]);
 		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
 			// 在栈上分配了空间，存储到栈
 			store_base(src_reg_no, it->second.baseRegId, it->second.offset, tmp_reg_no, wide);
 		} else {
 			minic_log(LOG_ERROR, "ILocRiscV64::store_var: 未找到变量分配信息");
+		}
+	}
+}
+
+/// @brief 将FPR中的float值保存到目标Value。
+///
+/// 目标可能是FPR、GPR位模式、栈槽或全局变量，按RegAllocInfo选择路径。
+void ILocRiscV64::store_float_var(int fs_reg_no, Value * dest_var, int tmp_reg_no)
+{
+	if (Instanceof(globalVar, GlobalVariable *, dest_var)) {
+		load_symbol(tmp_reg_no, globalVar->getName());
+		emit("fsw", PlatformRiscV64::fpRegName[fs_reg_no], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+
+	} else {
+		auto it = regAllocMap.find(dest_var);
+		if (it != regAllocMap.end() && it->second.hasFloatReg()) {
+			if (fs_reg_no != it->second.regId) {
+				fmov_reg(it->second.regId, fs_reg_no);
+			}
+		} else if (it != regAllocMap.end() && it->second.hasReg()) {
+			emit("fmv.x.w", PlatformRiscV64::regName[it->second.regId], PlatformRiscV64::fpRegName[fs_reg_no]);
+		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
+			store_float_base(fs_reg_no, it->second.baseRegId, it->second.offset, tmp_reg_no);
+		} else {
+			minic_log(LOG_ERROR, "ILocRiscV64::store_float_var: 未找到变量分配信息");
 		}
 	}
 }
@@ -548,6 +649,9 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 	// 根据实际需要保存的callee-saved寄存器数量计算占用字节数
 	const int savedFrameBytes = static_cast<int>(savedRegs.size()) * 8;
 	const int currentFrameSize = frameSize > 0 ? frameSize : computeFrameSize(regAllocMap, savedFrameBytes);
+	if (currentFrameSize == 0 && savedRegs.empty()) {
+		return;
+	}
 
 	// RISCV64 prologue:
 	// addi sp, sp, -framesize

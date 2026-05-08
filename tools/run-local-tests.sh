@@ -53,6 +53,7 @@ Examples:
   ./tools/run-local-tests.sh
   ./tools/run-local-tests.sh 2023
   ./tools/run-local-tests.sh 2025 2025_func_009_BFS
+  ./tools/run-local-tests.sh 2025 2025_func_009_BFS.sy
   MINIC_TEST_MODE=llvmir ./tools/run-local-tests.sh 2023_func_00_main
   MINIC_TEST_MODE=all ./tools/run-local-tests.sh 2023 2023_func_00_main
 USAGE
@@ -114,7 +115,10 @@ suite_dir_from_key() {
 }
 
 infer_suite_from_testcase() {
-    case "$1" in
+    local testcase="${1%.c}"
+    testcase="${testcase%.sy}"
+
+    case "${testcase}" in
         2023_func_*)
             echo "2023_function"
             ;;
@@ -134,6 +138,42 @@ infer_suite_from_testcase() {
             return 1
             ;;
     esac
+}
+
+strip_source_ext() {
+    local testcase="$1"
+    testcase="${testcase%.c}"
+    testcase="${testcase%.sy}"
+    echo "${testcase}"
+}
+
+find_source_file() {
+    local case_root="$1"
+    local testcase_arg="$2"
+    local testcase
+
+    case "${testcase_arg}" in
+        *.c|*.sy)
+            if [[ -f "${case_root}/${testcase_arg}" ]]; then
+                echo "${case_root}/${testcase_arg}"
+                return 0
+            fi
+            ;;
+    esac
+
+    testcase=$(strip_source_ext "${testcase_arg}")
+
+    if [[ -f "${case_root}/${testcase}.c" ]]; then
+        echo "${case_root}/${testcase}.c"
+        return 0
+    fi
+
+    if [[ -f "${case_root}/${testcase}.sy" ]]; then
+        echo "${case_root}/${testcase}.sy"
+        return 0
+    fi
+
+    return 1
 }
 
 write_result_file() {
@@ -182,14 +222,16 @@ run_asm_check() {
     local infile="$2"
     local outfile="$3"
     local testcase="$4"
+    local source_name
     local asmfile="${TMP_DIR}/${testcase}.s"
     local exe_file="${TMP_DIR}/${testcase}"
     local output_file="${TMP_DIR}/${testcase}.asm.output"
     local result_file="${TMP_DIR}/${testcase}.asm.result"
     local exit_code=0
+    source_name=$(basename "${cfile}")
 
     if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
-        echo "${testcase}.c compile NG [asm]"
+        echo "${source_name} compile NG [asm]"
         return 1
     fi
 
@@ -199,7 +241,7 @@ run_asm_check() {
     fi
 
     if ! timeout --foreground "${TEST_TIMEOUT}" "${ARM_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
-        echo "${testcase}.c link NG [asm]"
+        echo "${source_name} link NG [asm]"
         return 1
     fi
 
@@ -214,11 +256,11 @@ run_asm_check() {
     write_result_file "${output_file}" "${exit_code}" "${result_file}"
 
     if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
-        echo "${testcase}.c NG [asm]"
+        echo "${source_name} NG [asm]"
         return 1
     fi
 
-    echo "${testcase}.c OK [asm]"
+    echo "${source_name} OK [asm]"
     return 0
 }
 
@@ -227,14 +269,16 @@ run_llvmir_check() {
     local infile="$2"
     local outfile="$3"
     local testcase="$4"
+    local source_name
     local llfile="${TMP_DIR}/${testcase}.ll"
     local exe_file="${TMP_DIR}/${testcase}_ll"
     local output_file="${TMP_DIR}/${testcase}.llvmir.output"
     local result_file="${TMP_DIR}/${testcase}.llvmir.result"
     local exit_code=0
+    source_name=$(basename "${cfile}")
 
     if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
-        echo "${testcase}.c compile NG [llvmir]"
+        echo "${source_name} compile NG [llvmir]"
         return 1
     fi
 
@@ -244,7 +288,7 @@ run_llvmir_check() {
     fi
 
     if ! timeout --foreground "${TEST_TIMEOUT}" "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
-        echo "${testcase}.c link NG [llvmir]"
+        echo "${source_name} link NG [llvmir]"
         return 1
     fi
 
@@ -259,11 +303,11 @@ run_llvmir_check() {
     write_result_file "${output_file}" "${exit_code}" "${result_file}"
 
     if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
-        echo "${testcase}.c NG [llvmir]"
+        echo "${source_name} NG [llvmir]"
         return 1
     fi
 
-    echo "${testcase}.c OK [llvmir]"
+    echo "${source_name} OK [llvmir]"
     return 0
 }
 
@@ -271,12 +315,14 @@ run_ast_check() {
     local cfile="$1"
     local case_root="$2"
     local testcase="$3"
+    local source_name
     local astfile="${TMP_DIR}/${testcase}.png"
     local expected_png="${case_root}/${testcase}.png"
     local expected_svg="${case_root}/${testcase}.svg"
+    source_name=$(basename "${cfile}")
 
     if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -T -o "${astfile}" "${cfile}" >/dev/null 2>&1; then
-        echo "${testcase}.c compile NG [ast]"
+        echo "${source_name} compile NG [ast]"
         return 1
     fi
 
@@ -287,33 +333,32 @@ run_ast_check() {
 
     if [[ -f "${expected_png}" ]]; then
         if ! cmp -s "${astfile}" "${expected_png}"; then
-            echo "${testcase}.c NG [ast-png]"
+            echo "${source_name} NG [ast-png]"
             return 1
         fi
     elif [[ -f "${expected_svg}" ]]; then
-        echo "${testcase}.c NG [ast] expected SVG reference is not supported yet"
+        echo "${source_name} NG [ast] expected SVG reference is not supported yet"
         return 1
     fi
 
-    echo "${testcase}.c OK [ast]"
+    echo "${source_name} OK [ast]"
     return 0
 }
 
 run_testcase() {
     local suite_dir="$1"
-    local testcase="$2"
+    local testcase_arg="$2"
     local case_root="${TEST_ROOT}/${suite_dir}"
-    local cfile="${case_root}/${testcase}.c"
-    local syfile="${case_root}/${testcase}.sy"
+    local testcase
+    local cfile
+    testcase=$(strip_source_ext "${testcase_arg}")
+    cfile=$(find_source_file "${case_root}" "${testcase_arg}")
     local infile="${case_root}/${testcase}.in"
     local outfile="${case_root}/${testcase}.out"
     local failed=0
 
-    # Support both .c and .sy extensions
-    if [[ -f "${syfile}" ]]; then
-        cfile="${syfile}"
-    elif [[ ! -f "${cfile}" ]]; then
-        echo "${cfile} or ${syfile} not found"
+    if [[ -z "${cfile}" || ! -f "${cfile}" ]]; then
+        echo "${case_root}/${testcase}.{c,sy} not found"
         NG_NUM=$((NG_NUM + 1))
         return
     fi
@@ -355,15 +400,16 @@ run_suite() {
     local cfile=""
     local testcase=""
 
-    # Find both .c and .sy files
-    while IFS= read -r cfile; do
-        if [[ "${cfile}" == *.sy ]]; then
-            testcase=$(basename "${cfile}" .sy)
-        else
-            testcase=$(basename "${cfile}" .c)
-        fi
+    while IFS= read -r testcase; do
         run_testcase "${suite_dir}" "${testcase}"
-    done < <(find "${case_root}" -maxdepth 1 -type f \( -name '*.c' -o -name '*.sy' \) | sort)
+    done < <(
+        find "${case_root}" -maxdepth 1 -type f \( -name '*.c' -o -name '*.sy' \) |
+            while IFS= read -r cfile; do
+                testcase=$(basename "${cfile}")
+                echo "${testcase%.*}"
+            done |
+            sort -u
+    )
 }
 
 if [[ ! -x "${MINIC_BIN}" ]]; then

@@ -5,7 +5,9 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <string>
+#include <vector>
 
 #include "Function.h"
 #include "GreedyRegAllocator.h"
@@ -59,6 +61,28 @@ private:
 		explicit OperandReg(LocalTempManager::Lease _lease)
 			: reg(_lease.reg()), lease(std::move(_lease))
 		{}
+	};
+
+	struct FloatOperandReg {
+		int reg = -1;
+		bool temp = false;
+		LocalTempManager::Lease gprLease;
+
+		FloatOperandReg() = default;
+		FloatOperandReg(int _reg, bool _temp, LocalTempManager::Lease _gprLease = {})
+			: reg(_reg), temp(_temp), gprLease(std::move(_gprLease))
+		{}
+	};
+
+	struct FloatRegMove {
+		enum class SourceKind {
+			FloatReg,
+			Gpr,
+		};
+
+		SourceKind sourceKind = SourceKind::FloatReg;
+		int src = -1;
+		int dst = -1;
 	};
 
 	/// @brief 指令翻译处理函数类型
@@ -128,9 +152,27 @@ private:
 	/// @param inst IR指令
 	/// @param op RISC-V浮点汇编操作码（如"fadd.s", "fsub.s"）
 	void translate_fbinary(Instruction * inst, const std::string & op);
+	/// @brief 尝试将乘以2的幂转换为移位
+	bool tryTranslateMulByPowerOfTwo(Instruction * inst);
+	/// @brief 尝试将除以2/16转换为有符号截断语义的移位序列
+	bool tryTranslateDivBySmallPowerOfTwo(Instruction * inst);
+	/// @brief 尝试将模2/16转换为基于优化除法的余数序列
+	bool tryTranslateModBySmallPowerOfTwo(Instruction * inst);
+	/// @brief 尝试将常量除法转换为signed magic number序列
+	bool tryTranslateDivByConstant(Instruction * inst);
+	/// @brief 尝试将常量取模转换为基于magic除法的余数序列
+	bool tryTranslateModByConstant(Instruction * inst);
+	/// @brief 生成常量除法商到指定寄存器
+	void emitSignedConstDivQuotient(Instruction * inst, Value * dividend, int32_t divisor, int dstReg);
+	/// @brief 判断比较指令是否只被条件分支使用
+	bool isCompareOnlyUsedByCondBranch(class ICmpInst * icmp) const;
+	/// @brief 将单用途整数比较直接翻译为条件分支
+	bool translateDirectIcmpBranch(class ICmpInst * icmp, class CondBranchInst * condBr);
 
 	/// @brief 生成形参从a0-a7到分配寄存器的移动指令
 	void emitFormalParamMoves();
+	/// @brief 解析浮点寄存器并行移动
+	void emitFloatRegMoves(std::vector<FloatRegMove> & regMoves, int scratchGpr);
 	/// @brief 生成函数epilogue（恢复callee-saved寄存器并返回）
 	void emitEpilogue();
 	/// @brief 生成64位加载指令（sd/ld）
@@ -148,6 +190,9 @@ private:
 	/// @return 物理寄存器编号
 	int getResultReg(Value * val) const;
 
+	/// @brief 获取Value分配的浮点结果寄存器编号
+	int getFloatResultReg(Value * val) const;
+
 	/// @brief 获取只读操作数所在寄存器，必要时借用临时寄存器加载
 	/// @param val 操作数
 	/// @param inst 当前IR指令
@@ -159,11 +204,29 @@ private:
 	/// @brief 释放通过loadOperand借用的临时寄存器
 	void releaseOperand(OperandReg & operand);
 
+	/// @brief 获取float操作数所在浮点寄存器，必要时借用临时FPR加载
+	FloatOperandReg loadFloatOperand(Value * val, Instruction * inst, int excludeReg = -1, int preferredReg = -1);
+
+	/// @brief 释放通过loadFloatOperand借用的临时浮点寄存器
+	void releaseFloatOperand(FloatOperandReg & operand);
+
 	/// @brief 将寄存器值存储到Value的目标位置
 	/// @param val 目标Value
 	/// @param srcReg 源寄存器编号
 	/// @param inst 当前IR指令（用于临时寄存器借用时的活跃性查询）
 	void storeResult(Value * val, int srcReg, Instruction * inst = nullptr);
+
+	/// @brief 将浮点寄存器值存储到Value的目标位置
+	void storeFloatResult(Value * val, int srcReg, Instruction * inst = nullptr);
+
+	/// @brief 借用临时浮点寄存器
+	int borrowFloatTemp(Instruction * inst, const std::set<int> & excludeRegs = {});
+
+	/// @brief 释放临时浮点寄存器
+	void releaseFloatTemp(int reg);
+
+	/// @brief 判断某FPR在当前IR指令处是否承载live值
+	bool isFloatRegLiveAt(int reg, Instruction * inst) const;
 
 	/// @brief 生成基本块对应的标签名
 	/// @param bb 基本块
@@ -192,4 +255,7 @@ private:
 
 	/// @brief 动态临时寄存器管理器
 	LocalTempManager tempMgr;
+
+	/// @brief 指令选择阶段当前借出的临时浮点寄存器集合
+	std::set<int> borrowedFloatTemps;
 };

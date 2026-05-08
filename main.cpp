@@ -21,7 +21,6 @@
 #include "Common.h"
 #include "AST.h"
 #include "Antlr4Executor.h"
-#include "ArrayScalarize.h"
 #include "FrontEndExecutor.h"
 #include "Graph.h"
 #include "IRGenerator.h"
@@ -29,16 +28,8 @@
 #include "Module.h"
 #include "DominatorTree.h"
 #include "DominanceFrontier.h"
-#include "CFGSimplify.h"
-#include "ConstProp.h"
-#include "DeadInstElim.h"
-#include "InstCombine.h"
-#include "LICM.h"
-#include "LocalMemoryOpt.h"
 #include "LoopInfo.h"
-#include "Mem2Reg.h"
-#include "PhiLowering.h"
-#include "UnreachableBlockElim.h"
+#include "PassManager.h"
 #include "CodeGeneratorRiscV64.h"
 
 ///
@@ -375,79 +366,11 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
+		// LLVM IR 优化
 		if (gOptLevel > 0) {
-			// 将局部数组的常量下标元素拆成独立标量槽位
-			for (auto * func : module->getFunctionList()) {
-				if (!func->isBuiltin() && !func->getBlocks().empty()) {
-					ArrayScalarize arrayScalarize(func);
-					arrayScalarize.run();
-				}
-			}
-
-			// 运行 mem2reg，将可提升的 alloca/load/store 转为 SSA 形式
-			for (auto * func : module->getFunctionList()) {
-				if (!func->isBuiltin() && !func->getBlocks().empty()) {
-					Mem2Reg mem2reg(func, module);
-					mem2reg.run();
-				}
-			}
-
-			// 优化循环
-			bool changed = false;
-			int32_t optRounds = 0;
-			do {
-				changed = false;
-				for (auto * func : module->getFunctionList()) {
-					if (!func->isBuiltin() && !func->getBlocks().empty()) {
-						LocalMemoryOpt localMemoryOpt(func);
-						changed = localMemoryOpt.run() || changed;
-					}
-				}
-
-				for (auto * func : module->getFunctionList()) {
-					if (!func->isBuiltin() && !func->getBlocks().empty()) {
-						LICM licm(func);
-						changed = licm.run() || changed;
-					}
-				}
-
-				for (auto * func : module->getFunctionList()) {
-					if (!func->isBuiltin() && !func->getBlocks().empty()) {
-						InstCombine instCombine(func, module);
-						changed = instCombine.run() || changed;
-					}
-				}
-
-				for (auto * func : module->getFunctionList()) {
-					if (!func->isBuiltin() && !func->getBlocks().empty()) {
-						ConstProp constProp(func, module);
-						changed = constProp.run() || changed;
-					}
-				}
-
-				for (auto * func : module->getFunctionList()) {
-					if (!func->isBuiltin() && !func->getBlocks().empty()) {
-						UnreachableBlockElim unreachableBlockElim(func);
-						changed = unreachableBlockElim.run() || changed;
-					}
-				}
-
-				for (auto * func : module->getFunctionList()) {
-					if (!func->isBuiltin() && !func->getBlocks().empty()) {
-						DeadInstElim deadInstElim(func);
-						changed = deadInstElim.run() || changed;
-					}
-				}
-
-				for (auto * func : module->getFunctionList()) {
-					if (!func->isBuiltin() && !func->getBlocks().empty()) {
-						CFGSimplify cfgSimplify(func);
-						changed = cfgSimplify.run() || changed;
-					}
-				}
-
-				++optRounds;
-			} while (changed && optRounds < 8);
+			PassManager passManager(module);
+			passManager.registerDefaultOptimizationPipeline(gOptLevel);
+			passManager.run();
 		}
 
 		// LLVM IR输出路径（使用-L参数时）
@@ -487,16 +410,16 @@ static int compile(std::string inputFile, std::string outputFile)
 			break;
 		}
 
-		// 对每个非内建函数执行Phi降级（将phi节点转换为copy指令）
-		for (auto * func : module->getFunctionList()) {
-			if (!func->isBuiltin() && !func->getBlocks().empty()) {
-				PhiLowering phiLowering(func, module);
-				phiLowering.run();
-			}
-		}
+		// 后端前对 phi 节点做降级
+		PassManager passManager(module);
+		passManager.registerPhiLoweringPipeline();
+		passManager.run();
 
 		// 重新编号IR名称
 		module->renameIR();
+
+		// 将优化级别传递给Module，供后端Peephole使用
+		module->setOptLevel(gOptLevel);
 
 		// 确定汇编输出文件名
 		std::string asmOutputFile = outputFile;

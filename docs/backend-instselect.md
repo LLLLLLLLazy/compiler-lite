@@ -102,14 +102,14 @@ flowchart TD
 
     IntCheck -- "ADD_I" --> T_add["translate_add()<br>→ add rd, rs1, rs2"]
     IntCheck -- "SUB_I" --> T_sub["translate_sub()<br>→ sub rd, rs1, rs2"]
-    IntCheck -- "MUL_I" --> T_mul["translate_mul()<br>→ mul rd, rs1, rs2"]
-    IntCheck -- "DIV_I" --> T_div["translate_div()<br>→ div rd, rs1, rs2"]
-    IntCheck -- "MOD_I" --> T_mod["translate_mod()<br>→ rem rd, rs1, rs2"]
+    IntCheck -- "MUL_I" --> T_mul["translate_mul()<br>优先: 乘以2的幂 → slliw<br>回退: mulw rd, rs1, rs2"]
+    IntCheck -- "DIV_I" --> T_div["translate_div()<br>优先1: 2的幂次 → 移位+bias<br>优先2: 常量 → magic number<br>回退: divw rd, rs1, rs2"]
+    IntCheck -- "MOD_I" --> T_mod["translate_mod()<br>优先1: 2的幂次 → 移位求余<br>优先2: 常量 → magic除法求余<br>回退: remw rd, rs1, rs2"]
 
-    FloatCheck -- "ADD_F" --> T_fadd["translate_fadd()<br>→ fadd.s rd, rs1, rs2"]
-    FloatCheck -- "SUB_F" --> T_fsub["translate_fsub()<br>→ fsub.s rd, rs1, rs2"]
-    FloatCheck -- "MUL_F" --> T_fmul["translate_fmul()<br>→ fmul.s rd, rs1, rs2"]
-    FloatCheck -- "DIV_F" --> T_fdiv["translate_fdiv()<br>→ fdiv.s rd, rs1, rs2"]
+    FloatCheck -- "ADD_F" --> T_fadd["translate_fadd()<br>→ fadd.s fd, fs1, fs2<br>(FPR直接操作)"]
+    FloatCheck -- "SUB_F" --> T_fsub["translate_fsub()<br>→ fsub.s fd, fs1, fs2<br>(FPR直接操作)"]
+    FloatCheck -- "MUL_F" --> T_fmul["translate_fmul()<br>→ fmul.s fd, fs1, fs2<br>(FPR直接操作)"]
+    FloatCheck -- "DIV_F" --> T_fdiv["translate_fdiv()<br>→ fdiv.s fd, fs1, fs2<br>(FPR直接操作)"]
 
     T_add & T_sub & T_mul & T_div & T_mod --> End
     T_fadd & T_fsub & T_fmul & T_fdiv --> End(["翻译完成"])
@@ -310,9 +310,9 @@ flowchart TD
 | `STORE` | StoreInst | `sw`/`fsd` | 整数用sw，浮点用fsd |
 | `ADD_I` | BinaryInst | `add` | 整数加法 |
 | `SUB_I` | BinaryInst | `sub` | 整数减法 |
-| `MUL_I` | BinaryInst | `mul` | 整数乘法 |
-| `DIV_I` | BinaryInst | `div` | 整数除法 |
-| `MOD_I` | BinaryInst | `rem` | 整数取模 |
+| `MUL_I` | BinaryInst | `slliw`/`mulw` | 乘以2的幂→左移，否则mulw |
+| `DIV_I` | BinaryInst | `sraiw`/`mul`+`srai`/`divw` | 2的幂→移位+bias，常量→magic number，否则divw |
+| `MOD_I` | BinaryInst | `sraiw`+`subw`/`remw` | 2的幂→移位求余，常量→magic求余，否则remw |
 | `ADD_F` | BinaryInst | `fadd.s` | 浮点加法 |
 | `SUB_F` | BinaryInst | `fsub.s` | 浮点减法 |
 | `MUL_F` | BinaryInst | `fmul.s` | 浮点乘法 |
@@ -329,3 +329,12 @@ flowchart TD
 | `GEP` | GetElementPtrInst | `slli`+`add` | 数组元素地址计算 |
 | `SITOFP` | SIToFPInst | `fcvt.s.w` | 整数转浮点 |
 | `FPTOSI` | FPToSIInst | `fcvt.w.s` | 浮点转整数 |
+
+## 相关文档
+
+| 文档 | 内容 |
+|------|------|
+| [后端整体流程](backend-overview.md) | 编译流水线、函数级代码生成、栈帧布局 |
+| [寄存器分配详细流程](backend-regalloc.md) | Greedy分配器、活跃区间分析、干涉图构建 |
+| [常量除法优化](backend-const-div-opt.md) | 2的幂次移位、Magic Number算法、强度消减详细流程 |
+| [浮点寄存器分配](backend-fpregalloc.md) | FPR池构建、浮点操作数加载/存储、临时FPR借用 |

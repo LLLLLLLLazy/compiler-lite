@@ -12,7 +12,7 @@ flowchart TD
     Rename1 --> OptCheck{{"优化等级 > 0?"}}
     OptCheck -- "Yes" --> Mem2Reg["Mem2Reg优化<br>alloca/load/store → SSA Phi"]
     OptCheck -- "No" --> PhiLower
-    Mem2Reg --> OptLoop["优化循环 (最多8轮)<br>ConstProp → UnreachableBlockElim<br>→ DeadInstElim → CFGSimplify"]
+    Mem2Reg --> OptLoop["优化循环 (最多8轮)<br>LocalMemoryOpt → LICM → InstCombine<br>→ ConstProp → UnreachableBlockElim<br>→ DeadInstElim → CFGSimplify"]
     OptLoop --> PhiLower["Phi降级<br>Phi → Copy指令<br>PhiLowering::run()"]
 
     PhiLower --> Rename2("IR重命名<br>module->renameIR()")
@@ -79,11 +79,13 @@ flowchart TD
 
     ScratchCheck -- "No" --> CleanLabel["5. 删除未引用的基本块标签<br>deleteUnusedLabel()"]
 
-    CleanLabel --> Output["6. 输出函数头部<br>.align/.global/.type/函数名"]
+    CleanLabel --> Peephole["6. Peephole优化<br>RiscV64Peephole::run(iloc)<br>删除自移动/重复指令/无效跳转/折叠零减比较"]
+
+    Peephole --> Output["7. 输出函数头部<br>.align/.global/.type/函数名"]
     Output --> DebugCheck{{"调试模式?"}}
     DebugCheck -- "Yes" --> DebugOut["输出IR值→寄存器/栈位置映射"]
     DebugOut --> AsmOut
-    DebugCheck -- "No" --> AsmOut["7. 输出汇编指令序列<br>ILocRiscV64::outPut(fp)"]
+    DebugCheck -- "No" --> AsmOut["8. 输出汇编指令序列<br>ILocRiscV64::outPut(fp)"]
     AsmOut --> End(["结束: 函数代码生成完成"])
 
     %%Node styles
@@ -155,3 +157,13 @@ flowchart TD
 └──────────────────────────────┘  ← SP (sp) 指向此处
 低地址
 ```
+
+## 相关文档
+
+| 文档 | 内容 |
+|------|------|
+| [指令选择与代码输出](backend-instselect.md) | IR指令翻译分派、操作数加载/存储、Scratch分配 |
+| [寄存器分配详细流程](backend-regalloc.md) | Greedy分配器、活跃区间分析、干涉图构建 |
+| [活跃性分析流程](liveness-analysis-flowchart.md) | 活跃区间计算、数据流方程、下游消费 |
+| [常量除法优化](backend-const-div-opt.md) | 2的幂次移位、Magic Number算法、强度消减 |
+| [浮点寄存器分配](backend-fpregalloc.md) | FPR池构建、类别区分、临时FPR借用、并行移动解析 |

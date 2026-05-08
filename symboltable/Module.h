@@ -61,6 +61,9 @@ public:
         return globalVariableVector;
     }
 
+    /// @brief 从模块中移除一个全局变量
+    bool removeGlobalVariable(GlobalVariable * val);
+
     /// @brief 获取函数列表
     std::vector<Function *> & getFunctionList()
     {
@@ -93,6 +96,18 @@ public:
 
     /// @brief 重新命名模块中的 IR 值
     void renameIR();
+
+    /// @brief 获取优化级别
+    [[nodiscard]] int getOptLevel() const
+    {
+        return optLevel;
+    }
+
+    /// @brief 设置优化级别
+    void setOptLevel(int level)
+    {
+        optLevel = level;
+    }
 
 protected:
     /// @brief 按数值查找 i32 常量对象
@@ -151,4 +166,7 @@ private:
     std::vector<GlobalVariable *> globalVariableVector;
     std::unordered_map<ConstIntegerKey, ConstInteger *, ConstIntegerKeyHash> constIntegerMap;
     std::unordered_map<std::uint32_t, ConstFloat *> constFloatMap;
+
+    /// @brief 优化级别：0表示关闭优化，1表示开启优化
+    int optLevel = 0;
 };
