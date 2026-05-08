@@ -14,8 +14,9 @@
 /// @param _name 函数名
 /// @param _type 函数类型
 /// @param _builtin 是否为内建函数
-Function::Function(std::string _name, FunctionType * _type, bool _builtin)
-    : GlobalValue(_type, std::move(_name)), builtIn(_builtin)
+/// @param _varArg 是否为可变参数函数
+Function::Function(std::string _name, FunctionType * _type, bool _builtin, bool _varArg)
+    : GlobalValue(_type, std::move(_name)), builtIn(_builtin), varArg(_varArg)
 {
     returnType = _type->getReturnType();
     setAlignment(1);

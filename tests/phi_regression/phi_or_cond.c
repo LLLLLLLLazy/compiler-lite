@@ -3,7 +3,8 @@
  * The phi for the || result has a constant-1 incoming on the short-circuit path
  * (when LHS is true, result is forced to 1 without evaluating RHS).
  * Additionally, the outer 'x' variable has a phi at the merge point.
- * Exercises constant-1 incoming vs. the constant-0 in phi_and_cond. */
+ * The second helper materializes the boolean result in a local int before negation,
+ * which stays within strict SysY2022 grammar while still exercising the same path. */
 
 int g_a = 3;
 int g_b = 4;
@@ -28,16 +29,21 @@ int f(int a, int b)
     return x;
 }
 
-/* Swap using ||: result depends on which path was taken */
+/* Swap using ||: materialize the condition first, then negate the local flag */
 int g(int a, int b)
 {
     int x;
     int y;
     int t;
+    int cond;
 
     x = a;
     y = b;
-    if (!(a > 0 || b > 0)) {
+    cond = 0;
+    if (a > 0 || b > 0) {
+        cond = 1;
+    }
+    if (!cond) {
         t = x;
         x = y;
         y = t;

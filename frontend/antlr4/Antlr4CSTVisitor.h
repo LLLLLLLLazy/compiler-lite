@@ -102,6 +102,9 @@ protected:
 	/// @brief while 语句的遍历
 	std::any visitWhileStatement(MiniCParser::WhileStatementContext * ctx) override;
 
+	/// @brief 条件表达式的遍历
+	std::any visitCond(MiniCParser::CondContext * ctx) override;
+
 	/// @brief break 语句的遍历
 	std::any visitBreakStatement(MiniCParser::BreakStatementContext * ctx) override;
 
@@ -231,6 +234,11 @@ protected:
 	/// @return std::any AST的节点
 	///
 	std::any visitRealParamList(MiniCParser::RealParamListContext * ctx) override;
+
+	/// @brief 单个实参的分析
+	/// @param ctx CST上下文
+	/// @return std::any AST的节点
+	std::any visitRealParam(MiniCParser::RealParamContext * ctx) override;
 
 	///
 	/// @brief 非终结符ExpressionStatement的分析

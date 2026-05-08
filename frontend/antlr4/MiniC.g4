@@ -59,21 +59,24 @@ varDef: T_ID arrayDefDims? (T_ASSIGN initVal)?;
 arrayDefDims: (T_L_BRACK expr T_R_BRACK)+;
 
 // 初始化值
-initVal: expr | T_L_BRACE (initVal (T_COMMA initVal)*)? T_COMMA? T_R_BRACE;
+initVal: expr | T_L_BRACE (initVal (T_COMMA initVal)*)? T_R_BRACE;
 
 // 目前语句支持return、赋值、分支与循环
 statement:
 	T_RETURN expr? T_SEMICOLON			# returnStatement
 	| lVal T_ASSIGN expr T_SEMICOLON	# assignStatement
-	| T_IF T_L_PAREN expr T_R_PAREN statement (T_ELSE statement)? # ifStatement
-	| T_WHILE T_L_PAREN expr T_R_PAREN statement # whileStatement
+	| T_IF T_L_PAREN cond T_R_PAREN statement (T_ELSE statement)? # ifStatement
+	| T_WHILE T_L_PAREN cond T_R_PAREN statement # whileStatement
 	| T_BREAK T_SEMICOLON				# breakStatement
 	| T_CONTINUE T_SEMICOLON			# continueStatement
 	| block								# blockStatement
 	| expr? T_SEMICOLON					# expressionStatement;
 
-// 表达式文法 expr : LOrExp
-expr: lOrExp;
+// 普通表达式文法 Exp : AddExp
+expr: addExp;
+
+// 条件表达式文法 Cond : LOrExp
+cond: lOrExp;
 
 // 逻辑或表达式
 lOrExp: lAndExp (T_LOR lAndExp)*;
@@ -114,8 +117,11 @@ unaryOp: T_ADD | T_SUB | T_NOT;
 // 基本表达式：括号表达式、数字字面量、左值表达式
 primaryExp: T_L_PAREN expr T_R_PAREN | T_FLOAT_LITERAL | T_DIGIT | lVal;
 
+// 单个实参，字符串字面量仅允许在实参位置出现
+realParam: expr | T_STRING_LITERAL;
+
 // 实参列表
-realParamList: expr (T_COMMA expr)*;
+realParamList: realParam (T_COMMA realParam)*;
 
 // 左值表达式
 lVal: T_ID (T_L_BRACK expr T_R_BRACK)*;
@@ -162,6 +168,7 @@ T_FLOAT: 'float';
 T_VOID: 'void';
 
 T_ID: [a-zA-Z_][a-zA-Z0-9_]*;
+T_STRING_LITERAL: '"' ( '\\' . | ~["\\\r\n] )* '"';
 T_FLOAT_LITERAL:
 	(([0-9]+ '.' [0-9]* | '.' [0-9]+) ([eE] [+-]? [0-9]+)?
 	| [0-9]+ [eE] [+-]? [0-9]+

@@ -37,6 +37,9 @@ enum class ast_operator_type : int {
 	/// @brief  浮点数字面量叶子节点
 	AST_OP_LEAF_LITERAL_FLOAT,
 
+	/// @brief 字符串字面量叶子节点
+	AST_OP_LEAF_STRING_LITERAL,
+
 	/// @brief 变量ID叶子节点
 	AST_OP_LEAF_VAR_ID,
 
@@ -210,6 +213,11 @@ public:
 	/// @param id 词法值
 	/// @param line_no 行号
 	static ast_node * New(std::string id, int64_t lineno);
+
+	/// @brief 创建字符串字面量的叶子节点
+	/// @param text 字符串内容
+	/// @param lineno 行号
+	static ast_node * NewStringLiteral(const std::string & text, int64_t lineno);
 
 	/// @brief 创建具备指定类型的节点
 	/// @param type 节点值类型

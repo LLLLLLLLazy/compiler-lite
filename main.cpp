@@ -302,6 +302,7 @@ static int compile(std::string inputFile, std::string outputFile)
 		subResult = frontEndExecutor->run();
 		if (!subResult) {
 			minic_log(LOG_ERROR, "前端分析错误");
+			delete frontEndExecutor;
 			break;
 		}
 

@@ -82,6 +82,9 @@ private:
     /// @brief 生成函数调用表达式并返回结果值
     Value * visitFuncCall(ast_node * node);
 
+    /// @brief 将字符串字面量具象化为匿名全局对象地址
+    Value * materializeStringLiteral(ast_node * node);
+
     /// @brief 生成变量访问表达式并返回加载后的值
     Value * visitLeafVarId(ast_node * node);
 
@@ -91,8 +94,17 @@ private:
     /// @brief 获取声明节点的最终类型
     Type * buildDeclaredType(ast_node * declNode, bool forParam = false);
 
+    /// @brief 校验初始化器是否满足编译期常量约束
+    bool isConstInitializer(Type * type, ast_node * initNode);
+
     /// @brief 计算整型常量表达式
     bool evaluateConstIntExpr(ast_node * node, int32_t & result);
+
+    /// @brief 计算用于整型初始化的常量表达式，允许数值常量到 int 的编译期转换
+    bool evaluateConstIntInitializerExpr(ast_node * node, int32_t & result);
+
+    /// @brief 计算数组维度所需的整型常量表达式
+    bool evaluateConstArrayBoundExpr(ast_node * node, int32_t & result);
 
     /// @brief 计算数值型常量表达式（int/float 混合）
     bool evaluateConstNumberExpr(ast_node * node, double & result);
@@ -235,4 +247,6 @@ private:
 
     std::vector<std::unordered_map<std::string, int32_t>> constBindings;
     std::vector<std::unordered_map<std::string, double>> floatConstBindings;
+    std::unordered_map<std::string, GlobalVariable *> stringLiteralGlobals;
+    std::size_t nextStringLiteralId = 0;
 };

@@ -87,6 +87,20 @@ Type * getArrayScalarType(Type * type)
 
 constexpr std::size_t kFlatZeroInitThreshold = 256;
 
+std::vector<int32_t> packStringLiteralWords(const std::string & text)
+{
+    std::vector<unsigned char> bytes(text.begin(), text.end());
+    bytes.push_back('\0');
+
+    std::size_t wordCount = (bytes.size() + 3) / 4;
+    std::vector<int32_t> words(wordCount, 0);
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        words[i / 4] |= static_cast<int32_t>(bytes[i]) << ((i % 4) * 8);
+    }
+
+    return words;
+}
+
 Type * getVariableValueType(Value * var)
 {
     if (auto * globalVar = dynamic_cast<GlobalVariable *>(var)) {
@@ -174,7 +188,7 @@ void IRGenerator::prePopulateGlobalConstBindings(ast_node * node)
 
 			if (declType->isInt32Type()) {
 				int32_t constValue = 0;
-				if (evaluateConstIntExpr(initNode, constValue)) {
+                if (evaluateConstIntInitializerExpr(initNode, constValue)) {
 					constBindings.front()[varName] = constValue;
 				}
 			} else if (declType->isFloatType()) {
@@ -192,6 +206,8 @@ void IRGenerator::prePopulateGlobalConstBindings(ast_node * node)
 /// @return true 表示预声明成功，false 表示存在重复定义等错误
 bool IRGenerator::declareCompileUnit(ast_node * node)
 {
+    bool foundMain = false;
+
     for (auto son : node->sons) {
         if (!son || son->node_type != ast_operator_type::AST_OP_FUNC_DEF) {
             continue;
@@ -213,10 +229,26 @@ bool IRGenerator::declareCompileUnit(ast_node * node)
             params.push_back(new FormalParam(paramType, paramNode->sons[1]->name));
         }
 
+        if (nameNode->name == "main") {
+            if (!typeNode->type->isInt32Type() || !params.empty()) {
+                minic_log(LOG_ERROR, "main 函数必须且只能定义为无参 int main()");
+                for (auto * param : params) {
+                    delete param;
+                }
+                return false;
+            }
+            foundMain = true;
+        }
+
         if (!module->newFunction(nameNode->name, typeNode->type, params)) {
             minic_log(LOG_ERROR, "函数(%s)重复定义", nameNode->name.c_str());
             return false;
         }
+    }
+
+    if (!foundMain) {
+        minic_log(LOG_ERROR, "程序必须且只能包含一个无参 int main() 函数");
+        return false;
     }
 
     return true;
@@ -660,6 +692,11 @@ bool IRGenerator::visitVarDecl(ast_node * node)
             return false;
         }
 
+        if (node->isConst && !isConstInitializer(declType, initNode)) {
+            minic_log(LOG_ERROR, "const 变量(%s)必须使用编译期常量初始化", varName.c_str());
+            return false;
+        }
+
         if (initNode) {
             if (!emitInitializer(slot, declType, initNode)) {
                 return false;
@@ -668,7 +705,7 @@ bool IRGenerator::visitVarDecl(ast_node * node)
 
         if (node->isConst && declType->isInt32Type()) {
             int32_t constValue = 0;
-            if (evaluateConstIntExpr(initNode, constValue)) {
+            if (evaluateConstIntInitializerExpr(initNode, constValue)) {
                 constBindings.back()[varName] = constValue;
             }
         } else if (node->isConst && declType->isFloatType()) {
@@ -690,6 +727,11 @@ bool IRGenerator::visitVarDecl(ast_node * node)
 
     if (node->isConst && !initNode) {
         minic_log(LOG_ERROR, "全局 const 变量(%s)必须初始化", varName.c_str());
+        return false;
+    }
+
+    if (initNode && !isConstInitializer(declType, initNode)) {
+        minic_log(LOG_ERROR, "全局变量(%s)只支持常量初始化", varName.c_str());
         return false;
     }
 
@@ -721,7 +763,7 @@ bool IRGenerator::visitVarDecl(ast_node * node)
             globalVar->setInitFloatValue(static_cast<float>(initValue));
         } else {
             int32_t initValue = 0;
-            if (!evaluateConstIntExpr(initNode, initValue)) {
+            if (!evaluateConstIntInitializerExpr(initNode, initValue)) {
                 minic_log(LOG_ERROR, "全局变量(%s)只支持常量初始化", varName.c_str());
                 return false;
             }
@@ -731,7 +773,7 @@ bool IRGenerator::visitVarDecl(ast_node * node)
 
     if (node->isConst && declType->isInt32Type()) {
         int32_t constValue = 0;
-        if (evaluateConstIntExpr(initNode, constValue)) {
+        if (evaluateConstIntInitializerExpr(initNode, constValue)) {
             constBindings.front()[varName] = constValue;
         }
     } else if (node->isConst && declType->isFloatType()) {
@@ -742,6 +784,38 @@ bool IRGenerator::visitVarDecl(ast_node * node)
     }
 
     return true;
+}
+
+/// @brief 校验初始化器中的表达式是否满足编译期常量约束
+/// @param type 被初始化对象的类型
+/// @param initNode 初始化器节点
+/// @return true 表示初始化器合法，false 表示包含非法的非常量表达式
+bool IRGenerator::isConstInitializer(Type * type, ast_node * initNode)
+{
+    if (initNode == nullptr) {
+        return true;
+    }
+
+    if (initNode->node_type == ast_operator_type::AST_OP_INIT_LIST) {
+        Type * nestedType = type;
+        if (auto * arrayType = dynamic_cast<ArrayType *>(type)) {
+            nestedType = arrayType->getElementType();
+        }
+        for (auto * child : initNode->sons) {
+            if (!isConstInitializer(nestedType, child)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (type != nullptr && type->isFloatType()) {
+        double value = 0.0;
+        return evaluateConstNumberExpr(initNode, value);
+    }
+
+    int32_t value = 0;
+    return evaluateConstIntInitializerExpr(initNode, value);
 }
 
 Type * IRGenerator::buildDeclaredType(ast_node * declNode, bool forParam)
@@ -764,8 +838,8 @@ Type * IRGenerator::buildDeclaredType(ast_node * declNode, bool forParam)
 
     for (auto it = dimsNode->sons.rbegin(); it != dimsNode->sons.rend(); ++it) {
         int32_t dimValue = 0;
-        if (!evaluateConstIntExpr(*it, dimValue) || dimValue <= 0) {
-            minic_log(LOG_ERROR, "数组维度必须是正整数常量");
+        if (!evaluateConstArrayBoundExpr(*it, dimValue) || dimValue < 0) {
+            minic_log(LOG_ERROR, "数组维度必须是非负整数常量表达式");
             return nullptr;
         }
         type = ArrayType::get(type, dimValue);
@@ -1076,7 +1150,7 @@ bool IRGenerator::collectGlobalArrayInitScalars(
             floatValues.push_back(static_cast<float>(val));
         } else {
             int32_t val = 0;
-            if (!evaluateConstIntExpr(item, val)) return false;
+            if (!evaluateConstIntInitializerExpr(item, val)) return false;
             intValues.push_back(val);
         }
         return true;
@@ -1256,13 +1330,107 @@ bool IRGenerator::collectGlobalArrayInitializer(
 /// @return true 表示计算成功，false 表示表达式不合法
 bool IRGenerator::evaluateConstIntExpr(ast_node * node, int32_t & result)
 {
-    double number = 0.0;
-    if (!evaluateConstNumberExpr(node, number)) {
+    if (!node) {
         return false;
     }
 
-    result = static_cast<int32_t>(number);
+    switch (node->node_type) {
+        case ast_operator_type::AST_OP_LEAF_LITERAL_UINT:
+            result = static_cast<int32_t>(node->integer_val);
+            return true;
+
+        case ast_operator_type::AST_OP_LEAF_VAR_ID: {
+            for (auto it = constBindings.rbegin(); it != constBindings.rend(); ++it) {
+                auto found = it->find(node->name);
+                if (found != it->end()) {
+                    result = found->second;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        case ast_operator_type::AST_OP_NEG: {
+            int32_t operand = 0;
+            if (!evaluateConstIntExpr(node->sons[0], operand)) {
+                return false;
+            }
+            result = -operand;
+            return true;
+        }
+
+        case ast_operator_type::AST_OP_ADD:
+        case ast_operator_type::AST_OP_SUB:
+        case ast_operator_type::AST_OP_MUL:
+        case ast_operator_type::AST_OP_DIV:
+        case ast_operator_type::AST_OP_MOD: {
+            int32_t lhs = 0;
+            int32_t rhs = 0;
+            if (!evaluateConstIntExpr(node->sons[0], lhs) ||
+                !evaluateConstIntExpr(node->sons[1], rhs)) {
+                return false;
+            }
+
+            switch (node->node_type) {
+                case ast_operator_type::AST_OP_ADD:
+                    result = lhs + rhs;
+                    return true;
+                case ast_operator_type::AST_OP_SUB:
+                    result = lhs - rhs;
+                    return true;
+                case ast_operator_type::AST_OP_MUL:
+                    result = lhs * rhs;
+                    return true;
+                case ast_operator_type::AST_OP_DIV:
+                    if (rhs == 0) {
+                        return false;
+                    }
+                    result = lhs / rhs;
+                    return true;
+                case ast_operator_type::AST_OP_MOD:
+                    if (rhs == 0) {
+                        return false;
+                    }
+                    result = lhs % rhs;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        default:
+            return false;
+    }
+}
+
+bool IRGenerator::evaluateConstIntInitializerExpr(ast_node * node, int32_t & result)
+{
+    if (evaluateConstIntExpr(node, result)) {
+        return true;
+    }
+
+    double numeric = 0.0;
+    if (!evaluateConstNumberExpr(node, numeric) || !std::isfinite(numeric)) {
+        return false;
+    }
+
+    double truncated = std::trunc(numeric);
+    if (truncated < static_cast<double>(std::numeric_limits<int32_t>::min()) ||
+        truncated > static_cast<double>(std::numeric_limits<int32_t>::max())) {
+        return false;
+    }
+
+    result = static_cast<int32_t>(truncated);
     return true;
+}
+
+/// @brief 计算数组维度使用的整型常量表达式
+/// @param node 常量表达式节点
+/// @param result 输出的计算结果
+/// @return true 表示计算成功，false 表示表达式不满足数组维度约束
+bool IRGenerator::evaluateConstArrayBoundExpr(ast_node * node, int32_t & result)
+{
+    return evaluateConstIntExpr(node, result);
 }
 
 bool IRGenerator::evaluateConstNumberExpr(ast_node * node, double & result)
@@ -1306,28 +1474,11 @@ bool IRGenerator::evaluateConstNumberExpr(ast_node * node, double & result)
             return true;
         }
 
-        case ast_operator_type::AST_OP_NOT: {
-            double operand = 0.0;
-            if (!evaluateConstNumberExpr(node->sons[0], operand)) {
-                return false;
-            }
-            result = (operand == 0.0) ? 1.0 : 0.0;
-            return true;
-        }
-
         case ast_operator_type::AST_OP_ADD:
         case ast_operator_type::AST_OP_SUB:
         case ast_operator_type::AST_OP_MUL:
         case ast_operator_type::AST_OP_DIV:
-        case ast_operator_type::AST_OP_MOD:
-        case ast_operator_type::AST_OP_LT:
-        case ast_operator_type::AST_OP_GT:
-        case ast_operator_type::AST_OP_LE:
-        case ast_operator_type::AST_OP_GE:
-        case ast_operator_type::AST_OP_EQ:
-        case ast_operator_type::AST_OP_NE:
-        case ast_operator_type::AST_OP_LAND:
-        case ast_operator_type::AST_OP_LOR: {
+        case ast_operator_type::AST_OP_MOD: {
             double lhs = 0.0;
             double rhs = 0.0;
             if (!evaluateConstNumberExpr(node->sons[0], lhs) ||
@@ -1356,30 +1507,6 @@ bool IRGenerator::evaluateConstNumberExpr(ast_node * node, double & result)
                         return false;
                     }
                     result = std::fmod(lhs, rhs);
-                    return true;
-                case ast_operator_type::AST_OP_LT:
-                    result = lhs < rhs ? 1.0 : 0.0;
-                    return true;
-                case ast_operator_type::AST_OP_GT:
-                    result = lhs > rhs ? 1.0 : 0.0;
-                    return true;
-                case ast_operator_type::AST_OP_LE:
-                    result = lhs <= rhs ? 1.0 : 0.0;
-                    return true;
-                case ast_operator_type::AST_OP_GE:
-                    result = lhs >= rhs ? 1.0 : 0.0;
-                    return true;
-                case ast_operator_type::AST_OP_EQ:
-                    result = lhs == rhs ? 1.0 : 0.0;
-                    return true;
-                case ast_operator_type::AST_OP_NE:
-                    result = lhs != rhs ? 1.0 : 0.0;
-                    return true;
-                case ast_operator_type::AST_OP_LAND:
-                    result = (lhs != 0.0 && rhs != 0.0) ? 1.0 : 0.0;
-                    return true;
-                case ast_operator_type::AST_OP_LOR:
-                    result = (lhs != 0.0 || rhs != 0.0) ? 1.0 : 0.0;
                     return true;
                 default:
                     return false;
@@ -1547,8 +1674,8 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
 {
     std::string funcName = node->sons[0]->name;
     std::vector<Value *> args;
+    ast_node * paramsNode = node->sons[1];
     if (funcName == "starttime" || funcName == "stoptime") {
-        ast_node * paramsNode = node->sons[1];
         if (!paramsNode->sons.empty()) {
             minic_log(LOG_ERROR, "函数(%s)参数个数不匹配", funcName.c_str());
             return nullptr;
@@ -1564,16 +1691,30 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
         return nullptr;
     }
 
-    ast_node * paramsNode = node->sons[1];
+    std::size_t fixedParamCount = calledFunc->getParams().size();
     if (args.empty()) {
         for (std::size_t i = 0; i < paramsNode->sons.size(); ++i) {
             auto * argNode = paramsNode->sons[i];
-            Value * argValue = visitExpr(argNode);
+            Type * expectedType = i < fixedParamCount ? calledFunc->getParams()[i]->getType() : nullptr;
+            Value * argValue = nullptr;
+            if (argNode->node_type == ast_operator_type::AST_OP_LEAF_STRING_LITERAL) {
+                if (expectedType == nullptr && calledFunc->isVarArg()) {
+                    minic_log(LOG_ERROR, "字符串字面量只能作为固定位置的指针形参传递");
+                    return nullptr;
+                }
+                if (expectedType != nullptr && !expectedType->isPointerType()) {
+                    minic_log(LOG_ERROR, "字符串字面量只能传递给指针形参");
+                    return nullptr;
+                }
+                argValue = materializeStringLiteral(argNode);
+            } else {
+                argValue = visitExpr(argNode);
+            }
             if (!argValue) {
                 return nullptr;
             }
-            if (i < calledFunc->getParams().size()) {
-                argValue = convertValueToType(argValue, calledFunc->getParams()[i]->getType());
+            if (expectedType != nullptr) {
+                argValue = convertValueToType(argValue, expectedType);
                 if (!argValue) {
                     return nullptr;
                 }
@@ -1582,7 +1723,8 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
         }
     }
 
-    if (args.size() != calledFunc->getParams().size()) {
+    if ((!calledFunc->isVarArg() && args.size() != fixedParamCount) ||
+        (calledFunc->isVarArg() && args.size() < fixedParamCount)) {
         minic_log(LOG_ERROR, "函数(%s)参数个数不匹配", funcName.c_str());
         return nullptr;
     }
@@ -1596,6 +1738,33 @@ Value * IRGenerator::visitFuncCall(ast_node * node)
     }
 
     return callInst;
+}
+
+/// @brief 将字符串字面量具象化为匿名全局对象并返回首元素地址
+/// @param node 字符串字面量节点
+/// @return 指向打包字符串首元素的指针值，失败时返回空指针
+Value * IRGenerator::materializeStringLiteral(ast_node * node)
+{
+    if (node == nullptr || node->node_type != ast_operator_type::AST_OP_LEAF_STRING_LITERAL) {
+        return nullptr;
+    }
+
+    auto found = stringLiteralGlobals.find(node->name);
+    GlobalVariable * global = found != stringLiteralGlobals.end() ? found->second : nullptr;
+    if (global == nullptr) {
+        std::vector<int32_t> words = packStringLiteralWords(node->name);
+        Type * arrayType = ArrayType::get(IntegerType::getTypeInt32(), static_cast<int32_t>(words.size()));
+
+        while (global == nullptr) {
+            std::string globalName = "__sysy_str_" + std::to_string(nextStringLiteralId++);
+            global = module->newSyntheticGlobalVariable(arrayType, globalName);
+        }
+
+        global->setInitIntArray(words);
+        stringLiteralGlobals.emplace(node->name, global);
+    }
+
+    return emitGEP(global, module->newConstInt32(0), true);
 }
 
 /// @brief 生成变量访问表达式对应的 IR

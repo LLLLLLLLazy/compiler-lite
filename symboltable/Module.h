@@ -50,7 +50,9 @@ public:
 
     /// @brief 创建并注册一个函数对象
     Function *
-    newFunction(std::string name, Type * returnType, std::vector<FormalParam *> params = {}, bool builtin = false);
+    newFunction(
+        std::string name, Type * returnType, std::vector<FormalParam *> params = {}, bool builtin = false,
+        bool varArg = false);
 
     /// @brief 按名称查找函数
     Function * findFunction(std::string name);
@@ -84,6 +86,9 @@ public:
 
     /// @brief 创建新的变量值对象并插入当前作用域
     Value * newVarValue(Type * type, std::string name = "");
+
+    /// @brief 创建一个不进入用户作用域的合成全局变量
+    GlobalVariable * newSyntheticGlobalVariable(Type * type, std::string name);
 
     /// @brief 按名称查找变量值对象
     Value * findVarValue(std::string name);

@@ -77,6 +77,7 @@ bool ast_node::isLeafNode()
 	switch (this->node_type) {
 		case ast_operator_type::AST_OP_LEAF_LITERAL_UINT:
 		case ast_operator_type::AST_OP_LEAF_LITERAL_FLOAT:
+		case ast_operator_type::AST_OP_LEAF_STRING_LITERAL:
 		case ast_operator_type::AST_OP_LEAF_VAR_ID:
 		case ast_operator_type::AST_OP_LEAF_TYPE:
 			is_leaf = true;
@@ -138,6 +139,17 @@ ast_node * ast_node::New(std::string id, int64_t lineno)
 {
 	ast_node * node = new ast_node(id, lineno);
 
+	return node;
+}
+
+/// @brief 创建字符串字面量的叶子节点
+/// @param text 字符串内容
+/// @param lineno 行号
+/// @return 创建的节点
+ast_node * ast_node::NewStringLiteral(const std::string & text, int64_t lineno)
+{
+	auto * node = new ast_node(ast_operator_type::AST_OP_LEAF_STRING_LITERAL, VoidType::getType(), lineno);
+	node->name = text;
 	return node;
 }
 
