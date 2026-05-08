@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.12)
 
 # 设置工程属性，如版本，开发语言等
-project(minic VERSION 1.0.1 LANGUAGES CXX)
+project(compiler VERSION 1.0.1 LANGUAGES CXX)
+
+# 设置C++标准为C++17
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 是否使用GravphViz库
 set(USE_GRAPHVIZ ON CACHE BOOL "Enable/Disable GraphViz")
