@@ -18,8 +18,5 @@ minic
 *.zip
 *.tgz
 
-# 性能测试大文件
-tests/2025_performance/*.in
-tests/2025_performance/*.out
-tests/2026_performance/*.in
-tests/2026_performance/*.out
+# 测试文件
+tests/
