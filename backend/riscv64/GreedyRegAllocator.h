@@ -16,11 +16,41 @@
 #include "ILocRiscV64.h"
 #include "SpillStrategy.h"
 
+#include "CalleeSavedFPREnabler.h"
+#include "LiveIntervalSplitter.h"
+#include "RegCoalescer.h"
+
 class Function;
 class Instruction;
 class InterferenceGraph;
 class LiveInterval;
 class Value;
+
+/// @brief 单个 Value 在某段活跃区间内的分配结果
+struct RegAllocSegment {
+	int start = 0;
+	int end = 0;
+	RegAllocInfo info;
+};
+
+/// @brief split 边界处需要搬运同一个 Value 的位置
+struct RegAllocSplitTransfer {
+	Value * value = nullptr;
+	int position = 0;
+};
+
+/// @brief 寄存器分配统计
+struct RegAllocStats {
+	int assignedRegIntervals = 0;
+	int assignedGprIntervals = 0;
+	int assignedFprIntervals = 0;
+	int spilledIntervals = 0;
+	int spilledValues = 0;
+	int estimatedReloads = 0;
+	int estimatedSpillStores = 0;
+	int eliminatedCopies = 0;
+	int splitCount = 0;
+};
 
 /// @brief RISCV64 Greedy寄存器分配器
 ///
@@ -36,7 +66,13 @@ class GreedyRegAllocator {
 public:
 	/// @brief 构造函数
 	/// @param strategy 溢出决策策略，若为nullptr则使用默认的HeuristicSpillStrategy
-	explicit GreedyRegAllocator(SpillStrategy * strategy = nullptr);
+	/// @param enableCalleeSavedFPR 是否启用 callee-saved FPR
+	/// @param enableCoalesce 是否启用寄存器合并
+	/// @param enableSplit 是否启用活跃区间分裂
+	explicit GreedyRegAllocator(SpillStrategy * strategy = nullptr,
+	                           bool enableCalleeSavedFPR = false,
+	                           bool enableCoalesce = false,
+	                           bool enableSplit = false);
 
 	/// @brief 对函数执行寄存器分配
 	/// @param func 待分配的函数
@@ -132,16 +168,61 @@ public:
 		return valueLiveRanges;
 	}
 
+	/// @brief 获取每个 Value 的位置敏感分配段
+	const std::unordered_map<Value *, std::vector<RegAllocSegment>> & getAllocationSegments() const
+	{
+		return allocationSegments;
+	}
+
+	/// @brief 获取GPR活跃段反向索引，供临时寄存器借用避让
+	const std::unordered_map<int, std::vector<std::pair<int, int>>> & getAllocatedGprLiveRanges() const
+	{
+		return allocatedGprLiveRanges;
+	}
+
+	/// @brief 获取FPR活跃段反向索引，供临时浮点寄存器借用避让
+	const std::unordered_map<int, std::vector<std::pair<int, int>>> & getAllocatedFprLiveRanges() const
+	{
+		return allocatedFprLiveRanges;
+	}
+
+	/// @brief 获取 split 边界处需要插入搬运的位置
+	const std::vector<RegAllocSplitTransfer> & getSplitTransfers() const
+	{
+		return splitTransfers;
+	}
+
+	/// @brief 获取 Value 在指定 IR 指令位置的分配信息
+	RegAllocInfo getAllocationInfoAt(Value * value, int instNum) const;
+
+	/// @brief 获取 Value 在指定 IR 指令处的分配信息
+	RegAllocInfo getAllocationInfo(Value * value, Instruction * inst) const;
+
+	/// @brief 获取寄存器分配统计
+	const RegAllocStats & getStats() const
+	{
+		return stats;
+	}
+
 	/// @brief 判断Value是否必须分配在栈上（如AllocaInst、全局变量等）
 	/// @param val 待判断的Value
 	/// @return 是否必须分配在栈上
 	static bool isForcedStackValue(Value * val);
 
+	/// @brief 获取被使用的 callee-saved FPR 列表
+	const std::vector<int> & getUsedCalleeSavedFPRs() const
+	{
+		return usedCalleeSavedFPRs_;
+	}
+
+	/// @brief 获取被消除的 copy 指令集合（供指令选择阶段跳过）
+	const std::unordered_set<Instruction *> & getEliminatedCopies() const;
+
 private:
 	/// @brief 执行Greedy分配主循环
 	/// @param intervals 按起点排序的活跃区间列表
 	/// @param graph 干涉图
-	void runGreedy(std::vector<LiveInterval *> & intervals, InterferenceGraph * graph);
+	void runGreedy(std::vector<LiveInterval *> & intervals, InterferenceGraph *& graph);
 
 	/// @brief 为活跃区间分配物理寄存器
 	/// @param interval 活跃区间
@@ -216,6 +297,9 @@ private:
 	/// @param intervals 活跃区间列表
 	void rebuildAllocationMap(const std::vector<LiveInterval *> & intervals);
 
+	/// @brief 根据位置敏感分配段重建统计信息
+	void rebuildStats();
+
 	/// @brief 拥有的溢出策略（当外部未提供时使用默认策略）
 	std::unique_ptr<SpillStrategy> ownedStrategy;
 
@@ -230,6 +314,25 @@ private:
 
 	/// @brief 寄存器分配映射表：Value* -> RegAllocInfo
 	std::unordered_map<Value *, RegAllocInfo> allocationMap;
+
+	/// @brief 位置敏感分配段：Value* -> 多个 [start,end) 分配结果
+	std::unordered_map<Value *, std::vector<RegAllocSegment>> allocationSegments;
+
+	/// @brief GPR/FPR活跃段反向索引
+	std::unordered_map<int, std::vector<std::pair<int, int>>> allocatedGprLiveRanges;
+	std::unordered_map<int, std::vector<std::pair<int, int>>> allocatedFprLiveRanges;
+
+	/// @brief split边界搬运点
+	std::vector<RegAllocSplitTransfer> splitTransfers;
+
+	/// @brief 需要以栈槽作为 canonical 位置的 split Value。
+	///
+	/// 目前 split 是线性指令号上的区间拆分，尚未在 CFG 边上插入 edge copy。
+	/// 对这类 Value 使用统一栈槽可以避免循环回边或 call clobber 读到旧寄存器。
+	std::unordered_set<Value *> splitStackValues;
+
+	/// @brief 寄存器分配统计
+	RegAllocStats stats;
 
 	/// @brief 被溢出的Value集合
 	std::unordered_set<Value *> spilledValues;
@@ -251,4 +354,16 @@ private:
 
 	/// @brief 虚拟寄存器活跃范围（Value* -> [start, end)），用于局部临时寄存器分配
 	std::unordered_map<class Value *, std::pair<int, int>> valueLiveRanges;
+
+	/// @brief 寄存器合并器
+	std::unique_ptr<RegCoalescer> coalescer_;
+
+	/// @brief 活跃区间分裂器
+	std::unique_ptr<LiveIntervalSplitter> splitter_;
+
+	/// @brief Callee-saved FPR 启用器
+	std::unique_ptr<CalleeSavedFPREnabler> fprEnabler_;
+
+	/// @brief 被使用的 callee-saved FPR 列表
+	std::vector<int> usedCalleeSavedFPRs_;
 };
