@@ -9,7 +9,7 @@ MINIC_BIN=${MINIC_BIN:-"${REPO_ROOT}/build/minic"}
 RISCV64_GCC_BIN=${RISCV64_GCC_BIN:-"riscv64-linux-gnu-gcc"}
 QEMU_RISCV64_BIN=${QEMU_RISCV64_BIN:-""}
 TEST_ROOT=${MINIC_TEST_ROOT:-"${REPO_ROOT}/tests"}
-STD_C=${MINIC_STD_C:-"${TEST_ROOT}/std.c"}
+RUNTIME_LIB=${MINIC_RUNTIME_LIB:-"${REPO_ROOT}/tests/libsysy_riscv.a"}
 FRONTEND=${MINIC_FRONTEND:-"antlr"}
 TEST_MODE=${MINIC_RISCV64_TEST_MODE:-"asm"}
 RISCV64_TIMEOUT=${MINIC_RISCV64_TIMEOUT:-30}
@@ -50,13 +50,13 @@ Suites:
 Environment:
   MINIC_BIN=./build/minic
   MINIC_FRONTEND=antlr|recursive|default
-  MINIC_RISCV64_TEST_MODE=asm       Generate RISCV64 asm, link, run, diff .out (default)
+  MINIC_RISCV64_TEST_MODE=asm       Generate RISCV64 asm, link, run, compare .out md5 (default)
   MINIC_RISCV64_TEST_MODE=assemble  Generate RISCV64 asm and assemble only
   MINIC_RISCV64_TIMEOUT=30          Per-step timeout passed to timeout(1)
   RISCV64_GCC_BIN=riscv64-linux-gnu-gcc
   QEMU_RISCV64_BIN=qemu-riscv64-static
   MINIC_TEST_ROOT=./tests
-  MINIC_STD_C=./tests/std.c
+  MINIC_RUNTIME_LIB=./tests/libsysy_riscv.a
 
 Examples:
   ./tools/run-local-riscv64-tests.sh 2023 2023_func_00_main
@@ -202,6 +202,40 @@ write_result_file() {
 	printf '%s\n' "${exit_code}" >> "${result_file}"
 }
 
+compute_md5() {
+	local file="$1"
+
+	if command -v md5sum >/dev/null 2>&1; then
+		md5sum "${file}" | awk '{print $1}'
+		return 0
+	fi
+
+	if command -v md5 >/dev/null 2>&1; then
+		md5 -q "${file}"
+		return 0
+	fi
+
+	echo ""
+	return 1
+}
+
+file_size_bytes() {
+	wc -c < "$1" | tr -d '[:space:]'
+}
+
+tail_bytes_hex() {
+	local file="$1"
+	local bytes
+
+	bytes=$(tail -c 16 "${file}" 2>/dev/null | od -An -tx1 -v | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+	if [[ -z "${bytes}" ]]; then
+		echo "<empty>"
+		return 0
+	fi
+
+	echo "${bytes}"
+}
+
 run_riscv64_check() {
 	local cfile="$1"
 	local infile="$2"
@@ -213,6 +247,7 @@ run_riscv64_check() {
 	local objfile="${TMP_DIR}/${testcase}.rv64.o"
 	local exe_file="${TMP_DIR}/${testcase}.rv64"
 	local output_file="${TMP_DIR}/${testcase}.rv64.output"
+	local stderr_file="${TMP_DIR}/${testcase}.rv64.stderr"
 	local result_file="${TMP_DIR}/${testcase}.rv64.result"
 	local exit_code=0
 	local t0 t1 t_compile=0 t_assemble=0 t_link=0 t_run=0
@@ -258,7 +293,7 @@ run_riscv64_check() {
 
 	# link
 	t0=$(date +%s%N)
-	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${STD_C}" >/dev/null 2>&1; then
+	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${RUNTIME_LIB}" >/dev/null 2>&1; then
 		t1=$(date +%s%N)
 		t_link=$(( (t1 - t0) / 1000000 ))
 		echo "${source_name} link NG [riscv64]  compile=${t_compile}ms link=${t_link}ms"
@@ -270,10 +305,10 @@ run_riscv64_check() {
 	# run
 	t0=$(date +%s%N)
 	if [[ -f "${infile}" ]]; then
-		timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2>&1
+		timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	else
-		timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" > "${output_file}" 2>&1
+		timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	fi
 	t1=$(date +%s%N)
@@ -281,8 +316,22 @@ run_riscv64_check() {
 
 	write_result_file "${output_file}" "${exit_code}" "${result_file}"
 
-	if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
+	local actual_md5 expected_md5 actual_size expected_size
+	actual_md5=$(compute_md5 "${result_file}") || {
+		echo "md5 tool not found: need md5sum or md5"
+		return 1
+	}
+	expected_md5=$(compute_md5 "${outfile}") || {
+		echo "md5 tool not found: need md5sum or md5"
+		return 1
+	}
+
+	if [[ "${actual_md5}" != "${expected_md5}" ]]; then
+		actual_size=$(file_size_bytes "${result_file}")
+		expected_size=$(file_size_bytes "${outfile}")
 		echo "${source_name} NG [riscv64]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
+		echo "  expected md5=${expected_md5} size=${expected_size} tail16=$(tail_bytes_hex "${outfile}")"
+		echo "  actual   md5=${actual_md5} size=${actual_size} tail16=$(tail_bytes_hex "${result_file}")"
 		return 1
 	fi
 
@@ -357,8 +406,12 @@ if [[ "${TEST_MODE}" == "asm" ]]; then
 		fail_with_usage "qemu riscv64 not found: ${QEMU_RISCV64_BIN}"
 	fi
 
-	if [[ ! -f "${STD_C}" ]]; then
-		fail_with_usage "Runtime std.c not found: ${STD_C}"
+	if ! command -v md5sum >/dev/null 2>&1 && ! command -v md5 >/dev/null 2>&1; then
+		fail_with_usage "md5 tool not found: need md5sum or md5"
+	fi
+
+	if [[ ! -f "${RUNTIME_LIB}" ]]; then
+		fail_with_usage "Runtime archive not found: ${RUNTIME_LIB}"
 	fi
 fi
 

@@ -78,6 +78,29 @@ AbiArgLoc classifyAbiArg(Type * type, int & intRegCount, int & floatRegCount, in
 	return {AbiArgLocKind::Stack, stackCount++};
 }
 
+bool isVariadicFloatArg(const CallInst * call, int argIndex, Type * argType)
+{
+	if (call == nullptr || argType == nullptr || !argType->isFloatType()) {
+		return false;
+	}
+
+	Function * callee = call->getCallee();
+	if (callee == nullptr || !callee->isVarArg()) {
+		return false;
+	}
+
+	return argIndex >= static_cast<int>(callee->getParams().size());
+}
+
+AbiArgLoc classifyVariadicFloatArg(int & intRegCount, int & stackCount)
+{
+	if (intRegCount < 8) {
+		return {AbiArgLocKind::IntReg, intRegCount++};
+	}
+
+	return {AbiArgLocKind::Stack, stackCount++};
+}
+
 
 struct RegMove {
 	int src = -1;
@@ -1235,8 +1258,10 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 	{
 		std::vector<AbiArgLoc> argLocs;
 		std::vector<Type *> argTypes;
+		std::vector<bool> variadicFloatArgs;
 		argLocs.reserve(call->getArgCount());
 		argTypes.reserve(call->getArgCount());
+		variadicFloatArgs.reserve(call->getArgCount());
 		int intIdx = 0, floatIdx = 0, stackIdx = 0;
 		for (int i = 0; i < call->getArgCount(); ++i) {
 			Value *arg = call->getArg(i);
@@ -1244,14 +1269,52 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 			if (auto *alloca = dynamic_cast<AllocaInst *>(arg)) {
 				argType = alloca->getAllocaType();
 			}
+			const bool variadicFloatArg = isVariadicFloatArg(call, i, argType);
 			argTypes.push_back(argType);
-			argLocs.push_back(classifyAbiArg(argType, intIdx, floatIdx, stackIdx));
+			variadicFloatArgs.push_back(variadicFloatArg);
+			argLocs.push_back(
+				variadicFloatArg ? classifyVariadicFloatArg(intIdx, stackIdx)
+				                 : classifyAbiArg(argType, intIdx, floatIdx, stackIdx));
 		}
+
+		auto emitVariadicFloatArg = [&](Value * arg, const AbiArgLoc & loc) {
+			FloatOperandReg src = loadFloatOperand(arg, inst);
+			const bool reuseSrcReg = src.temp;
+			int promotedReg = src.reg;
+			if (!reuseSrcReg) {
+				promotedReg = borrowFloatTemp(inst, {src.reg});
+			}
+
+			// Variadic float args follow the integer calling convention after default promotion to double.
+			iloc.inst("fcvt.d.s", PlatformRiscV64::fpRegName[promotedReg], PlatformRiscV64::fpRegName[src.reg]);
+
+			if (loc.kind == AbiArgLocKind::IntReg) {
+				iloc.inst("fmv.x.d", PlatformRiscV64::regName[RISCV64_A0_REG_NO + loc.index],
+				          PlatformRiscV64::fpRegName[promotedReg]);
+			} else {
+				auto bitsLease = tempMgr.borrow(inst);
+				iloc.inst("fmv.x.d", PlatformRiscV64::regName[bitsLease.reg()],
+				          PlatformRiscV64::fpRegName[promotedReg]);
+				const int stackOffset = loc.index * 8;
+				if (PlatformRiscV64::isDisp(stackOffset)) {
+					iloc.inst("sd", PlatformRiscV64::regName[bitsLease.reg()],
+					          std::to_string(stackOffset) + "(" + PlatformRiscV64::regName[RISCV64_SP_REG_NO] + ")");
+				} else {
+					auto addrLease = tempMgr.borrow(inst, bitsLease.reg());
+					iloc.store_base(bitsLease.reg(), RISCV64_SP_REG_NO, stackOffset, addrLease.reg(), true);
+				}
+			}
+
+			if (!reuseSrcReg) {
+				releaseFloatTemp(promotedReg);
+			}
+			releaseFloatOperand(src);
+		};
 
 		std::vector<FloatRegMove> floatRegMoves;
 		std::vector<std::pair<Value *, int>> deferredFloatLoads;
 		for (int i = 0; i < call->getArgCount(); ++i) {
-			if (!argTypes[i]->isFloatType()) {
+			if (!argTypes[i]->isFloatType() || variadicFloatArgs[i]) {
 				continue;
 			}
 
@@ -1301,12 +1364,16 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 		}
 
 		for (int i = 0; i < call->getArgCount(); ++i) {
-			if (argTypes[i]->isFloatType()) {
+			if (argTypes[i]->isFloatType() && !variadicFloatArgs[i]) {
 				continue;
 			}
 
 			Value * arg = call->getArg(i);
 			const AbiArgLoc & loc = argLocs[i];
+			if (variadicFloatArgs[i]) {
+				emitVariadicFloatArg(arg, loc);
+				continue;
+			}
 			if (loc.kind == AbiArgLocKind::IntReg) {
 				iloc.load_var(RISCV64_A0_REG_NO + loc.index, arg);
 			} else if (loc.kind == AbiArgLocKind::Stack) {

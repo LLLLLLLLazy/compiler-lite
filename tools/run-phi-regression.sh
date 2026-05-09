@@ -7,7 +7,8 @@ REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 
 MINIC_BIN=${MINIC_BIN:-"${REPO_ROOT}/build/minic"}
 TEST_DIR=${MINIC_PHI_TEST_DIR:-"${REPO_ROOT}/tests/phi_regression"}
-STD_C=${MINIC_STD_C:-"${REPO_ROOT}/tests/std.c"}
+RUNTIME_SOURCE=${MINIC_RUNTIME_SOURCE:-"${REPO_ROOT}/tests/sylib.c"}
+RUNTIME_LIB=${MINIC_RUNTIME_LIB:-"${REPO_ROOT}/tests/libsysy_riscv.a"}
 FRONTEND=${MINIC_FRONTEND:-"antlr"}
 MODE=${MINIC_PHI_TEST_MODE:-"all"}
 CLANG_BIN=${CLANG_BIN:-"clang"}
@@ -52,7 +53,8 @@ Examples:
 Environment:
   MINIC_BIN=./build/minic
   MINIC_PHI_TEST_DIR=./tests/phi_regression
-  MINIC_STD_C=./tests/std.c
+	MINIC_RUNTIME_SOURCE=./tests/sylib.c
+	MINIC_RUNTIME_LIB=./tests/libsysy_riscv.a
   MINIC_FRONTEND=antlr|recursive|default
   MINIC_PHI_TEST_MODE=ll|asm|all
   MINIC_PHI_LL_OPT_LEVEL=0|1
@@ -122,14 +124,17 @@ normalize_testcase() {
 	echo "${testcase%.c}"
 }
 
-write_result_file() {
-	local output="$1"
+write_result_file_from_path() {
+	local output_file="$1"
 	local exit_code="$2"
 	local result_file="$3"
 
-	if [[ -n "${output}" ]]; then
-		printf '%s' "${output}" > "${result_file}"
-		if [[ "${output}" != *$'\n' ]]; then
+	if [[ -s "${output_file}" ]]; then
+		cat "${output_file}" > "${result_file}"
+
+		local last_byte_hex
+		last_byte_hex=$(tail -c 1 "${output_file}" | od -An -tx1 | tr -d '[:space:]')
+		if [[ "${last_byte_hex}" != "0a" ]]; then
 			printf '\n' >> "${result_file}"
 		fi
 	else
@@ -146,8 +151,9 @@ run_ll_check() {
 	local testcase="$4"
 	local llfile="${TMP_DIR}/${testcase}.ll"
 	local exe_file="${TMP_DIR}/${testcase}.ll.out"
+	local output_file="${TMP_DIR}/${testcase}.ll.output"
+	local stderr_file="${TMP_DIR}/${testcase}.ll.stderr"
 	local result_file="${TMP_DIR}/${testcase}.ll.result"
-	local output=""
 	local exit_code=0
 
 	if ! "${MINIC_BIN}" -S "${frontend_args[@]}" -O"${LL_OPT_LEVEL}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
@@ -160,20 +166,20 @@ run_ll_check() {
 		return 1
 	fi
 
-	if ! "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${STD_C}" >/dev/null 2>&1; then
+	if ! "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${RUNTIME_SOURCE}" >/dev/null 2>&1; then
 		echo "${testcase}.c link NG [ll]"
 		return 1
 	fi
 
 	if [[ -f "${infile}" ]]; then
-		output="$(${exe_file} < "${infile}" 2>&1)"
+		"${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	else
-		output="$(${exe_file} 2>&1)"
+		"${exe_file}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	fi
 
-	write_result_file "${output}" "${exit_code}" "${result_file}"
+	write_result_file_from_path "${output_file}" "${exit_code}" "${result_file}"
 
 	if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
 		echo "${testcase}.c NG [ll]"
@@ -191,8 +197,9 @@ run_asm_check() {
 	local testcase="$4"
 	local asmfile="${TMP_DIR}/${testcase}.rv64.s"
 	local exe_file="${TMP_DIR}/${testcase}.rv64"
+	local output_file="${TMP_DIR}/${testcase}.rv64.output"
+	local stderr_file="${TMP_DIR}/${testcase}.rv64.stderr"
 	local result_file="${TMP_DIR}/${testcase}.rv64.result"
-	local output=""
 	local exit_code=0
 
 	if ! "${MINIC_BIN}" -S "${frontend_args[@]}" -O"${ASM_OPT_LEVEL}" -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
@@ -205,20 +212,20 @@ run_asm_check() {
 		return 1
 	fi
 
-	if ! "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${STD_C}" >/dev/null 2>&1; then
+	if ! "${RISCV64_GCC_BIN}" -static -o "${exe_file}" "${asmfile}" "${RUNTIME_LIB}" >/dev/null 2>&1; then
 		echo "${testcase}.c link NG [asm]"
 		return 1
 	fi
 
 	if [[ -f "${infile}" ]]; then
-		output="$(${QEMU_RISCV64_BIN} "${exe_file}" < "${infile}" 2>&1)"
+		"${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	else
-		output="$(${QEMU_RISCV64_BIN} "${exe_file}" 2>&1)"
+		"${QEMU_RISCV64_BIN}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	fi
 
-	write_result_file "${output}" "${exit_code}" "${result_file}"
+	write_result_file_from_path "${output_file}" "${exit_code}" "${result_file}"
 
 	if ! diff -a --strip-trailing-cr "${result_file}" "${outfile}" >/dev/null 2>&1; then
 		echo "${testcase}.c NG [asm]"
@@ -285,10 +292,6 @@ if [[ ! -d "${TEST_DIR}" ]]; then
 	fail_with_usage "Phi regression directory not found: ${TEST_DIR}"
 fi
 
-if [[ ! -f "${STD_C}" ]]; then
-	fail_with_usage "Runtime std.c not found: ${STD_C}"
-fi
-
 single_testcase=""
 
 if [[ $# -gt 2 ]]; then
@@ -310,6 +313,10 @@ if [[ "${MODE}" == "ll" || "${MODE}" == "all" ]]; then
 	if ! command -v "${CLANG_BIN}" >/dev/null 2>&1; then
 		fail_with_usage "clang not found: ${CLANG_BIN}"
 	fi
+
+	if [[ ! -f "${RUNTIME_SOURCE}" ]]; then
+		fail_with_usage "Runtime source not found: ${RUNTIME_SOURCE}"
+	fi
 fi
 
 if [[ "${MODE}" == "asm" || "${MODE}" == "all" ]]; then
@@ -319,6 +326,10 @@ if [[ "${MODE}" == "asm" || "${MODE}" == "all" ]]; then
 
 	if ! command -v "${QEMU_RISCV64_BIN}" >/dev/null 2>&1; then
 		fail_with_usage "qemu riscv64 not found: ${QEMU_RISCV64_BIN}"
+	fi
+
+	if [[ ! -f "${RUNTIME_LIB}" ]]; then
+		fail_with_usage "Runtime archive not found: ${RUNTIME_LIB}"
 	fi
 fi
 

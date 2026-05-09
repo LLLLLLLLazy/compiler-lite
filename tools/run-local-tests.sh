@@ -9,6 +9,7 @@ MINIC_BIN=${MINIC_BIN:-"${REPO_ROOT}/build/minic"}
 ARM_GCC_BIN=${ARM_GCC_BIN:-"arm-linux-gnueabihf-gcc"}
 QEMU_ARM_BIN=${QEMU_ARM_BIN:-"qemu-arm-static"}
 TEST_ROOT="${REPO_ROOT}/tests"
+RUNTIME_SOURCE=${MINIC_RUNTIME_SOURCE:-"${TEST_ROOT}/sylib.c"}
 FRONTEND=${MINIC_FRONTEND:-"antlr"}
 TEST_MODE=${MINIC_TEST_MODE:-"llvmir"}
 CLANG_BIN=${CLANG_BIN:-"clang"}
@@ -42,6 +43,7 @@ Environment:
   MINIC_FRONTEND=antlr      Use ANTLR frontend (default)
   MINIC_FRONTEND=recursive  Use recursive-descent frontend
   MINIC_FRONTEND=default    Use compiler default frontend
+    MINIC_RUNTIME_SOURCE=./tests/sylib.c
 
   MINIC_TEST_MODE=llvmir    Verify generated LLVM IR via clang (default)
   MINIC_TEST_MODE=asm       Verify generated assembly via cross-compile + qemu
@@ -88,6 +90,10 @@ case "${TEST_MODE}" in
         fail_with_usage "Unknown MINIC_TEST_MODE: ${TEST_MODE}"
         ;;
 esac
+
+if [[ "${TEST_MODE}" != "ast" && ! -f "${RUNTIME_SOURCE}" ]]; then
+    fail_with_usage "Runtime source not found: ${RUNTIME_SOURCE}"
+fi
 
 
 
@@ -226,6 +232,7 @@ run_asm_check() {
     local asmfile="${TMP_DIR}/${testcase}.s"
     local exe_file="${TMP_DIR}/${testcase}"
     local output_file="${TMP_DIR}/${testcase}.asm.output"
+    local stderr_file="${TMP_DIR}/${testcase}.asm.stderr"
     local result_file="${TMP_DIR}/${testcase}.asm.result"
     local exit_code=0
     source_name=$(basename "${cfile}")
@@ -240,16 +247,16 @@ run_asm_check() {
         return 1
     fi
 
-    if ! timeout --foreground "${TEST_TIMEOUT}" "${ARM_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${ARM_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${RUNTIME_SOURCE}" >/dev/null 2>&1; then
         echo "${source_name} link NG [asm]"
         return 1
     fi
 
     if [[ -f "${infile}" ]]; then
-        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_ARM_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2>&1
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_ARM_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
         exit_code=$?
     else
-        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_ARM_BIN}" "${exe_file}" > "${output_file}" 2>&1
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_ARM_BIN}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
         exit_code=$?
     fi
 
@@ -273,6 +280,7 @@ run_llvmir_check() {
     local llfile="${TMP_DIR}/${testcase}.ll"
     local exe_file="${TMP_DIR}/${testcase}_ll"
     local output_file="${TMP_DIR}/${testcase}.llvmir.output"
+    local stderr_file="${TMP_DIR}/${testcase}.llvmir.stderr"
     local result_file="${TMP_DIR}/${testcase}.llvmir.result"
     local exit_code=0
     source_name=$(basename "${cfile}")
@@ -287,16 +295,16 @@ run_llvmir_check() {
         return 1
     fi
 
-    if ! timeout --foreground "${TEST_TIMEOUT}" "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${RUNTIME_SOURCE}" >/dev/null 2>&1; then
         echo "${source_name} link NG [llvmir]"
         return 1
     fi
 
     if [[ -f "${infile}" ]]; then
-        timeout --foreground "${TEST_TIMEOUT}" "${exe_file}" < "${infile}" > "${output_file}" 2>&1
+        timeout --foreground "${TEST_TIMEOUT}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
         exit_code=$?
     else
-        timeout --foreground "${TEST_TIMEOUT}" "${exe_file}" > "${output_file}" 2>&1
+        timeout --foreground "${TEST_TIMEOUT}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
         exit_code=$?
     fi
 
