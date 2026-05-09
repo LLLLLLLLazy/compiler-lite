@@ -472,6 +472,12 @@ void ILocRiscV64::fmov_reg(int fd_reg_no, int fs_reg_no)
 /// @param src_var 源操作数
 void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 {
+	auto it = regAllocMap.find(src_var);
+	load_var(rs_reg_no, src_var, it != regAllocMap.end() ? it->second : RegAllocInfo{});
+}
+
+void ILocRiscV64::load_var(int rs_reg_no, Value * src_var, const RegAllocInfo & info)
+{
 	Type * valueType = memoryObjectType(src_var);
 	const bool wide = valueType->isPointerType();
 	if (Instanceof(constVal, ConstInteger *, src_var)) {
@@ -489,20 +495,18 @@ void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 		emit(wide ? "ld" : "lw", PlatformRiscV64::regName[rs_reg_no], "0(" + PlatformRiscV64::regName[rs_reg_no] + ")");
 
 	} else {
-		// 局部变量/临时变量/形参：通过regAllocMap查找分配信息
-		auto it = regAllocMap.find(src_var);
-		if (it != regAllocMap.end() && it->second.hasReg()) {
+		if (info.hasReg()) {
 			// 分配了寄存器，直接mov
-			int32_t src_regId = it->second.regId;
+			int32_t src_regId = info.regId;
 			if (src_regId != rs_reg_no) {
 				// 寄存器不一样才需要mv操作
 				emit("mv", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[src_regId]);
 			}
-		} else if (it != regAllocMap.end() && it->second.hasFloatReg()) {
-			emit("fmv.x.w", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::fpRegName[it->second.regId]);
-		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
+		} else if (info.hasFloatReg()) {
+			emit("fmv.x.w", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::fpRegName[info.regId]);
+		} else if (info.hasStackSlot) {
 			// 在栈上分配了空间，从栈加载
-			load_base(rs_reg_no, it->second.baseRegId, it->second.offset, wide);
+			load_base(rs_reg_no, info.baseRegId, info.offset, wide);
 		} else {
 			// 未找到分配信息，可能是AllocaInst的结果（指针值）
 			// 指针值需要通过栈地址加载
@@ -516,6 +520,12 @@ void ILocRiscV64::load_var(int rs_reg_no, Value * src_var)
 /// 常量和GPR分配的float值通过fmv.w.x搬运位模式；栈和全局变量使用flw。
 void ILocRiscV64::load_float_var(int fd_reg_no, Value * src_var, int tmp_reg_no)
 {
+	auto it = regAllocMap.find(src_var);
+	load_float_var(fd_reg_no, src_var, tmp_reg_no, it != regAllocMap.end() ? it->second : RegAllocInfo{});
+}
+
+void ILocRiscV64::load_float_var(int fd_reg_no, Value * src_var, int tmp_reg_no, const RegAllocInfo & info)
+{
 	if (Instanceof(constVal, ConstFloat *, src_var)) {
 		std::uint32_t bits = constVal->getBitPattern();
 		load_imm(tmp_reg_no, static_cast<int32_t>(bits));
@@ -526,15 +536,14 @@ void ILocRiscV64::load_float_var(int fd_reg_no, Value * src_var, int tmp_reg_no)
 		emit("flw", PlatformRiscV64::fpRegName[fd_reg_no], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
 
 	} else {
-		auto it = regAllocMap.find(src_var);
-		if (it != regAllocMap.end() && it->second.hasFloatReg()) {
-			if (it->second.regId != fd_reg_no) {
-				fmov_reg(fd_reg_no, it->second.regId);
+		if (info.hasFloatReg()) {
+			if (info.regId != fd_reg_no) {
+				fmov_reg(fd_reg_no, info.regId);
 			}
-		} else if (it != regAllocMap.end() && it->second.hasReg()) {
-			emit("fmv.w.x", PlatformRiscV64::fpRegName[fd_reg_no], PlatformRiscV64::regName[it->second.regId]);
-		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
-			load_float_base(fd_reg_no, it->second.baseRegId, it->second.offset, tmp_reg_no);
+		} else if (info.hasReg()) {
+			emit("fmv.w.x", PlatformRiscV64::fpRegName[fd_reg_no], PlatformRiscV64::regName[info.regId]);
+		} else if (info.hasStackSlot) {
+			load_float_base(fd_reg_no, info.baseRegId, info.offset, tmp_reg_no);
 		} else {
 			minic_log(LOG_ERROR, "ILocRiscV64::load_float_var: 未找到变量分配信息");
 		}
@@ -565,6 +574,12 @@ void ILocRiscV64::lea_var(int rs_reg_no, Value * var)
 /// @param tmp_reg_no 第三方寄存器
 void ILocRiscV64::store_var(int src_reg_no, Value * dest_var, int tmp_reg_no)
 {
+	auto it = regAllocMap.find(dest_var);
+	store_var(src_reg_no, dest_var, tmp_reg_no, it != regAllocMap.end() ? it->second : RegAllocInfo{});
+}
+
+void ILocRiscV64::store_var(int src_reg_no, Value * dest_var, int tmp_reg_no, const RegAllocInfo & info)
+{
 	Type * valueType = memoryObjectType(dest_var);
 	const bool wide = valueType->isPointerType();
 	if (Instanceof(globalVar, GlobalVariable *, dest_var)) {
@@ -573,19 +588,17 @@ void ILocRiscV64::store_var(int src_reg_no, Value * dest_var, int tmp_reg_no)
 		emit(wide ? "sd" : "sw", PlatformRiscV64::regName[src_reg_no], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
 
 	} else {
-		// 局部变量/临时变量/形参：通过regAllocMap查找分配信息
-		auto it = regAllocMap.find(dest_var);
-		if (it != regAllocMap.end() && it->second.hasReg()) {
+		if (info.hasReg()) {
 			// 分配了寄存器，直接mov
-			int dest_reg_id = it->second.regId;
+			int dest_reg_id = info.regId;
 			if (src_reg_no != dest_reg_id) {
 				emit("mv", PlatformRiscV64::regName[dest_reg_id], PlatformRiscV64::regName[src_reg_no]);
 			}
-		} else if (it != regAllocMap.end() && it->second.hasFloatReg()) {
-			emit("fmv.w.x", PlatformRiscV64::fpRegName[it->second.regId], PlatformRiscV64::regName[src_reg_no]);
-		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
+		} else if (info.hasFloatReg()) {
+			emit("fmv.w.x", PlatformRiscV64::fpRegName[info.regId], PlatformRiscV64::regName[src_reg_no]);
+		} else if (info.hasStackSlot) {
 			// 在栈上分配了空间，存储到栈
-			store_base(src_reg_no, it->second.baseRegId, it->second.offset, tmp_reg_no, wide);
+			store_base(src_reg_no, info.baseRegId, info.offset, tmp_reg_no, wide);
 		} else {
 			minic_log(LOG_ERROR, "ILocRiscV64::store_var: 未找到变量分配信息");
 		}
@@ -597,20 +610,25 @@ void ILocRiscV64::store_var(int src_reg_no, Value * dest_var, int tmp_reg_no)
 /// 目标可能是FPR、GPR位模式、栈槽或全局变量，按RegAllocInfo选择路径。
 void ILocRiscV64::store_float_var(int fs_reg_no, Value * dest_var, int tmp_reg_no)
 {
+	auto it = regAllocMap.find(dest_var);
+	store_float_var(fs_reg_no, dest_var, tmp_reg_no, it != regAllocMap.end() ? it->second : RegAllocInfo{});
+}
+
+void ILocRiscV64::store_float_var(int fs_reg_no, Value * dest_var, int tmp_reg_no, const RegAllocInfo & info)
+{
 	if (Instanceof(globalVar, GlobalVariable *, dest_var)) {
 		load_symbol(tmp_reg_no, globalVar->getName());
 		emit("fsw", PlatformRiscV64::fpRegName[fs_reg_no], "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
 
 	} else {
-		auto it = regAllocMap.find(dest_var);
-		if (it != regAllocMap.end() && it->second.hasFloatReg()) {
-			if (fs_reg_no != it->second.regId) {
-				fmov_reg(it->second.regId, fs_reg_no);
+		if (info.hasFloatReg()) {
+			if (fs_reg_no != info.regId) {
+				fmov_reg(info.regId, fs_reg_no);
 			}
-		} else if (it != regAllocMap.end() && it->second.hasReg()) {
-			emit("fmv.x.w", PlatformRiscV64::regName[it->second.regId], PlatformRiscV64::fpRegName[fs_reg_no]);
-		} else if (it != regAllocMap.end() && it->second.hasStackSlot) {
-			store_float_base(fs_reg_no, it->second.baseRegId, it->second.offset, tmp_reg_no);
+		} else if (info.hasReg()) {
+			emit("fmv.x.w", PlatformRiscV64::regName[info.regId], PlatformRiscV64::fpRegName[fs_reg_no]);
+		} else if (info.hasStackSlot) {
+			store_float_base(fs_reg_no, info.baseRegId, info.offset, tmp_reg_no);
 		} else {
 			minic_log(LOG_ERROR, "ILocRiscV64::store_float_var: 未找到变量分配信息");
 		}
@@ -676,6 +694,20 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 			load_imm(tmp_reg_no, offset);
 			emit("add", PlatformRiscV64::regName[tmp_reg_no], "sp", PlatformRiscV64::regName[tmp_reg_no]);
 			emit("sd", regName, "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
+		}
+	}
+
+	// 保存callee-saved FPR到栈帧（紧随GPR保存区之后）
+	// 使用fsd指令保存双精度浮点值（RISC-V64使用fsd/fld）
+	for (int i = 0; i < static_cast<int>(savedFPRs.size()); ++i) {
+		int offset = currentFrameSize - (static_cast<int>(savedRegs.size()) + i + 1) * 8;
+		const std::string & fpReg = PlatformRiscV64::fpRegName[savedFPRs[i]];
+		if (PlatformRiscV64::isDisp(offset)) {
+			emit("fsd", fpReg, std::to_string(offset) + "(sp)");
+		} else {
+			load_imm(tmp_reg_no, offset);
+			emit("add", PlatformRiscV64::regName[tmp_reg_no], "sp", PlatformRiscV64::regName[tmp_reg_no]);
+			emit("fsd", fpReg, "0(" + PlatformRiscV64::regName[tmp_reg_no] + ")");
 		}
 	}
 

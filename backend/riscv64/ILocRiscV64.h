@@ -142,6 +142,9 @@ class ILocRiscV64 {
 	/// @brief 当前函数需要在栈帧中保存的callee-saved寄存器
 	std::vector<int> savedRegs;
 
+	/// @brief 当前函数需要在栈帧中保存的callee-saved FPR
+	std::vector<int> savedFPRs;
+
 	/// @brief 机器指令计数器（每次emit递增）
 	int machineInstCount = 0;
 
@@ -189,6 +192,18 @@ public:
 	const std::vector<int> & getSavedRegs() const
 	{
 		return savedRegs;
+	}
+
+	/// @brief 设置当前函数需要保存的callee-saved FPR
+	void setSavedFPRs(const std::vector<int> & fprs)
+	{
+		savedFPRs = fprs;
+	}
+
+	/// @brief 获取当前函数需要保存的callee-saved FPR
+	const std::vector<int> & getSavedFPRs() const
+	{
+		return savedFPRs;
 	}
 
 	/// @brief 注释指令，RISCV64使用#作为注释符
@@ -252,9 +267,11 @@ public:
 	/// @param rs_reg_no 结果寄存器
 	/// @param src_var 源操作数（Value*）
 	void load_var(int rs_reg_no, Value * src_var);
+	void load_var(int rs_reg_no, Value * src_var, const RegAllocInfo & info);
 
 	/// @brief 加载float变量到浮点寄存器
 	void load_float_var(int fd_reg_no, Value * src_var, int tmp_reg_no);
+	void load_float_var(int fd_reg_no, Value * src_var, int tmp_reg_no, const RegAllocInfo & info);
 
 	/// @brief 加载变量地址到寄存器
 	/// @param rs_reg_no 结果寄存器
@@ -273,9 +290,11 @@ public:
 	/// @param dest_var 目标变量（Value*）
 	/// @param tmp_reg_no 临时寄存器编号
 	void store_var(int src_reg_no, Value * dest_var, int tmp_reg_no);
+	void store_var(int src_reg_no, Value * dest_var, int tmp_reg_no, const RegAllocInfo & info);
 
 	/// @brief 保存浮点寄存器到float变量
 	void store_float_var(int fs_reg_no, Value * dest_var, int tmp_reg_no);
+	void store_float_var(int fs_reg_no, Value * dest_var, int tmp_reg_no, const RegAllocInfo & info);
 
 	/// @brief 寄存器Mov操作 mv rd, rs
 	/// @param rs_reg_no 结果寄存器
