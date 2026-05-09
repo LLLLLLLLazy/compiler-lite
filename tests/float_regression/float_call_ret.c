@@ -28,16 +28,41 @@ int main()
     float a;
     float b;
     float c;
+    int cmp;
 
     a = abs_like(-1.25);
     b = keep_positive(-0.5);
     c = keep_positive(0.75);
 
-    check(a > 1.2, 1);
-    check(a < 1.3, 1);
-    check(b == 0.0, 1);
-    check(c > 0.7, 1);
-    check(c < 0.8, 1);
+    cmp = 0;
+    if (a > 1.2) {
+        cmp = 1;
+    }
+    check(cmp, 1);
+
+    cmp = 0;
+    if (a < 1.3) {
+        cmp = 1;
+    }
+    check(cmp, 1);
+
+    cmp = 0;
+    if (b == 0.0) {
+        cmp = 1;
+    }
+    check(cmp, 1);
+
+    cmp = 0;
+    if (c > 0.7) {
+        cmp = 1;
+    }
+    check(cmp, 1);
+
+    cmp = 0;
+    if (c < 0.8) {
+        cmp = 1;
+    }
+    check(cmp, 1);
 
     return fail;
 }
