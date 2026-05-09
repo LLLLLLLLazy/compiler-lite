@@ -1,9 +1,29 @@
-build/
-build-merge/
-frontend/antlr4/.antlr/
-
-.DS_Store
-.cache/
+# 忽略根目录下的所有文件和目录
+/.codeartsdoer/
+/.gitattributes
+/.github/
+/.vscode/
+/CMake/
+/CMakeLists.txt
+/CMakePresets-vs.json
+/Doxygen.config
+/LICENSE
+/README.md
+/build/
+/build-ci/
+/build-local/
+/build-merge/
+/compiler-lite-source.zip
+/docs/
+/output.ir
+/test
+/test.s
+/tests/
+/thirdparty/
+/tools/
+/常用命令.md
+/归档.zip
+/测试结果说明.md
 
 # 编译产物
 *.o
@@ -17,5 +37,6 @@ minic
 *.zip
 *.tgz
 
-# 测试文件
-tests/
+# 系统文件
+.DS_Store
+.cache/
