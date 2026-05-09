@@ -81,7 +81,8 @@ public:
 		const std::vector<int> & pool,
 		const std::unordered_map<Value *, RegAllocInfo> & allocMap,
 		const std::map<Instruction *, int> & instNumbering,
-		const std::unordered_map<Value *, std::pair<int, int>> & valueLiveRanges);
+		const std::unordered_map<Value *, std::pair<int, int>> & valueLiveRanges,
+		const std::unordered_map<int, std::vector<std::pair<int, int>>> & allocatedRegLiveRanges);
 
 	/// @brief 为当前指令借用一个空闲物理寄存器
 	/// @param inst 当前正在翻译的IR指令

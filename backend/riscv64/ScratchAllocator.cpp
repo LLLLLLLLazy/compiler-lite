@@ -16,6 +16,7 @@ void ScratchAllocator::allocate(
 	std::vector<ScratchValue> & scratchValues,
 	const std::unordered_map<Value *, RegAllocInfo> & allocMap,
 	const std::unordered_map<Value *, std::pair<int, int>> & valueLiveRanges,
+	const std::unordered_map<int, std::vector<std::pair<int, int>>> & allocatedRegLiveRanges,
 	const std::map<Instruction *, int> & instNumbering,
 	const std::unordered_map<Instruction *, std::pair<int, int>> & instToMIRange,
 	const std::vector<int> & _availRegs)
@@ -45,21 +46,10 @@ void ScratchAllocator::allocate(
 	}
 
 	// 构建每个物理寄存器的机器指令活跃范围
-	// 对每个分配了物理寄存器的IR值V:
-	//   V的IR活跃范围 = [irStart, irEnd)
+	// 优先使用位置敏感分配器给出的 reg -> IR 活跃段。
 	//   V的机器指令活跃范围 = irNumToMIRange[irStart..irEnd-1] 的并集
 	regIRLiveRanges.clear();
-	for (const auto & [value, info] : allocMap) {
-		if (!info.hasReg()) {
-			continue;
-		}
-		auto vlrIt = valueLiveRanges.find(value);
-		if (vlrIt == valueLiveRanges.end()) {
-			continue;
-		}
-		int irStart = vlrIt->second.first;
-		int irEnd = vlrIt->second.second;
-
+	auto addRegLiveRange = [&](int reg, int irStart, int irEnd) {
 		// 收集 [irStart, irEnd) 范围内所有IR指令的机器指令范围
 		int miStart = -1;
 		int miEnd = -1;
@@ -78,7 +68,26 @@ void ScratchAllocator::allocate(
 		}
 
 		if (miStart >= 0 && miEnd > miStart) {
-			regIRLiveRanges[info.regId].push_back({miStart, miEnd});
+			regIRLiveRanges[reg].push_back({miStart, miEnd});
+		}
+	};
+
+	if (!allocatedRegLiveRanges.empty()) {
+		for (const auto & [reg, ranges] : allocatedRegLiveRanges) {
+			for (const auto & [irStart, irEnd] : ranges) {
+				addRegLiveRange(reg, irStart, irEnd);
+			}
+		}
+	} else {
+		for (const auto & [value, info] : allocMap) {
+			if (!info.hasReg()) {
+				continue;
+			}
+			auto vlrIt = valueLiveRanges.find(value);
+			if (vlrIt == valueLiveRanges.end()) {
+				continue;
+			}
+			addRegLiveRange(info.regId, vlrIt->second.first, vlrIt->second.second);
 		}
 	}
 

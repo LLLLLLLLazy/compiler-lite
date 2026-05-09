@@ -67,10 +67,19 @@ LocalTempManager::LocalTempManager(
 	const std::vector<int> & globalPool,
 	const std::unordered_map<Value *, RegAllocInfo> & _allocMap,
 	const std::map<Instruction *, int> & _instNumbering,
-	const std::unordered_map<Value *, std::pair<int, int>> & _valueLiveRanges)
+	const std::unordered_map<Value *, std::pair<int, int>> & _valueLiveRanges,
+	const std::unordered_map<int, std::vector<std::pair<int, int>>> & allocatedRegLiveRanges)
 	: pool(buildScratchPool(globalPool)), allocMap(_allocMap), instNumbering(_instNumbering),
 	  valueLiveRanges(_valueLiveRanges)
 {
+	if (!allocatedRegLiveRanges.empty()) {
+		regIntervals = allocatedRegLiveRanges;
+		for (auto & [reg, intervals] : regIntervals) {
+			std::sort(intervals.begin(), intervals.end());
+		}
+		return;
+	}
+
 	// 预建 reg → 活跃区间列表 反向索引，按 start 排序
 	for (const auto & [value, info] : allocMap) {
 		if (!info.hasReg()) continue;

@@ -38,6 +38,7 @@ public:
 		std::vector<ScratchValue> & scratchValues,
 		const std::unordered_map<Value *, RegAllocInfo> & allocMap,
 		const std::unordered_map<Value *, std::pair<int, int>> & valueLiveRanges,
+		const std::unordered_map<int, std::vector<std::pair<int, int>>> & allocatedRegLiveRanges,
 		const std::map<Instruction *, int> & instNumbering,
 		const std::unordered_map<Instruction *, std::pair<int, int>> & instToMIRange,
 		const std::vector<int> & availRegs);
