@@ -11,6 +11,7 @@
 #include "CodeGeneratorRiscV64.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -128,7 +129,10 @@ bool hasCallInst(Function * func)
 /// - 若函数包含调用指令，则必须保存ra（返回地址）
 /// - 始终保存s0（帧指针，后端固定使用s0作为FP）
 /// - 对于s1-s11（编号9,18-27），仅当寄存器分配器实际使用了该寄存器时才保存
-std::vector<int> computeSavedRegs(Function * func, const std::unordered_map<Value *, RegAllocInfo> & allocMap)
+std::vector<int> computeSavedRegs(
+	Function * func,
+	const std::unordered_map<Value *, RegAllocInfo> & allocMap,
+	const std::unordered_map<int, std::vector<std::pair<int, int>>> & allocatedGprLiveRanges)
 {
 	std::vector<int> regs;
 	if (hasCallInst(func)) {
@@ -151,6 +155,9 @@ std::vector<int> computeSavedRegs(Function * func, const std::unordered_map<Valu
 				used = true;
 				break;
 			}
+		}
+		if (!used && allocatedGprLiveRanges.find(reg) != allocatedGprLiveRanges.end()) {
+			used = true;
 		}
 		if (used) {
 			regs.push_back(reg);
@@ -183,7 +190,12 @@ bool canOmitLeafFrame(Function * func,
 
 /// @brief 构造函数
 /// @param _module 待编译的IR模块
-CodeGeneratorRiscV64::CodeGeneratorRiscV64(Module * _module) : CodeGeneratorAsm(_module)
+CodeGeneratorRiscV64::CodeGeneratorRiscV64(Module * _module,
+                                           bool enableCalleeSavedFPR,
+                                           bool enableCoalesce,
+                                           bool enableSplit)
+	: CodeGeneratorAsm(_module),
+	  greedyAllocator(nullptr, enableCalleeSavedFPR, enableCoalesce, enableSplit)
 {}
 
 /// @brief 生成汇编文件头部，输出RISC-V64架构属性
@@ -252,17 +264,35 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 {
 	// 执行寄存器分配
 	registerAllocation(func);
+	if (std::getenv("MINIC_RA_STATS") != nullptr) {
+		const auto & s = greedyAllocator.getStats();
+		std::fprintf(stderr,
+		             "[ra-stats] %s assigned=%d(gpr=%d,fpr=%d) spilledIntervals=%d spilledValues=%d "
+		             "reloads~=%d stores~=%d copies=%d splits=%d\n",
+		             func->getName().c_str(),
+		             s.assignedRegIntervals,
+		             s.assignedGprIntervals,
+		             s.assignedFprIntervals,
+		             s.spilledIntervals,
+		             s.spilledValues,
+		             s.estimatedReloads,
+		             s.estimatedSpillStores,
+		             s.eliminatedCopies,
+		             s.splitCount);
+	}
 	// 创建底层汇编序列，设置寄存器分配信息和栈帧大小
 	ILocRiscV64 iloc(module);
 	iloc.setRegAllocMap(greedyAllocator.getAllocationMap());
 	// 设置当前函数需要保存的callee-saved寄存器列表
 	iloc.setSavedRegs(currentSavedRegs);
+	iloc.setSavedFPRs(currentSavedFPRs);
 	iloc.setFrameSize(greedyAllocator.getFrameSize());
 
 	// 执行指令选择，将IR翻译为RISC-V64汇编指令
 	// 指令选择过程中创建ScratchValue（虚拟寄存器）
 	InstSelectorRiscV64 instSelector(func, iloc, greedyAllocator);
 	instSelector.setShowLinearIR(showLinearIR);
+	instSelector.setEliminatedCopies(greedyAllocator.getEliminatedCopies());
 	instSelector.run();
 
 	// Scratch寄存器分配：为ScratchValue分配物理寄存器
@@ -273,6 +303,7 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 			scratchValues,
 			greedyAllocator.getAllocationMap(),
 			greedyAllocator.getValueLiveRanges(),
+			greedyAllocator.getAllocatedGprLiveRanges(),
 			greedyAllocator.getInstNumbering(),
 			iloc.getInstToMIRange(),
 			greedyAllocator.getAvailableRegs());
@@ -321,6 +352,19 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 
 	// 调试模式下输出每个IR值的寄存器/栈位置映射
 	if (showLinearIR) {
+		const auto & s = greedyAllocator.getStats();
+		std::fprintf(fp,
+		             "\t# RA stats: assigned=%d(gpr=%d,fpr=%d) spilledIntervals=%d spilledValues=%d "
+		             "reloads~=%d stores~=%d copies=%d splits=%d\n",
+		             s.assignedRegIntervals,
+		             s.assignedGprIntervals,
+		             s.assignedFprIntervals,
+		             s.spilledIntervals,
+		             s.spilledValues,
+		             s.estimatedReloads,
+		             s.estimatedSpillStores,
+		             s.eliminatedCopies,
+		             s.splitCount);
 		for (auto & [val, info]: greedyAllocator.getAllocationMap()) {
 			(void) info;
 			std::string str;
@@ -351,13 +395,18 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 	adjustFuncCallInsts(func);
 	adjustFormalParamInsts(func);
 	// 计算当前函数需要保存的callee-saved寄存器列表
-	currentSavedRegs = computeSavedRegs(func, greedyAllocator.getAllocationMap());
+	currentSavedRegs = computeSavedRegs(func,
+	                                    greedyAllocator.getAllocationMap(),
+	                                    greedyAllocator.getAllocatedGprLiveRanges());
+	// 收集被使用的callee-saved FPR
+	currentSavedFPRs = greedyAllocator.getUsedCalleeSavedFPRs();
 	// 为未分配寄存器和溢出的变量分配栈槽
 	stackAlloc(func);
 	if (canOmitLeafFrame(func,
 	                     greedyAllocator.getAllocationMap(),
 	                     currentSavedRegs,
-	                     greedyAllocator.getOutgoingArgBytes())) {
+	                     greedyAllocator.getOutgoingArgBytes()) &&
+	    currentSavedFPRs.empty()) {
 		currentSavedRegs.clear();
 		greedyAllocator.setFrameSize(0);
 	}
@@ -375,8 +424,8 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 void CodeGeneratorRiscV64::stackAlloc(Function * func)
 {
 	auto & allocMap = greedyAllocator.getAllocationMap();
-	// 根据实际保存的callee-saved寄存器数量计算栈帧占用字节数
-	const int savedFrameBytes = static_cast<int>(currentSavedRegs.size()) * 8;
+	// 根据实际保存的callee-saved寄存器数量计算栈帧占用字节数（GPR + FPR）
+	const int savedFrameBytes = static_cast<int>(currentSavedRegs.size() + currentSavedFPRs.size()) * 8;
 
 	int localBytes = 0;
 	// 为Value分配栈槽，偏移量相对于FP寄存器为负方向
