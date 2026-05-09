@@ -47,6 +47,13 @@ public:
 		showLinearIR = show;
 	}
 
+	/// @brief 设置被寄存器合并消除的 copy 指令集合
+	/// @param copies 被消除的 copy 指令集合
+	void setEliminatedCopies(const std::unordered_set<Instruction *> & copies)
+	{
+		eliminatedCopies_ = copies;
+	}
+
 	/// @brief 获取所有创建的scratch值
 	std::vector<ScratchValue> & getScratchValues() { return tempMgr.getScratchValues(); }
 
@@ -91,6 +98,12 @@ private:
 	/// @brief 根据指令操作码分派到对应的翻译函数
 	/// @param inst IR指令
 	void translate(Instruction * inst);
+
+	/// @brief 在当前指令前插入 split 边界搬运
+	void emitSplitTransfersBefore(Instruction * inst);
+
+	/// @brief 按指定分配信息搬运同一个 Value
+	void emitSplitTransfer(Value * value, const RegAllocInfo & from, const RegAllocInfo & to, Instruction * inst);
 
 	/// @brief 输出IR指令的文本表示（调试用）
 	/// @param inst IR指令
@@ -193,6 +206,18 @@ private:
 	/// @brief 获取Value分配的浮点结果寄存器编号
 	int getFloatResultReg(Value * val) const;
 
+	/// @brief 获取 Value 在当前指令处的位置敏感分配信息
+	RegAllocInfo getAllocInfo(Value * val, Instruction * inst) const;
+
+	/// @brief 获取 Value 在指定指令编号处的位置敏感分配信息
+	RegAllocInfo getAllocInfoAt(Value * val, int instNum) const;
+
+	/// @brief 按位置敏感分配信息加载/保存 Value
+	void loadValueToReg(int reg, Value * val, Instruction * inst);
+	void loadFloatValueToReg(int reg, Value * val, int tmpReg, Instruction * inst);
+	void storeValueFromReg(Value * val, int srcReg, int tmpReg, Instruction * inst);
+	void storeFloatValueFromReg(Value * val, int srcReg, int tmpReg, Instruction * inst);
+
 	/// @brief 获取只读操作数所在寄存器，必要时借用临时寄存器加载
 	/// @param val 操作数
 	/// @param inst 当前IR指令
@@ -258,4 +283,7 @@ private:
 
 	/// @brief 指令选择阶段当前借出的临时浮点寄存器集合
 	std::set<int> borrowedFloatTemps;
+
+	/// @brief 被寄存器合并消除的 copy 指令集合
+	std::unordered_set<Instruction *> eliminatedCopies_;
 };
