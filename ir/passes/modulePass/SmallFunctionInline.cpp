@@ -3,8 +3,8 @@
 /// @brief 保守的小函数内联优化 pass 实现。
 ///
 /// 对满足体积和结构约束的 callee 进行内联展开：
-///   - 冷路径叶子函数：较小阈值
-///   - 循环内热点调用点或单调用点叶子函数：按结构阈值适度放宽
+///   - 叶子函数（不调用其他用户函数）：最多 4 个基本块、18 条指令
+///   - 非叶子小函数（调用其他用户函数）：最多 8 个基本块、40 条指令
 /// 内联后删除 call 指令，将 callee 体复制到 caller 中，
 /// 用 phi 节点合并多个返回值，使后续 mem2reg/LICM/SCCP 能跨函数体优化。
 ///
@@ -15,7 +15,6 @@
 #include <cstdint>
 #include <iterator>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "AllocaInst.h"
@@ -44,18 +43,14 @@ namespace {
 
 /// @brief 内联最大轮次，防止无限循环
 constexpr int32_t kMaxInlineRounds = 256;
-/// @brief 冷路径叶子函数允许的最大基本块数
-constexpr int32_t kColdLeafMaxBlocks = 4;
-/// @brief 冷路径叶子函数允许的最大指令数
-constexpr int32_t kColdLeafMaxInsts = 32;
-/// @brief 循环内热点叶子函数允许的最大基本块数
-constexpr int32_t kHotLeafMaxBlocks = 8;
-/// @brief 循环内热点叶子函数允许的最大指令数
-constexpr int32_t kHotLeafMaxInsts = 96;
-/// @brief 单调用点叶子函数允许的最大基本块数
-constexpr int32_t kSingleCallLeafMaxBlocks = 8;
-/// @brief 单调用点叶子函数允许的最大指令数
-constexpr int32_t kSingleCallLeafMaxInsts = 128;
+/// @brief 叶子函数允许的最大基本块数
+constexpr int32_t kLeafMaxBlocks = 4;
+/// @brief 叶子函数允许的最大指令数
+constexpr int32_t kLeafMaxInsts = 18;
+/// @brief 非叶子小函数允许的最大基本块数
+constexpr int32_t kSmallMaxBlocks = 8;
+/// @brief 非叶子小函数允许的最大指令数
+constexpr int32_t kSmallMaxInsts = 40;
 /// @brief 被内联函数的 alloca 总字节数上限，防止栈帧膨胀
 constexpr int32_t kMaxAllocaBytes = 128;
 
@@ -341,28 +336,13 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
     int32_t blockCount = static_cast<int32_t>(callee->getBlocks().size());
     int32_t instCount = countInstructions(callee);
 
-    // 非叶子函数（调用了其他用户函数）不予内联，避免内联链过长
-    if (hasNonSelfUserCall(callee)) {
-        return false;
+    // 叶子函数（不调用其他用户函数）：使用更宽松的阈值
+    if (!hasNonSelfUserCall(callee)) {
+        return blockCount <= kLeafMaxBlocks && instCount <= kLeafMaxInsts;
     }
 
-    // 冷路径叶子函数：使用最保守的阈值
-    if (blockCount <= kColdLeafMaxBlocks && instCount <= kColdLeafMaxInsts) {
-        return true;
-    }
-
-    // 循环内热点调用点：适度放宽阈值，因为消除调用开销在循环中收益更大
-    if (callLoopDepth > 0 && blockCount <= kHotLeafMaxBlocks && instCount <= kHotLeafMaxInsts) {
-        return true;
-    }
-
-    // 单调用点叶子函数：内联后不会增加总体代码体积，可进一步放宽阈值
-    if (countDirectCallSites(mod, callee) == 1 && blockCount <= kSingleCallLeafMaxBlocks &&
-        instCount <= kSingleCallLeafMaxInsts) {
-        return true;
-    }
-
-    return false;
+    // 非叶子小函数：使用保守的阈值，允许内联体积较小的非叶子函数
+    return blockCount <= kSmallMaxBlocks && instCount <= kSmallMaxInsts;
 }
 
 /// @brief 克隆指令的外壳（不填充操作数），用于内联时复制 callee 指令
