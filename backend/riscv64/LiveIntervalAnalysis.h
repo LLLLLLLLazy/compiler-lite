@@ -48,6 +48,12 @@ public:
 	/// @return 干涉图指针
 	InterferenceGraph * getInterferenceGraph();
 
+	/// @brief 接管外部更新后的干涉图指针
+	///
+	/// 寄存器合并和活跃区间分裂会重建干涉图，并自行释放旧图。
+	/// 分析器只需要在析构时释放当前最新图，不能再释放旧指针。
+	void adoptInterferenceGraph(InterferenceGraph * graph);
+
 	/// @brief 获取Value到LiveInterval索引的映射
 	/// @return Value* -> interval索引的映射
 	const std::unordered_map<Value *, int> & getValueToIntervalMap() const;

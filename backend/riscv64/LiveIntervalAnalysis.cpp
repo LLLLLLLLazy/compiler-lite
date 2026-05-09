@@ -120,6 +120,12 @@ InterferenceGraph * LiveIntervalAnalysis::getInterferenceGraph()
 	return interferenceGraph;
 }
 
+/// @brief 接管外部更新后的干涉图指针
+void LiveIntervalAnalysis::adoptInterferenceGraph(InterferenceGraph * graph)
+{
+	interferenceGraph = graph;
+}
+
 /// @brief 获取Value到LiveInterval索引的映射
 const std::unordered_map<Value *, int> & LiveIntervalAnalysis::getValueToIntervalMap() const
 {
