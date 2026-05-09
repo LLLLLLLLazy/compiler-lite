@@ -121,6 +121,12 @@ set(BACKEND_SRCS
 	backend/riscv64/ScratchAllocator.h
 	backend/riscv64/RiscV64Peephole.cpp
 	backend/riscv64/RiscV64Peephole.h
+	backend/riscv64/CalleeSavedFPREnabler.cpp
+	backend/riscv64/CalleeSavedFPREnabler.h
+	backend/riscv64/RegCoalescer.cpp
+	backend/riscv64/RegCoalescer.h
+	backend/riscv64/LiveIntervalSplitter.cpp
+	backend/riscv64/LiveIntervalSplitter.h
 )
 
 # 中间IR(ir)源代码集合
