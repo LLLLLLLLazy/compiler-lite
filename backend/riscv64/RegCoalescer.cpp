@@ -138,14 +138,6 @@ void RegCoalescer::mergeIntervals(Value * src, Value * dst,
 InterferenceGraph * RegCoalescer::rebuildInterferenceGraph(
 	const std::vector<LiveInterval *> & intervals)
 {
-	// 计算有效区间数
-	int numValid = 0;
-	for (auto * interval : intervals) {
-		if (interval != nullptr && interval->getVReg() != nullptr) {
-			++numValid;
-		}
-	}
-
 	auto * graph = new InterferenceGraph(static_cast<int>(intervals.size()));
 
 	// 遍历所有区间对，检查是否干涉

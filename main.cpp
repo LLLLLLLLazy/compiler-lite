@@ -93,6 +93,21 @@ static int gOptLevel = 0;
 static std::string gCPUTarget = "RISCV64";
 
 ///
+/// @brief 启用 callee-saved FPR
+///
+static bool gRACalleeSavedFPR = true;
+
+///
+/// @brief 启用寄存器合并
+///
+static bool gRACoalesce = true;
+
+///
+/// @brief 启用活跃区间分裂
+///
+static bool gRASplit = true;
+
+///
 /// @brief 输入源文件
 ///
 static std::string gInputFile;
@@ -115,6 +130,9 @@ static struct option long_options[] = {
 	{"target", required_argument, nullptr, 't'},
 	{"asmir", no_argument, nullptr, 'c'},
 	{"dom", no_argument, nullptr, 'm'},
+	{"ra-callee-saved-fpr", no_argument, nullptr, 'F'},
+	{"ra-coalesce", no_argument, nullptr, 'C'},
+	{"ra-split", no_argument, nullptr, 'P'},
 	{nullptr, 0, nullptr, 0}};
 
 /// @brief 显示帮助
@@ -135,6 +153,9 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -t, --target=CPU           Specify target CPU architecture\n";
 	std::cout << "  -c, --asmir                Show IR instructions as comments in assembly output\n";
 	std::cout << "  --dom                      Output dominator tree and dominance frontier\n";
+	std::cout << "  --ra-callee-saved-fpr      Enable callee-saved FPR (fs0-fs11) for register allocation\n";
+	std::cout << "  --ra-coalesce              Enable register coalescing to eliminate redundant copies\n";
+	std::cout << "  --ra-split                 Enable live interval splitting to reduce spills\n";
 }
 
 /// @brief 参数解析与有效性检查
@@ -153,7 +174,7 @@ static int ArgsAnalysis(int argc, char * argv[])
 	// -O要求必须带有附加参数，仅支持0(关闭优化)和1(开启优化)
 	// -t要求必须带有目标CPU，指明目标CPU的汇编
 	// -c选项在输出汇编时有效，附带输出IR指令内容
-	const char options[] = "ho:STIADLO:t:cm";
+	const char options[] = "ho:STIADLO:t:cmFCP";
 	int option_index = 0;
 
 	opterr = 1;
@@ -211,6 +232,15 @@ lb_check:
 				break;
 			case 'm':
 				gShowDomInfo = true;
+				break;
+			case 'F':
+				gRACalleeSavedFPR = true;
+				break;
+			case 'C':
+				gRACoalesce = true;
+				break;
+			case 'P':
+				gRASplit = true;
 				break;
 			default:
 				return -1;
@@ -366,7 +396,7 @@ static int compile(std::string inputFile, std::string outputFile)
 			result = domFile.good() ? 0 : -1;
 			break;
 		}
-
+		
 		// LLVM IR 优化
 		if (gOptLevel > 0) {
 			PassManager passManager(module);
@@ -432,7 +462,7 @@ static int compile(std::string inputFile, std::string outputFile)
 		}
 
 		// 使用RISCV64代码生成器生成汇编
-		CodeGeneratorRiscV64 generator(module);
+		CodeGeneratorRiscV64 generator(module, gRACalleeSavedFPR, gRACoalesce, gRASplit);
 		generator.setShowLinearIR(gAsmAlsoShowIR);
 		if (!generator.run(asmOutputFile)) {
 			minic_log(LOG_ERROR, "RISCV64汇编生成错误");
