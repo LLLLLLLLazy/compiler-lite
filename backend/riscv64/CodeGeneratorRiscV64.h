@@ -16,7 +16,13 @@ class CodeGeneratorRiscV64 : public CodeGeneratorAsm {
 public:
 	/// @brief 构造函数
 	/// @param module 待编译的IR模块
-	explicit CodeGeneratorRiscV64(Module * module);
+	/// @param enableCalleeSavedFPR 是否启用 callee-saved FPR
+	/// @param enableCoalesce 是否启用寄存器合并
+	/// @param enableSplit 是否启用活跃区间分裂
+	explicit CodeGeneratorRiscV64(Module * module,
+	                             bool enableCalleeSavedFPR = false,
+	                             bool enableCoalesce = false,
+	                             bool enableSplit = false);
 	~CodeGeneratorRiscV64() override = default;
 	using CodeGenerator::run;
 
@@ -58,4 +64,7 @@ private:
 
 	/// @brief 当前函数需要保存的callee-saved寄存器编号
 	std::vector<int> currentSavedRegs;
+
+	/// @brief 当前函数需要保存的callee-saved FPR编号
+	std::vector<int> currentSavedFPRs;
 };
