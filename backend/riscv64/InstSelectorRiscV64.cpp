@@ -107,6 +107,15 @@ struct RegMove {
 	int dst = -1;
 };
 
+bool sameRegAllocInfo(const RegAllocInfo & lhs, const RegAllocInfo & rhs)
+{
+	return lhs.regId == rhs.regId &&
+	       lhs.baseRegId == rhs.baseRegId &&
+	       lhs.offset == rhs.offset &&
+	       lhs.hasStackSlot == rhs.hasStackSlot &&
+	       lhs.isFloatReg == rhs.isFloatReg;
+}
+
 /// @brief Hacker's Delight signed division magic参数。
 ///
 /// quotient = high32(n * multiplier) 经过符号修正和shift后得到。
@@ -221,7 +230,8 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	Function * _func, ILocRiscV64 & _iloc, GreedyRegAllocator & _allocator)
 	: func(_func), iloc(_iloc), allocator(_allocator)
 	, tempMgr(_allocator.getAvailableRegs(), _allocator.getAllocationMap(),
-	          _allocator.getInstNumbering(), _allocator.getValueLiveRanges())
+	          _allocator.getInstNumbering(), _allocator.getValueLiveRanges(),
+	          _allocator.getAllocatedGprLiveRanges())
 {
 	tempMgr.setILoc(&_iloc);
 	// 注册各IR操作码对应的翻译处理函数
@@ -288,6 +298,7 @@ void InstSelectorRiscV64::run()
 
 		iloc.label(blockLabel(bb));
 		for (auto * inst: bb->getInstructions()) {
+			emitSplitTransfersBefore(inst);
 			if (!inst->isDead()) {
 				translate(inst);
 			}
@@ -318,6 +329,134 @@ void InstSelectorRiscV64::translate(Instruction * inst)
 	(this->*(handlerIt->second))(inst);
 	assert(tempMgr.allReleased());
 	iloc.recordMIRange(inst, miStart);
+}
+
+void InstSelectorRiscV64::emitSplitTransfersBefore(Instruction * inst)
+{
+	if (inst == nullptr) {
+		return;
+	}
+
+	auto instIt = allocator.getInstNumbering().find(inst);
+	if (instIt == allocator.getInstNumbering().end()) {
+		return;
+	}
+
+	const int instNum = instIt->second;
+	struct PendingTransfer {
+		Value * value;
+		RegAllocInfo from;
+		RegAllocInfo to;
+		RegAllocInfo stack;
+	};
+	std::vector<PendingTransfer> pending;
+	for (const auto & transfer : allocator.getSplitTransfers()) {
+		if (transfer.position != instNum || transfer.value == nullptr) {
+			continue;
+		}
+
+		RegAllocInfo from = allocator.getAllocationInfoAt(transfer.value, instNum - 1);
+		RegAllocInfo to = allocator.getAllocationInfoAt(transfer.value, instNum);
+		if (!sameRegAllocInfo(from, to)) {
+			auto stackIt = allocator.getAllocationMap().find(transfer.value);
+			RegAllocInfo stack = stackIt != allocator.getAllocationMap().end() ? stackIt->second : RegAllocInfo{};
+			pending.push_back({transfer.value, from, to, stack});
+		}
+	}
+
+	for (const auto & transfer : pending) {
+		if (transfer.stack.hasStackSlot) {
+			emitSplitTransfer(transfer.value, transfer.from, transfer.stack, inst);
+		} else {
+			emitSplitTransfer(transfer.value, transfer.from, transfer.to, inst);
+		}
+	}
+	for (const auto & transfer : pending) {
+		if (transfer.stack.hasStackSlot) {
+			emitSplitTransfer(transfer.value, transfer.stack, transfer.to, inst);
+		}
+	}
+}
+
+void InstSelectorRiscV64::emitSplitTransfer(
+	Value * value, const RegAllocInfo & from, const RegAllocInfo & to, Instruction * inst)
+{
+	if (value == nullptr || sameRegAllocInfo(from, to)) {
+		return;
+	}
+
+	const bool isFloat = value->getType() != nullptr && value->getType()->isFloatType();
+	if (isFloat) {
+		if (to.hasFloatReg()) {
+			if (from.hasFloatReg()) {
+				iloc.fmov_reg(to.regId, from.regId);
+			} else if (from.hasReg()) {
+				iloc.inst("fmv.w.x", PlatformRiscV64::fpRegName[to.regId], PlatformRiscV64::regName[from.regId]);
+			} else if (from.hasStackSlot) {
+				auto tmp = tempMgr.borrow(inst);
+				iloc.load_float_base(to.regId, from.baseRegId, from.offset, tmp.reg());
+			}
+			return;
+		}
+
+		if (to.hasReg()) {
+			if (from.hasFloatReg()) {
+				iloc.inst("fmv.x.w", PlatformRiscV64::regName[to.regId], PlatformRiscV64::fpRegName[from.regId]);
+			} else if (from.hasReg()) {
+				if (from.regId != to.regId) {
+					iloc.mov_reg(to.regId, from.regId);
+				}
+			} else if (from.hasStackSlot) {
+				iloc.load_base(to.regId, from.baseRegId, from.offset, false);
+			}
+			return;
+		}
+
+		if (to.hasStackSlot) {
+			if (from.hasFloatReg()) {
+				auto tmp = tempMgr.borrow(inst);
+				iloc.store_float_base(from.regId, to.baseRegId, to.offset, tmp.reg());
+			} else if (from.hasReg()) {
+				auto tmp = tempMgr.borrow(inst, from.regId);
+				iloc.store_base(from.regId, to.baseRegId, to.offset, tmp.reg(), false);
+			} else if (from.hasStackSlot) {
+				auto addrTmp = tempMgr.borrow(inst);
+				auto valueTmp = tempMgr.borrow(inst, addrTmp.reg());
+				iloc.load_base(valueTmp.reg(), from.baseRegId, from.offset, false);
+				iloc.store_base(valueTmp.reg(), to.baseRegId, to.offset, addrTmp.reg(), false);
+			}
+		}
+		return;
+	}
+
+	const bool wide = value->getType() != nullptr && value->getType()->isPointerType();
+	if (to.hasReg()) {
+		if (from.hasReg()) {
+			if (from.regId != to.regId) {
+				iloc.mov_reg(to.regId, from.regId);
+			}
+		} else if (from.hasFloatReg()) {
+			iloc.inst("fmv.x.w", PlatformRiscV64::regName[to.regId], PlatformRiscV64::fpRegName[from.regId]);
+		} else if (from.hasStackSlot) {
+			iloc.load_base(to.regId, from.baseRegId, from.offset, wide);
+		}
+		return;
+	}
+
+	if (to.hasStackSlot) {
+		if (from.hasReg()) {
+			auto tmp = tempMgr.borrow(inst, from.regId);
+			iloc.store_base(from.regId, to.baseRegId, to.offset, tmp.reg(), wide);
+		} else if (from.hasFloatReg()) {
+			auto tmp = tempMgr.borrow(inst);
+			iloc.store_float_base(from.regId, to.baseRegId, to.offset, tmp.reg());
+		} else if (from.hasStackSlot) {
+			auto valueTmp = tempMgr.borrow(inst);
+			auto addrTmp = tempMgr.borrow(inst, valueTmp.reg());
+			iloc.load_base(valueTmp.reg(), from.baseRegId, from.offset, wide);
+			iloc.store_base(valueTmp.reg(), to.baseRegId, to.offset, addrTmp.reg(), wide);
+		}
+	}
 }
 
 /// @brief 输出IR指令的文本表示作为注释（调试用）
@@ -462,7 +601,7 @@ void InstSelectorRiscV64::translate_gep(Instruction * inst)
 	}
 
 	auto idxTmp = tempMgr.borrow(inst, dstReg);
-	iloc.load_var(idxTmp.reg(), gepInst->getIndexOperand());
+	loadValueToReg(idxTmp.reg(), gepInst->getIndexOperand(), inst);
 
 	auto * basePtrType = dynamic_cast<const PointerType *>(basePtr->getType());
 	Type * stepType = const_cast<Type *>(basePtrType->getPointeeType());
@@ -1229,7 +1368,11 @@ void InstSelectorRiscV64::translate_ret(Instruction * inst)
 			}
 			releaseFloatOperand(value);
 		} else {
-			iloc.load_var(RISCV64_A0_REG_NO, retVal);
+			OperandReg value = loadOperand(retVal, inst, -1, RISCV64_A0_REG_NO);
+			if (value.reg != RISCV64_A0_REG_NO) {
+				iloc.mov_reg(RISCV64_A0_REG_NO, value.reg);
+			}
+			releaseOperand(value);
 		}
 	}
 
@@ -1322,12 +1465,12 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 			const AbiArgLoc & loc = argLocs[i];
 			if (loc.kind == AbiArgLocKind::FloatReg) {
 				const int destReg = 10 + loc.index;
-				auto allocIt = allocator.getAllocationMap().find(arg);
-				if (allocIt != allocator.getAllocationMap().end() && allocIt->second.hasFloatReg()) {
-					if (allocIt->second.regId != destReg) {
+				RegAllocInfo argInfo = getAllocInfo(arg, inst);
+				if (argInfo.hasFloatReg()) {
+					if (argInfo.regId != destReg) {
 						floatRegMoves.push_back(FloatRegMove{
 							FloatRegMove::SourceKind::FloatReg,
-							allocIt->second.regId,
+							argInfo.regId,
 							destReg,
 						});
 					}
@@ -1335,14 +1478,14 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 					deferredFloatLoads.push_back({arg, destReg});
 				}
 			} else if (loc.kind == AbiArgLocKind::Stack) {
-				auto allocIt = allocator.getAllocationMap().find(arg);
-				if (allocIt != allocator.getAllocationMap().end() && allocIt->second.hasFloatReg()) {
+				RegAllocInfo argInfo = getAllocInfo(arg, inst);
+				if (argInfo.hasFloatReg()) {
 					auto tmp = tempMgr.borrow(inst);
-					iloc.store_float_base(allocIt->second.regId, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg());
+					iloc.store_float_base(argInfo.regId, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg());
 				} else {
 					const int tmpFpr = borrowFloatTemp(inst);
 					auto tmp = tempMgr.borrow(inst);
-					iloc.load_float_var(tmpFpr, arg, tmp.reg());
+					iloc.load_float_var(tmpFpr, arg, tmp.reg(), argInfo);
 					iloc.store_float_base(tmpFpr, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg());
 					releaseFloatTemp(tmpFpr);
 				}
@@ -1360,7 +1503,7 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 
 		for (const auto & [arg, destReg] : deferredFloatLoads) {
 			auto tmp = tempMgr.borrow(inst);
-			iloc.load_float_var(destReg, arg, tmp.reg());
+			loadFloatValueToReg(destReg, arg, tmp.reg(), inst);
 		}
 
 		for (int i = 0; i < call->getArgCount(); ++i) {
@@ -1375,7 +1518,7 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 				continue;
 			}
 			if (loc.kind == AbiArgLocKind::IntReg) {
-				iloc.load_var(RISCV64_A0_REG_NO + loc.index, arg);
+				loadValueToReg(RISCV64_A0_REG_NO + loc.index, arg, inst);
 			} else if (loc.kind == AbiArgLocKind::Stack) {
 				OperandReg value = loadOperand(arg, inst);
 				auto tmp = tempMgr.borrow(inst, value.reg);
@@ -1440,6 +1583,11 @@ void InstSelectorRiscV64::translate_copy(Instruction * inst)
 {
 	auto * copy = dynamic_cast<CopyInst *>(inst);
 	if (copy == nullptr) {
+		return;
+	}
+
+	// 跳过已被寄存器合并消除的 copy 指令
+	if (eliminatedCopies_.find(inst) != eliminatedCopies_.end()) {
 		return;
 	}
 
@@ -1508,7 +1656,6 @@ void InstSelectorRiscV64::emitFloatRegMoves(std::vector<FloatRegMove> & regMoves
 void InstSelectorRiscV64::emitFormalParamMoves()
 {
 	auto & params = func->getParams();
-	auto & allocMap = allocator.getAllocationMap();
 	std::vector<AbiArgLoc> paramLocs;
 	paramLocs.reserve(params.size());
 
@@ -1534,9 +1681,9 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 	}
 	// 收集寄存器分配器为目标分配的所有寄存器
 	for (auto * param : params) {
-		auto it = allocMap.find(param);
-		if (it != allocMap.end() && it->second.hasReg()) {
-			blockedRegs.insert(it->second.regId);
+		RegAllocInfo info = getAllocInfoAt(param, 0);
+		if (info.hasReg()) {
+			blockedRegs.insert(info.regId);
 		}
 	}
 
@@ -1546,30 +1693,25 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 
 	// 先处理整数入参，避免后续float形参落到a0-a7时覆盖尚未搬走的整数实参。
 	{
-		int intIdx = 0;
-		for (auto * param : params) {
-			auto it = allocMap.find(param);
-			if (it == allocMap.end()) {
-				continue;
-			}
-
+		for (std::size_t pi = 0; pi < params.size(); ++pi) {
+			auto * param = params[pi];
 			if (param->getType()->isFloatType()) {
 				continue;
 			}
 
-			if (intIdx < 8) {
-				const int incomingReg = RISCV64_A0_REG_NO + intIdx;
-				if (it->second.hasReg()) {
-					if (it->second.regId != incomingReg) {
-						regMoves.push_back(RegMove{incomingReg, it->second.regId});
+			const AbiArgLoc & loc = paramLocs[pi];
+			RegAllocInfo info = getAllocInfoAt(param, 0);
+			if (loc.kind == AbiArgLocKind::IntReg) {
+				const int incomingReg = RISCV64_A0_REG_NO + loc.index;
+				if (info.hasReg()) {
+					if (info.regId != incomingReg) {
+						regMoves.push_back(RegMove{incomingReg, info.regId});
 					}
-				} else if (it->second.hasStackSlot) {
-					iloc.store_base(incomingReg, it->second.baseRegId, it->second.offset,
+				} else if (info.hasStackSlot) {
+					iloc.store_base(incomingReg, info.baseRegId, info.offset,
 					                scratchReg, param->getType()->isPointerType());
 				}
 			}
-			// 栈传整数参数已在 fp+offset 处，无需复制
-			intIdx++;
 		}
 	}
 
@@ -1608,42 +1750,76 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 		}
 	}
 
+	// 栈传整数参数在 a0-a7 全部落位后再搬运，避免覆盖尚未处理的入参寄存器。
+	for (std::size_t pi = 0; pi < params.size(); ++pi) {
+		auto * param = params[pi];
+		if (param->getType()->isFloatType() || paramLocs[pi].kind != AbiArgLocKind::Stack) {
+			continue;
+		}
+		RegAllocInfo info = getAllocInfoAt(param, 0);
+		const int stackOffset = paramLocs[pi].index * 8;
+		if (info.hasReg()) {
+			iloc.load_base(info.regId, RISCV64_FP_REG_NO, stackOffset, param->getType()->isPointerType());
+		} else if (info.hasStackSlot &&
+		           (info.baseRegId != RISCV64_FP_REG_NO || info.offset != stackOffset)) {
+			auto tmp = tempMgr.borrow(nullptr, info.regId);
+			iloc.load_base(tmp.reg(), RISCV64_FP_REG_NO, stackOffset, param->getType()->isPointerType());
+			iloc.store_base(tmp.reg(), info.baseRegId, info.offset, scratchReg,
+			                param->getType()->isPointerType());
+		}
+	}
+
 	// 整数入参已经安全落位后，再处理浮点入参。
 	// 浮点入参通过fa0-fa7传递，使用fmv.x.w将浮点寄存器的位模式移动到整数寄存器
 	{
-		int floatIdx = 0;
 		std::vector<FloatRegMove> floatRegMoves;
-		for (auto * param : params) {
-			auto it = allocMap.find(param);
-			if (it == allocMap.end()) {
-				continue;
-			}
+		for (std::size_t pi = 0; pi < params.size(); ++pi) {
+			auto * param = params[pi];
 			if (!param->getType()->isFloatType()) {
 				continue;
 			}
 
-			if (floatIdx < 8) {
+			const AbiArgLoc & loc = paramLocs[pi];
+			RegAllocInfo info = getAllocInfoAt(param, 0);
+			if (loc.kind == AbiArgLocKind::FloatReg) {
 				// fa0-fa7: 浮点参数寄存器
-				const std::string fpReg = "fa" + std::to_string(floatIdx);
-				if (it->second.hasFloatReg()) {
-					if (it->second.regId != 10 + floatIdx) {
+				const std::string fpReg = "fa" + std::to_string(loc.index);
+				if (info.hasFloatReg()) {
+					if (info.regId != 10 + loc.index) {
 						floatRegMoves.push_back(FloatRegMove{
 							FloatRegMove::SourceKind::FloatReg,
-							10 + floatIdx,
-							it->second.regId,
+							10 + loc.index,
+							info.regId,
 						});
 					}
-				} else if (it->second.hasReg()) {
+				} else if (info.hasReg()) {
 					// 目标分配了整数寄存器，用fmv.x.w将浮点寄存器位模式移入整数寄存器
-					iloc.inst("fmv.x.w", PlatformRiscV64::regName[it->second.regId], fpReg);
-				} else if (it->second.hasStackSlot) {
-					iloc.store_float_base(10 + floatIdx, it->second.baseRegId, it->second.offset, scratchReg);
+					iloc.inst("fmv.x.w", PlatformRiscV64::regName[info.regId], fpReg);
+				} else if (info.hasStackSlot) {
+					iloc.store_float_base(10 + loc.index, info.baseRegId, info.offset, scratchReg);
 				}
 			}
-			// 栈传浮点参数已在 fp+offset 处，无需复制
-			floatIdx++;
 		}
 		emitFloatRegMoves(floatRegMoves, scratchReg);
+	}
+
+	for (std::size_t pi = 0; pi < params.size(); ++pi) {
+		auto * param = params[pi];
+		if (!param->getType()->isFloatType() || paramLocs[pi].kind != AbiArgLocKind::Stack) {
+			continue;
+		}
+		RegAllocInfo info = getAllocInfoAt(param, 0);
+		const int stackOffset = paramLocs[pi].index * 8;
+		if (info.hasFloatReg()) {
+			iloc.load_float_base(info.regId, RISCV64_FP_REG_NO, stackOffset, scratchReg);
+		} else if (info.hasReg()) {
+			iloc.load_base(info.regId, RISCV64_FP_REG_NO, stackOffset, false);
+		} else if (info.hasStackSlot &&
+		           (info.baseRegId != RISCV64_FP_REG_NO || info.offset != stackOffset)) {
+			auto tmp = tempMgr.borrow(nullptr);
+			iloc.load_base(tmp.reg(), RISCV64_FP_REG_NO, stackOffset, false);
+			iloc.store_base(tmp.reg(), info.baseRegId, info.offset, scratchReg, false);
+		}
 	}
 }
 
@@ -1667,6 +1843,22 @@ void InstSelectorRiscV64::emitEpilogue()
 		const int offset = frameSize - (i + 1) * 8;
 		// 通过寄存器编号查找对应的寄存器名称
 		emitLoad64(PlatformRiscV64::regName[savedRegs[i]], offset, tmp.reg());
+	}
+
+	// 逆序恢复callee-saved FPR（与prologue中保存顺序相反）
+	// 使用fld指令恢复双精度浮点值
+	const auto & savedFPRs = iloc.getSavedFPRs();
+	const int gprSavedCount = static_cast<int>(savedRegs.size());
+	for (int i = static_cast<int>(savedFPRs.size()) - 1; i >= 0; --i) {
+		const int offset = frameSize - (gprSavedCount + i + 1) * 8;
+		const std::string & fpReg = PlatformRiscV64::fpRegName[savedFPRs[i]];
+		if (PlatformRiscV64::isDisp(offset)) {
+			iloc.inst("fld", fpReg, std::to_string(offset) + "(sp)");
+		} else {
+			iloc.load_imm(tmp.reg(), offset);
+			iloc.inst("add", PlatformRiscV64::regName[tmp.reg()], "sp", PlatformRiscV64::regName[tmp.reg()]);
+			iloc.inst("fld", fpReg, "0(" + PlatformRiscV64::regName[tmp.reg()] + ")");
+		}
 	}
 
 	// 恢复栈指针
@@ -1711,22 +1903,52 @@ void InstSelectorRiscV64::emitStackAdjust(int amount, int tmpReg)
 /// @return 物理寄存器编号，若未分配则返回-1
 int InstSelectorRiscV64::getResultReg(Value * val) const
 {
-	auto & allocMap = allocator.getAllocationMap();
-	auto it = allocMap.find(val);
-	if (it != allocMap.end() && it->second.hasReg()) {
-		return it->second.regId;
+	auto * inst = dynamic_cast<Instruction *>(val);
+	RegAllocInfo info = getAllocInfo(val, inst);
+	if (info.hasReg()) {
+		return info.regId;
 	}
 	return -1;
 }
 
 int InstSelectorRiscV64::getFloatResultReg(Value * val) const
 {
-	auto & allocMap = allocator.getAllocationMap();
-	auto it = allocMap.find(val);
-	if (it != allocMap.end() && it->second.hasFloatReg()) {
-		return it->second.regId;
+	auto * inst = dynamic_cast<Instruction *>(val);
+	RegAllocInfo info = getAllocInfo(val, inst);
+	if (info.hasFloatReg()) {
+		return info.regId;
 	}
 	return -1;
+}
+
+RegAllocInfo InstSelectorRiscV64::getAllocInfo(Value * val, Instruction * inst) const
+{
+	return allocator.getAllocationInfo(val, inst);
+}
+
+RegAllocInfo InstSelectorRiscV64::getAllocInfoAt(Value * val, int instNum) const
+{
+	return allocator.getAllocationInfoAt(val, instNum);
+}
+
+void InstSelectorRiscV64::loadValueToReg(int reg, Value * val, Instruction * inst)
+{
+	iloc.load_var(reg, val, getAllocInfo(val, inst));
+}
+
+void InstSelectorRiscV64::loadFloatValueToReg(int reg, Value * val, int tmpReg, Instruction * inst)
+{
+	iloc.load_float_var(reg, val, tmpReg, getAllocInfo(val, inst));
+}
+
+void InstSelectorRiscV64::storeValueFromReg(Value * val, int srcReg, int tmpReg, Instruction * inst)
+{
+	iloc.store_var(srcReg, val, tmpReg, getAllocInfo(val, inst));
+}
+
+void InstSelectorRiscV64::storeFloatValueFromReg(Value * val, int srcReg, int tmpReg, Instruction * inst)
+{
+	iloc.store_float_var(srcReg, val, tmpReg, getAllocInfo(val, inst));
 }
 
 /// @brief 获取只读操作数所在寄存器，必要时借用临时寄存器加载
@@ -1738,29 +1960,27 @@ int InstSelectorRiscV64::getFloatResultReg(Value * val) const
 InstSelectorRiscV64::OperandReg
 InstSelectorRiscV64::loadOperand(Value * val, Instruction * inst, int excludeReg, int preferredReg)
 {
-	auto & allocMap = allocator.getAllocationMap();
-	auto it = allocMap.find(val);
-	if (it != allocMap.end() && it->second.hasReg()) {
-		return OperandReg(it->second.regId);
+	RegAllocInfo info = getAllocInfo(val, inst);
+	if (info.hasReg()) {
+		return OperandReg(info.regId);
 	}
 
 	if (preferredReg >= 0 && preferredReg != excludeReg) {
-		iloc.load_var(preferredReg, val);
+		iloc.load_var(preferredReg, val, info);
 		return OperandReg(preferredReg);
 	}
 
 	auto reg = tempMgr.borrow(inst, excludeReg);
-	iloc.load_var(reg.reg(), val);
+	iloc.load_var(reg.reg(), val, info);
 	return OperandReg(std::move(reg));
 }
 
 InstSelectorRiscV64::FloatOperandReg
 InstSelectorRiscV64::loadFloatOperand(Value * val, Instruction * inst, int excludeReg, int preferredReg)
 {
-	auto & allocMap = allocator.getAllocationMap();
-	auto it = allocMap.find(val);
-	if (it != allocMap.end() && it->second.hasFloatReg()) {
-		return FloatOperandReg(it->second.regId, false);
+	RegAllocInfo info = getAllocInfo(val, inst);
+	if (info.hasFloatReg()) {
+		return FloatOperandReg(info.regId, false);
 	}
 
 	int reg = -1;
@@ -1774,7 +1994,7 @@ InstSelectorRiscV64::loadFloatOperand(Value * val, Instruction * inst, int exclu
 	}
 
 	auto tmp = tempMgr.borrow(inst);
-	iloc.load_float_var(reg, val, tmp.reg());
+	iloc.load_float_var(reg, val, tmp.reg(), info);
 	return FloatOperandReg(reg, temp, std::move(tmp));
 }
 
@@ -1802,17 +2022,16 @@ void InstSelectorRiscV64::storeResult(Value * val, int srcReg, Instruction * ins
 	if (val == nullptr) {
 		return;
 	}
-	auto & allocMap = allocator.getAllocationMap();
-	auto it = allocMap.find(val);
-	if (it != allocMap.end() && it->second.hasReg()) {
-		if (srcReg != it->second.regId) {
-			iloc.mov_reg(it->second.regId, srcReg);
+	RegAllocInfo info = getAllocInfo(val, inst);
+	if (info.hasReg()) {
+		if (srcReg != info.regId) {
+			iloc.mov_reg(info.regId, srcReg);
 		}
 		return;
 	}
 
 	auto tmp = tempMgr.borrowAfterUses(inst, srcReg);
-	iloc.store_var(srcReg, val, tmp.reg());
+	iloc.store_var(srcReg, val, tmp.reg(), info);
 }
 
 void InstSelectorRiscV64::storeFloatResult(Value * val, int srcReg, Instruction * inst)
@@ -1821,22 +2040,31 @@ void InstSelectorRiscV64::storeFloatResult(Value * val, int srcReg, Instruction 
 		return;
 	}
 
-	auto & allocMap = allocator.getAllocationMap();
-	auto it = allocMap.find(val);
-	if (it != allocMap.end() && it->second.hasFloatReg()) {
-		if (srcReg != it->second.regId) {
-			iloc.fmov_reg(it->second.regId, srcReg);
+	RegAllocInfo info = getAllocInfo(val, inst);
+	if (info.hasFloatReg()) {
+		if (srcReg != info.regId) {
+			iloc.fmov_reg(info.regId, srcReg);
 		}
 		return;
 	}
 
 	auto tmp = tempMgr.borrowAfterUses(inst);
-	iloc.store_float_var(srcReg, val, tmp.reg());
+	iloc.store_float_var(srcReg, val, tmp.reg(), info);
 }
 
 int InstSelectorRiscV64::borrowFloatTemp(Instruction * inst, const std::set<int> & excludeRegs)
 {
+	std::vector<int> candidates = {
+		30, // ft10: reserved scratch FPR
+		31, // ft11: reserved scratch FPR
+	};
 	for (int reg : allocator.getAvailableFloatRegs()) {
+		if (std::find(candidates.begin(), candidates.end(), reg) == candidates.end()) {
+			candidates.push_back(reg);
+		}
+	}
+
+	for (int reg : candidates) {
 		if (excludeRegs.find(reg) != excludeRegs.end()) {
 			continue;
 		}
@@ -1871,15 +2099,13 @@ bool InstSelectorRiscV64::isFloatRegLiveAt(int reg, Instruction * inst) const
 	}
 	const int instNum = instIt->second;
 
-	for (const auto & [value, info] : allocator.getAllocationMap()) {
-		if (!info.hasFloatReg() || info.regId != reg) {
-			continue;
-		}
-		auto liveIt = allocator.getValueLiveRanges().find(value);
-		if (liveIt == allocator.getValueLiveRanges().end()) {
-			continue;
-		}
-		if (liveIt->second.first <= instNum && instNum < liveIt->second.second) {
+	auto rangesIt = allocator.getAllocatedFprLiveRanges().find(reg);
+	if (rangesIt == allocator.getAllocatedFprLiveRanges().end()) {
+		return false;
+	}
+
+	for (const auto & [start, end] : rangesIt->second) {
+		if (start <= instNum && instNum < end) {
 			return true;
 		}
 	}
