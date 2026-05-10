@@ -6,14 +6,23 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 
 MINIC_BIN=${MINIC_BIN:-"${REPO_ROOT}/build/minic"}
-ARM_GCC_BIN=${ARM_GCC_BIN:-"arm-linux-gnueabihf-gcc"}
-QEMU_ARM_BIN=${QEMU_ARM_BIN:-"qemu-arm-static"}
 TEST_ROOT="${REPO_ROOT}/tests"
 RUNTIME_SOURCE=${MINIC_RUNTIME_SOURCE:-"${TEST_ROOT}/sylib.c"}
 FRONTEND=${MINIC_FRONTEND:-"antlr"}
 TEST_MODE=${MINIC_TEST_MODE:-"llvmir"}
 CLANG_BIN=${CLANG_BIN:-"clang"}
 TEST_TIMEOUT=${MINIC_TEST_TIMEOUT:-30}
+ASM_TARGET=${MINIC_ASM_TARGET:-"RISCV64"}
+RISCV64_GCC_BIN=${RISCV64_GCC_BIN:-"riscv64-linux-gnu-gcc"}
+QEMU_RISCV64_BIN=${QEMU_RISCV64_BIN:-""}
+
+if [[ -z "${QEMU_RISCV64_BIN}" ]]; then
+    if command -v qemu-riscv64-static >/dev/null 2>&1; then
+        QEMU_RISCV64_BIN="qemu-riscv64-static"
+    else
+        QEMU_RISCV64_BIN="qemu-riscv64"
+    fi
+fi
 
 OK_NUM=0
 NG_NUM=0
@@ -46,10 +55,13 @@ Environment:
     MINIC_RUNTIME_SOURCE=./tests/sylib.c
 
   MINIC_TEST_MODE=llvmir    Verify generated LLVM IR via clang (default)
-  MINIC_TEST_MODE=asm       Verify generated assembly via cross-compile + qemu
+  MINIC_TEST_MODE=asm       Verify generated target assembly via cross-compile + qemu
   MINIC_TEST_MODE=ast       Verify AST image generation
   MINIC_TEST_MODE=all       Run llvmir + asm + ast checks together
   MINIC_TEST_TIMEOUT=30     Per-step timeout passed to timeout(1)
+  MINIC_ASM_TARGET=RISCV64  Assembly backend target (default and only supported target)
+  RISCV64_GCC_BIN=...       RISC-V cross compiler for asm mode
+  QEMU_RISCV64_BIN=...      RISC-V user-mode emulator for asm mode
 
 Examples:
   ./tools/run-local-tests.sh
@@ -57,6 +69,7 @@ Examples:
   ./tools/run-local-tests.sh 2025 2025_func_009_BFS
   ./tools/run-local-tests.sh 2025 2025_func_009_BFS.sy
   MINIC_TEST_MODE=llvmir ./tools/run-local-tests.sh 2023_func_00_main
+  MINIC_TEST_MODE=asm MINIC_ASM_TARGET=RISCV64 ./tools/run-local-tests.sh 2026 2026_func_96_matrix_add
   MINIC_TEST_MODE=all ./tools/run-local-tests.sh 2023 2023_func_00_main
 USAGE
 }
@@ -94,6 +107,14 @@ esac
 if [[ "${TEST_MODE}" != "ast" && ! -f "${RUNTIME_SOURCE}" ]]; then
     fail_with_usage "Runtime source not found: ${RUNTIME_SOURCE}"
 fi
+
+case "${ASM_TARGET}" in
+    RISCV64)
+        ;;
+    *)
+        fail_with_usage "Unknown MINIC_ASM_TARGET: ${ASM_TARGET}. Only RISCV64 is supported."
+        ;;
+esac
 
 
 
@@ -237,7 +258,8 @@ run_asm_check() {
     local exit_code=0
     source_name=$(basename "${cfile}")
 
-    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" \
+        "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -t "${ASM_TARGET}" -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${source_name} compile NG [asm]"
         return 1
     fi
@@ -247,16 +269,17 @@ run_asm_check() {
         return 1
     fi
 
-    if ! timeout --foreground "${TEST_TIMEOUT}" "${ARM_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${RUNTIME_SOURCE}" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" \
+        "${RISCV64_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
         echo "${source_name} link NG [asm]"
         return 1
     fi
 
     if [[ -f "${infile}" ]]; then
-        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_ARM_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2>&1
         exit_code=$?
     else
-        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_ARM_BIN}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" > "${output_file}" 2>&1
         exit_code=$?
     fi
 
@@ -425,12 +448,12 @@ if [[ ! -x "${MINIC_BIN}" ]]; then
 fi
 
 if [[ "${TEST_MODE}" == "asm" || "${TEST_MODE}" == "all" ]]; then
-    if ! command -v "${ARM_GCC_BIN}" >/dev/null 2>&1; then
-        fail_with_usage "arm-linux-gnueabihf-gcc not found: ${ARM_GCC_BIN}"
+    if ! command -v "${RISCV64_GCC_BIN}" >/dev/null 2>&1; then
+        fail_with_usage "riscv64 gcc not found: ${RISCV64_GCC_BIN}"
     fi
 
-    if ! command -v "${QEMU_ARM_BIN}" >/dev/null 2>&1; then
-        fail_with_usage "qemu-arm-static not found: ${QEMU_ARM_BIN}"
+    if ! command -v "${QEMU_RISCV64_BIN}" >/dev/null 2>&1; then
+        fail_with_usage "qemu riscv64 not found: ${QEMU_RISCV64_BIN}"
     fi
 fi
 
