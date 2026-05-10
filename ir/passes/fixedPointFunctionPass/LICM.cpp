@@ -17,9 +17,13 @@
 #include "CondBranchInst.h"
 #include "DominatorTree.h"
 #include "Function.h"
+#include "GetElementPtrInst.h"
+#include "GlobalVariable.h"
 #include "Instruction.h"
 #include "LoadInst.h"
 #include "LoopInfo.h"
+#include "MemoryLocation.h"
+#include "Module.h"
 #include "PhiInst.h"
 #include "StoreInst.h"
 #include "Use.h"
@@ -194,11 +198,110 @@ bool loopMayWriteMemory(const std::unordered_set<BasicBlock *> & loopBody)
     return false;
 }
 
+/// @brief 沿 GEP 链找到指针根对象
+Value * getPointerRoot(Value * value)
+{
+    Value * current = value;
+    std::unordered_set<Value *> visited;
+    while (current && visited.insert(current).second) {
+        auto * gep = dynamic_cast<GetElementPtrInst *>(current);
+        if (!gep) {
+            break;
+        }
+        current = gep->getBasePointer();
+    }
+    return current;
+}
+
+/// @brief 判断全局变量是否在模块中没有任何直接或 GEP 派生 store
+bool isReadOnlyGlobal(Module * mod, GlobalVariable * global)
+{
+    if (!mod || !global) {
+        return false;
+    }
+
+    for (auto * function : mod->getFunctionList()) {
+        if (!function || function->isBuiltin()) {
+            continue;
+        }
+
+        for (auto * bb : function->getBlocks()) {
+            for (auto * inst : bb->getInstructions()) {
+                auto * store = dynamic_cast<StoreInst *>(inst);
+                if (store && getPointerRoot(store->getPointerOperand()) == global) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+/// @brief 判断 store/call 是否可能改写非局部可见内存
+bool instructionMayClobberNonLocalMemory(Instruction * inst)
+{
+    if (!inst || inst->isDead()) {
+        return false;
+    }
+
+    if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+        auto * rootAlloca = dynamic_cast<AllocaInst *>(getPointerRoot(store->getPointerOperand()));
+        return rootAlloca == nullptr || doesPointerEscape(rootAlloca);
+    }
+
+    auto * call = dynamic_cast<CallInst *>(inst);
+    return call != nullptr && !isPureCall(call);
+}
+
+bool loopMayClobberNonLocalMemory(const std::unordered_set<BasicBlock *> & loopBody)
+{
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            if (instructionMayClobberNonLocalMemory(inst)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool loopMayClobberLocalLocation(const MemoryLocation & loadLocation,
+                                 const std::unordered_set<BasicBlock *> & loopBody)
+{
+    if (!loadLocation.isPrecise() || doesPointerEscape(loadLocation.object)) {
+        return true;
+    }
+
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+                MemoryLocation storeLocation = normalizeMemoryLocation(store->getPointerOperand());
+                if (!storeLocation.isKnownObject()) {
+                    continue;
+                }
+
+                if (classifyMemoryAlias(loadLocation, storeLocation) != MemoryAliasResult::NoAlias) {
+                    return true;
+                }
+                continue;
+            }
+
+            auto * call = dynamic_cast<CallInst *>(inst);
+            if (call && !isPureCall(call) && doesPointerEscape(loadLocation.object)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 } // namespace
 
 /// @brief 构造 LICM pass
 /// @param _func 待优化的函数
-LICM::LICM(Function * _func) : func(_func)
+LICM::LICM(Function * _func, Module * _mod) : func(_func), mod(_mod)
 {}
 
 /// @brief 对函数重复执行 LICM，直到本轮不再产生新的外提或 preheader 调整
@@ -345,6 +448,10 @@ bool LICM::tryHoistLoop(BasicBlock * header,
                 }
 
                 if (!operandsAreLoopInvariant(inst, loopBody, invariants)) {
+                    continue;
+                }
+
+                if (dynamic_cast<LoadInst *>(inst) && !isSafeLoadToHoist(inst, loopBody)) {
                     continue;
                 }
 
@@ -565,7 +672,35 @@ bool LICM::isHoistableInstruction(Instruction * inst) const
         return isPureCall(inst);
     }
 
+    if (dynamic_cast<LoadInst *>(inst)) {
+        return true;
+    }
+
     return isPureLoopInvariantOp(inst->getOp());
+}
+
+/// @brief 判断 load 是否满足安全外提条件
+/// @param inst 待检查的 load 指令
+/// @param loopBody 当前自然循环的块集合
+/// @return true 表示该 load 不会被循环内写入改写
+bool LICM::isSafeLoadToHoist(Instruction * inst, const std::unordered_set<BasicBlock *> & loopBody) const
+{
+    auto * load = dynamic_cast<LoadInst *>(inst);
+    if (!load) {
+        return false;
+    }
+
+    Value * pointer = load->getPointerOperand();
+    if (auto * global = dynamic_cast<GlobalVariable *>(getPointerRoot(pointer))) {
+        return isReadOnlyGlobal(mod, global) && !loopMayClobberNonLocalMemory(loopBody);
+    }
+
+    MemoryLocation location = normalizeMemoryLocation(pointer);
+    if (location.isPrecise() && !doesPointerEscape(location.object)) {
+        return !loopMayClobberLocalLocation(location, loopBody);
+    }
+
+    return false;
 }
 
 /// @brief 判断候选指令是否需要额外满足退出点支配约束
@@ -579,6 +714,10 @@ bool LICM::requiresExitDominance(Instruction * inst) const
 
     // 函数调用始终需要退出点支配，因为调用可能抛异常或产生副作用
     if (dynamic_cast<CallInst *>(inst)) {
+        return true;
+    }
+
+    if (dynamic_cast<LoadInst *>(inst)) {
         return true;
     }
 

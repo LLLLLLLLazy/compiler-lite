@@ -19,13 +19,14 @@ class BasicBlock;
 class DominatorTree;
 class Function;
 class Instruction;
+class Module;
 
 class LICM {
 
 public:
     /// @brief 构造 LICM pass
     /// @param func 待优化的函数
-    explicit LICM(Function * func);
+    explicit LICM(Function * func, Module * mod = nullptr);
 
     /// @brief 对函数原地执行 LICM
     /// @return 若 IR 被修改则返回 true
@@ -87,6 +88,12 @@ private:
     /// @return true 表示该指令属于可外提的纯计算指令
     bool isHoistableInstruction(Instruction * inst) const;
 
+    /// @brief 判断 load 是否满足安全外提条件
+    /// @param inst 待检查的 load 指令
+    /// @param loopBody 当前自然循环的块集合
+    /// @return true 表示 load 指向只读全局或未逃逸局部精确槽且循环内无冲突写
+    bool isSafeLoadToHoist(Instruction * inst, const std::unordered_set<BasicBlock *> & loopBody) const;
+
     /// @brief 判断候选指令是否需要额外满足退出点支配约束
     /// @param inst 待检查的指令
     /// @return true 表示该指令不可安全推测执行
@@ -118,4 +125,5 @@ private:
     bool dominatesAllUses(Instruction * inst, const DominatorTree & domTree) const;
 
     Function * func = nullptr;
+    Module * mod = nullptr;
 };
