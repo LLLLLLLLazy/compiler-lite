@@ -219,6 +219,12 @@ set(IR_SRCS
 	ir/passes/functionPass/PureCallCSE.cpp
 	ir/passes/fixedPointFunctionPass/InstCombine.h
 	ir/passes/fixedPointFunctionPass/InstCombine.cpp
+	ir/passes/fixedPointFunctionPass/GVN.h
+	ir/passes/fixedPointFunctionPass/GVN.cpp
+	ir/passes/fixedPointFunctionPass/LoopTiling.h
+	ir/passes/fixedPointFunctionPass/LoopTiling.cpp
+	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.h
+	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.cpp
 	ir/passes/toolPass/CFGStateCleanup.h
 	ir/passes/toolPass/CFGStateCleanup.cpp
 	ir/passes/fixedPointFunctionPass/CFGSimplify.h
@@ -393,6 +399,7 @@ set(CPACK_SOURCE_IGNORE_FILES
 	"/.history/;" # 本地历史文件
 	"/tests/;" # 测试文件夹
 	"/常用命令[.]md$;" # 避免 CPack 处理根目录中文文件名时失败
+	"/T202510699205760-916/;"
 )
 
 # 二进制打包
