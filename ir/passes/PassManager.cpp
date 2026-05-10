@@ -9,9 +9,13 @@
 #include "fixedPointFunctionPass/CFGSimplify.h"
 #include "fixedPointFunctionPass/ConstProp.h"
 #include "fixedPointFunctionPass/DeadInstElim.h"
+#include "fixedPointFunctionPass/GVN.h"
 #include "fixedPointFunctionPass/InstCombine.h"
 #include "fixedPointFunctionPass/LICM.h"
+#include "fixedPointFunctionPass/LoopStrengthReduce.h"
+#include "fixedPointFunctionPass/LoopTiling.h"
 #include "fixedPointFunctionPass/LocalMemoryOpt.h"
+#include "fixedPointFunctionPass/SimpleLoopUnroll.h"
 #include "fixedPointFunctionPass/UnreachableBlockElim.h"
 #include "fixedPointFunctionPass/PureCallLoopCache.h"
 #include "functionPass/ArrayScalarize.h"
@@ -25,7 +29,40 @@
 
 namespace {
 
-constexpr int32_t kDefaultMaxFixedPointRounds = 8;
+constexpr int32_t kDefaultMaxFixedPointRounds = 18;
+
+bool isOptimizableFunction(Function * func)
+{
+    return func != nullptr && !func->isBuiltin() && !func->getBlocks().empty();
+}
+
+bool runPostInlineCleanupPipeline(Module * currentModule)
+{
+    if (currentModule == nullptr) {
+        return false;
+    }
+
+    bool changed = false;
+    for (auto * func : currentModule->getFunctionList()) {
+        if (!isOptimizableFunction(func)) {
+            continue;
+        }
+
+        Mem2Reg mem2reg(func, currentModule);
+        mem2reg.run();
+
+        GVN gvn(func, currentModule);
+        changed = gvn.run() || changed;
+
+        LICM licm(func, currentModule);
+        changed = licm.run() || changed;
+
+        InstCombine instCombine(func, currentModule);
+        changed = instCombine.run() || changed;
+    }
+
+    return changed;
+}
 
 } // namespace
 
@@ -74,9 +111,21 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return false;
     });
 
+    registerFunctionPass([this](Function * func) {
+        GVN pass(func, module);
+        return pass.run();
+    });
+
     registerFunctionPass([](Function * func) {
         TailRecursionElim pass(func);
         return pass.run();
+    });
+
+    registerLateModulePass([](Module * currentModule) {
+        SmallFunctionInline pass(currentModule);
+        bool changed = pass.run();
+        changed = runPostInlineCleanupPipeline(currentModule) || changed;
+        return changed;
     });
 
     maxFixedPointRounds = kDefaultMaxFixedPointRounds;
@@ -86,8 +135,48 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return pass.run();
     });
 
-    registerFixedPointFunctionPass([](Function * func) {
-        LICM pass(func);
+    registerFixedPointFunctionPass([this](Function * func) {
+        GVN pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        LICM pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        LoopTiling pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        LoopStrengthReduce pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        GVN pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        SimpleLoopUnroll pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        GVN pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        PureCallCSE pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        LICM pass(func, module);
         return pass.run();
     });
 
@@ -98,6 +187,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
 
     registerFixedPointFunctionPass([this](Function * func) {
         InstCombine pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        PureCallCSE pass(func, module);
         return pass.run();
     });
 
@@ -150,6 +244,10 @@ void PassManager::run()
 
     runFunctionPassGroup(functionPasses);
 
+    for (const auto & runner : lateModulePasses) {
+        runner(module);
+    }
+
     if (fixedPointFunctionPasses.empty()) {
         return;
     }
@@ -166,6 +264,7 @@ void PassManager::run()
 void PassManager::clear()
 {
     modulePasses.clear();
+    lateModulePasses.clear();
     functionPasses.clear();
     fixedPointFunctionPasses.clear();
     maxFixedPointRounds = 0;
@@ -176,6 +275,13 @@ void PassManager::clear()
 void PassManager::registerModulePass(ModulePassRunner runner)
 {
     modulePasses.push_back(std::move(runner));
+}
+
+/// @brief 注册函数级 pass 之后、定点函数级 pass 之前执行的模块级 pass
+/// @param runner pass 执行器
+void PassManager::registerLateModulePass(ModulePassRunner runner)
+{
+    lateModulePasses.push_back(std::move(runner));
 }
 
 /// @brief 注册单次函数级 pass
