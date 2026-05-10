@@ -17,6 +17,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "AllocaInst.h"
@@ -365,8 +366,15 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 		             s.estimatedSpillStores,
 		             s.eliminatedCopies,
 		             s.splitCount);
+		std::unordered_set<Value *> scratchKeys;
+		for (auto & sv: scratchValues) {
+			scratchKeys.insert(reinterpret_cast<Value *>(sv.identity));
+		}
 		for (auto & [val, info]: greedyAllocator.getAllocationMap()) {
 			(void) info;
+			if (scratchKeys.find(val) != scratchKeys.end()) {
+				continue;
+			}
 			std::string str;
 			getIRValueStr(val, str);
 			if (!str.empty()) {
