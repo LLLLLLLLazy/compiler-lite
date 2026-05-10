@@ -135,9 +135,8 @@ std::vector<AllocaInst *> Mem2Reg::findPromotableAllocas()
 /// @return true 表示可提升，false 表示不可提升
 bool Mem2Reg::isPromotable(AllocaInst * alloca) const
 {
-    // 仅提升标量元素类型，不提升指针元素类型
     Type * elemType = alloca->getAllocaType();
-    if (!elemType || elemType->isPointerType()) {
+    if (!elemType) {
         return false;
     }
 
