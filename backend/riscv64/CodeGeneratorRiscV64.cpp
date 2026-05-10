@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "AllocaInst.h"
+#include "ArrayType.h"
 #include "BasicBlock.h"
 #include "CallInst.h"
 #include "Function.h"
@@ -43,22 +44,48 @@ int alignTo(int value, int align)
 	return ((value + align - 1) / align) * align;
 }
 
-/// @brief 计算栈槽大小（按4字节对齐，最小4字节）
+/// @brief 获取Value在栈中的对象类型
+/// @param val 待查询的Value
+/// @return 实际占用栈槽的对象类型
+Type * stackObjectType(Value * val)
+{
+	if (auto * allocaInst = dynamic_cast<AllocaInst *>(val)) {
+		return allocaInst->getAllocaType();
+	}
+	if (auto * globalVar = dynamic_cast<GlobalVariable *>(val)) {
+		return globalVar->getValueType();
+	}
+	return val != nullptr ? val->getType() : nullptr;
+}
+
+/// @brief 计算Value在RV64栈上的自然对齐
+/// @param type 栈对象类型
+/// @return 需要满足的对齐字节数
+int stackSlotAlignment(Type * type)
+{
+	if (type == nullptr) {
+		return 4;
+	}
+	if (type->isPointerType()) {
+		return 8;
+	}
+	if (auto * arrayType = dynamic_cast<ArrayType *>(type)) {
+		return stackSlotAlignment(arrayType->getElementType());
+	}
+	return 4;
+}
+
+/// @brief 计算栈槽大小，按对象自然对齐并保证最小4字节
 /// @param val 待计算栈槽大小的Value
 /// @return 栈槽字节数
 int stackSlotSize(Value * val)
 {
+	Type * slotType = stackObjectType(val);
 	int size = 4;
-	if (auto * allocaInst = dynamic_cast<AllocaInst *>(val)) {
-		// AllocaInst按其分配类型的大小计算
-		size = allocaInst->getAllocaType()->getSize();
-	} else if (auto * globalVar = dynamic_cast<GlobalVariable *>(val)) {
-		size = globalVar->getValueType()->getSize();
-	} else if (val != nullptr && val->getType() != nullptr && val->getType()->getSize() > 0) {
-		// 其他Value按其类型大小计算
-		size = val->getType()->getSize();
+	if (slotType != nullptr && slotType->getSize() > 0) {
+		size = slotType->getSize();
 	}
-	return std::max(4, alignTo(size, 4));
+	return std::max(4, alignTo(size, stackSlotAlignment(slotType)));
 }
 
 /// @brief 计算函数中所有调用指令的最大参数个数
@@ -225,7 +252,6 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 {
 	// 执行寄存器分配
 	registerAllocation(func);
-
 	// 创建底层汇编序列，设置寄存器分配信息和栈帧大小
 	ILocRiscV64 iloc(module);
 	iloc.setRegAllocMap(greedyAllocator.getAllocationMap());
@@ -259,12 +285,11 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 			}
 			auto * key = reinterpret_cast<Value *>(sv.identity);
 			if (sv.spilled) {
-				// 根据实际保存的callee-saved寄存器数量计算栈帧占用字节数
-				const int savedFrameBytes = static_cast<int>(currentSavedRegs.size()) * 8;
-				int slotSize = 8;
-				int newFrameSize = greedyAllocator.getFrameSize() + slotSize;
+				const int slotSize = 8;
+				const int slotEnd = greedyAllocator.getFrameSize() + slotSize;
+				const int newFrameSize = alignTo(slotEnd, 16);
 				greedyAllocator.setFrameSize(newFrameSize);
-				sv.spillSlot = -(savedFrameBytes + newFrameSize);
+				sv.spillSlot = -slotEnd;
 				RegAllocInfo info;
 				info.setStack(RISCV64_FP_REG_NO, sv.spillSlot);
 				allocMap[key] = info;
@@ -361,6 +386,7 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func)
 			return;
 		}
 
+		localBytes = alignTo(localBytes, stackSlotAlignment(stackObjectType(val)));
 		localBytes += stackSlotSize(val);
 		info.setStack(RISCV64_FP_REG_NO, -(savedFrameBytes + localBytes));
 	};
