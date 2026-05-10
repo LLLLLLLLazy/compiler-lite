@@ -474,7 +474,6 @@ bool shouldPreserveForPureCallLoopCache(CallInst * call)
 
     return candidate == call;
 }
-}
 
 /// @brief 判断指令是否属于内联支持的指令类型
 /// @param inst 待检查的指令
