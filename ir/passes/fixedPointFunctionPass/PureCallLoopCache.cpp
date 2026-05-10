@@ -35,10 +35,13 @@
 #include "ConstInteger.h"
 #include "DominatorTree.h"
 #include "Function.h"
+#include "GetElementPtrInst.h"
+#include "GlobalVariable.h"
 #include "Instruction.h"
 #include "IntegerType.h"
 #include "LoadInst.h"
 #include "LoopInfo.h"
+#include "MemoryLocation.h"
 #include "Module.h"
 #include "PhiInst.h"
 #include "StoreInst.h"
@@ -46,6 +49,32 @@
 #include "Value.h"
 
 namespace {
+
+/// @brief 沿 GEP 链找到指针根对象。
+Value * getPointerRoot(Value * value)
+{
+    Value * current = value;
+    std::unordered_set<Value *> visited;
+    while (current && visited.insert(current).second) {
+        auto * gep = dynamic_cast<GetElementPtrInst *>(current);
+        if (!gep) {
+            break;
+        }
+        current = gep->getBasePointer();
+    }
+    return current;
+}
+
+/// @brief store 只写入非逃逸局部 alloca 时，不构成函数外可见副作用。
+bool isNonEscapingLocalStore(StoreInst * store)
+{
+    if (!store) {
+        return false;
+    }
+
+    auto * alloca = dynamic_cast<AllocaInst *>(getPointerRoot(store->getPointerOperand()));
+    return alloca != nullptr && !doesPointerEscape(alloca);
+}
 
 /// @brief 函数纯度分析状态枚举
 enum class PurityState {
@@ -58,8 +87,8 @@ enum class PurityState {
 /// @brief 函数纯度分析器
 ///
 /// 通过递归分析函数体中的指令来判断函数是否为纯函数。
-/// 纯函数的判定条件：不包含 store 指令、所有调用也都是纯函数调用、
-/// 其余指令均无副作用。使用 Visiting 状态检测递归调用。
+/// 纯函数的判定条件：没有函数外可见写入，局部非逃逸 alloca 的 store
+/// 可作为临时变量使用，所有调用也都满足同样条件。
 class PurityAnalyzer {
 public:
     /// @brief 判断函数是否为纯函数
@@ -108,8 +137,8 @@ private:
             return true;
         }
 
-        if (dynamic_cast<StoreInst *>(inst)) {
-            return false;
+        if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+            return isNonEscapingLocalStore(store);
         }
 
         if (auto * call = dynamic_cast<CallInst *>(inst)) {
@@ -126,28 +155,130 @@ private:
     std::unordered_map<Function *, PurityState> states;  ///< 函数到纯度状态的映射
 };
 
-/// @brief 判断值是否定义在循环体内
-/// @param value 待检查的值
-/// @param loopBody 循环体基本块集合
-/// @return true 表示该值由循环体内的指令定义
-bool isDefinedInLoop(Value * value, const std::unordered_set<BasicBlock *> & loopBody)
+bool storeMayAliasLocation(StoreInst * store, const MemoryLocation & location)
 {
+    if (!store || !location.isPrecise()) {
+        return true;
+    }
+
+    MemoryLocation storeLocation = normalizeMemoryLocation(store->getPointerOperand());
+    if (!storeLocation.isKnownObject()) {
+        return true;
+    }
+
+    return classifyMemoryAlias(location, storeLocation) != MemoryAliasResult::NoAlias;
+}
+
+/// @brief 判断 loop 内是否可能改写某个可识别 load 的地址。
+bool loopMayClobberLoad(Value * pointer, const std::unordered_set<BasicBlock *> & loopBody)
+{
+    MemoryLocation location = normalizeMemoryLocation(pointer);
+    if (location.isPrecise() && !doesPointerEscape(location.object)) {
+        for (auto * bb : loopBody) {
+            for (auto * inst : bb->getInstructions()) {
+                auto * store = dynamic_cast<StoreInst *>(inst);
+                if (store && storeMayAliasLocation(store, location)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    auto * global = dynamic_cast<GlobalVariable *>(getPointerRoot(pointer));
+    if (!global) {
+        return true;
+    }
+
+    PurityAnalyzer purity;
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+                Value * storeRoot = getPointerRoot(store->getPointerOperand());
+                if (storeRoot == global || (!dynamic_cast<AllocaInst *>(storeRoot) &&
+                                            !dynamic_cast<GlobalVariable *>(storeRoot))) {
+                    return true;
+                }
+                continue;
+            }
+
+            auto * call = dynamic_cast<CallInst *>(inst);
+            if (call && !purity.isPure(call->getCallee())) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool valueIsLoopInvariant(Value * value,
+                          const std::unordered_set<BasicBlock *> & loopBody,
+                          std::unordered_map<Value *, bool> & memo,
+                          std::unordered_set<Value *> & visiting)
+{
+    if (!value) {
+        return false;
+    }
+
     auto * inst = dynamic_cast<Instruction *>(value);
-    return inst && inst->getParentBlock() && loopBody.find(inst->getParentBlock()) != loopBody.end();
+    if (!inst) {
+        return true;
+    }
+
+    BasicBlock * block = inst->getParentBlock();
+    if (!block || loopBody.find(block) == loopBody.end()) {
+        return true;
+    }
+
+    auto cached = memo.find(value);
+    if (cached != memo.end()) {
+        return cached->second;
+    }
+
+    if (!visiting.insert(value).second) {
+        memo[value] = false;
+        return false;
+    }
+
+    bool invariant = false;
+    if (auto * gep = dynamic_cast<GetElementPtrInst *>(inst)) {
+        invariant = valueIsLoopInvariant(gep->getBasePointer(), loopBody, memo, visiting) &&
+                    valueIsLoopInvariant(gep->getIndexOperand(), loopBody, memo, visiting);
+    } else if (auto * load = dynamic_cast<LoadInst *>(inst)) {
+        invariant = valueIsLoopInvariant(load->getPointerOperand(), loopBody, memo, visiting) &&
+                    !loopMayClobberLoad(load->getPointerOperand(), loopBody);
+    } else if (!dynamic_cast<PhiInst *>(inst) && !dynamic_cast<CallInst *>(inst) &&
+               !dynamic_cast<StoreInst *>(inst) && !inst->mayHaveSideEffects() &&
+               !inst->mayReadMemory() && !inst->mayWriteMemory()) {
+        invariant = true;
+        for (auto * operand : inst->getOperandsValue()) {
+            if (!valueIsLoopInvariant(operand, loopBody, memo, visiting)) {
+                invariant = false;
+                break;
+            }
+        }
+    }
+
+    visiting.erase(value);
+    memo[value] = invariant;
+    return invariant;
 }
 
 /// @brief 判断调用指令的所有操作数是否循环不变
 /// @param call 待检查的调用指令
 /// @param loopBody 循环体基本块集合
-/// @return true 表示所有实参均不在循环体内定义
+/// @return true 表示所有实参在循环各轮中保持相同
 bool operandsAreLoopInvariant(CallInst * call, const std::unordered_set<BasicBlock *> & loopBody)
 {
     if (!call) {
         return false;
     }
 
+    std::unordered_map<Value *, bool> memo;
+    std::unordered_set<Value *> visiting;
     for (auto * operand : call->getOperandsValue()) {
-        if (isDefinedInLoop(operand, loopBody)) {
+        if (!valueIsLoopInvariant(operand, loopBody, memo, visiting)) {
             return false;
         }
     }
