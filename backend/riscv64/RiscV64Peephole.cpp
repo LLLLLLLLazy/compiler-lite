@@ -31,6 +31,8 @@ bool isLabel(RiscV64Inst * inst)
 	return isLiveInst(inst) && inst->result == ":";
 }
 
+bool registerUsedAfterBeforeRedefOrBoundary(InstList & code, InstIt start, const std::string & reg);
+
 bool isSimpleMoveOrLoad(RiscV64Inst * inst)
 {
 	if (!isLiveInst(inst)) {
@@ -122,6 +124,88 @@ bool foldZeroSubCompare(InstList & code)
 		cmp->replace(cmp->opcode, cmp->result, sub->arg1);
 		li->setDead();
 		sub->setDead();
+		changed = true;
+	}
+	return changed;
+}
+
+/// @brief 融合 fmul.s + fadd.s 为 fmadd.s（以及 fsub 变体）
+///
+/// 模式匹配：
+///   fmul.s d, a, b
+///   fadd.s e, c, d   ->  fmadd.s e, a, b, c
+///   fadd.s e, d, c   ->  fmadd.s e, a, b, c
+///   fsub.s e, d, c   ->  fmsub.s e, a, b, c
+///   fsub.s e, c, d   ->  fnmsub.s e, a, b, c
+///
+/// 要求 fmul 的结果 d 在 add/sub 之间无其他活跃使用，且在 add/sub 之后也不再使用
+bool fuseFMA(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * fmul = *it;
+		if (!isLiveInst(fmul) || fmul->opcode != "fmul.s") {
+			continue;
+		}
+
+		const std::string & productReg = fmul->result;
+		const std::string & lhs = fmul->arg1;
+		const std::string & rhs = fmul->arg2;
+
+		auto addIt = nextLive(code, it);
+		if (addIt == code.end()) {
+			continue;
+		}
+
+		auto * addInst = *addIt;
+		if (!isLiveInst(addInst)) {
+			continue;
+		}
+
+		bool productUsedBetween = false;
+		for (auto check = std::next(it); check != addIt && check != code.end(); ++check) {
+			if (!isLiveInst(*check)) {
+				continue;
+			}
+			if ((*check)->result == productReg || (*check)->arg1 == productReg || (*check)->arg2 == productReg) {
+				productUsedBetween = true;
+				break;
+			}
+		}
+		if (productUsedBetween) {
+			continue;
+		}
+
+		std::string fusedOpcode;
+		std::string accumulateOperand;
+		if (addInst->opcode == "fadd.s") {
+			if (addInst->arg2 == productReg) {
+				accumulateOperand = addInst->arg1;
+				fusedOpcode = "fmadd.s";
+			} else if (addInst->arg1 == productReg) {
+				accumulateOperand = addInst->arg2;
+				fusedOpcode = "fmadd.s";
+			}
+		} else if (addInst->opcode == "fsub.s") {
+			if (addInst->arg1 == productReg) {
+				accumulateOperand = addInst->arg2;
+				fusedOpcode = "fmsub.s";
+			} else if (addInst->arg2 == productReg) {
+				accumulateOperand = addInst->arg1;
+				fusedOpcode = "fnmsub.s";
+			}
+		}
+
+		if (fusedOpcode.empty()) {
+			continue;
+		}
+
+		if (registerUsedAfterBeforeRedefOrBoundary(code, addIt, productReg)) {
+			continue;
+		}
+
+		addInst->replace(fusedOpcode, addInst->result, lhs, rhs, "", accumulateOperand);
+		fmul->setDead();
 		changed = true;
 	}
 	return changed;
@@ -228,6 +312,23 @@ bool registerUsedBeforeRedef(InstList & code, InstIt start, const std::string & 
 	return false;
 }
 
+bool registerUsedAfterBeforeRedefOrBoundary(InstList & code, InstIt start, const std::string & reg)
+{
+	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (usesRegister(inst, reg)) {
+			return true;
+		}
+		if (isControlBoundary(inst)) {
+			break;
+		}
+		if (definesResultOperand(inst) && inst->result == reg) {
+			break;
+		}
+	}
+	return false;
+}
+
 bool instructionMentionsRegister(RiscV64Inst * inst, const std::string & reg)
 {
 	return isLiveInst(inst) &&
@@ -243,6 +344,48 @@ bool registerMentionedInFunction(const InstList & code, const std::string & reg)
 		}
 	}
 	return false;
+}
+
+bool registerMentionedInRange(InstIt begin, InstIt end, const std::string & reg)
+{
+	for (auto it = begin; it != end; ++it) {
+		if (instructionMentionsRegister(*it, reg)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool registerDefinedInRange(InstIt begin, InstIt end, const std::string & reg)
+{
+	for (auto it = begin; it != end; ++it) {
+		auto * inst = *it;
+		if (definesResultOperand(inst) && inst->result == reg) {
+			return true;
+		}
+	}
+	return false;
+}
+
+std::string addressBaseRegister(const std::string & operand)
+{
+	const auto open = operand.find('(');
+	const auto close = operand.find(')', open == std::string::npos ? 0 : open);
+	if (open == std::string::npos || close == std::string::npos || close <= open + 1) {
+		return "";
+	}
+	return operand.substr(open + 1, close - open - 1);
+}
+
+std::string chooseFreeFloatTemp(InstIt begin, InstIt end)
+{
+	static const std::vector<std::string> kCandidates = {"ft4", "ft5", "ft6", "ft7"};
+	for (const auto & reg : kCandidates) {
+		if (!registerMentionedInRange(begin, end, reg)) {
+			return reg;
+		}
+	}
+	return "";
 }
 
 bool functionHasStore(const InstList & code)
@@ -345,6 +488,61 @@ bool reduceMulByConst(InstList & code)
 			code.insert(insertPos, new RiscV64Inst(followOp, d, d, var));
 		}
 
+		changed = true;
+	}
+	return changed;
+}
+
+bool foldUnitStepIncrements(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * li = *it;
+		if (!isLiveInst(li) || li->opcode != "li" || li->arg1 != "1" || li->result.empty()) {
+			continue;
+		}
+
+		auto addIt = nextLive(code, it);
+		auto mvIt = nextLive(code, addIt);
+		if (addIt == code.end() || mvIt == code.end()) {
+			continue;
+		}
+
+		auto * add = *addIt;
+		auto * mv = *mvIt;
+		if (!isLiveInst(add) || add->opcode != "addw" || add->result.empty()) {
+			continue;
+		}
+
+		std::string indexReg;
+		if (add->arg1 != li->result && add->arg2 == li->result) {
+			indexReg = add->arg1;
+		} else if (add->arg2 != li->result && add->arg1 == li->result) {
+			indexReg = add->arg2;
+		} else {
+			continue;
+		}
+
+		if (add->result == indexReg) {
+			if (registerUsedAfterBeforeRedefOrBoundary(code, addIt, li->result)) {
+				continue;
+			}
+			li->setDead();
+			add->replace("addiw", indexReg, indexReg, "1");
+			changed = true;
+			continue;
+		}
+
+		if (!isLiveInst(mv) || mv->opcode != "mv" || mv->result != indexReg || mv->arg1 != add->result) {
+			continue;
+		}
+		if (registerUsedAfterBeforeRedefOrBoundary(code, mvIt, li->result)) {
+			continue;
+		}
+
+		li->setDead();
+		add->replace("addiw", indexReg, indexReg, "1");
+		mv->setDead();
 		changed = true;
 	}
 	return changed;
@@ -467,13 +665,56 @@ bool replaceMemoryBase(RiscV64Inst * inst, const std::string & oldReg, const std
 	return changed;
 }
 
+/// @brief 将普通操作数中对寄存器的直接使用替换为新寄存器，不改写定义位置。
+bool replaceRegisterUse(RiscV64Inst * inst, const std::string & oldReg, const std::string & newReg)
+{
+	if (!isLiveInst(inst)) {
+		return false;
+	}
+
+	bool changed = false;
+	if (!definesResultOperand(inst) && inst->result == oldReg) {
+		inst->result = newReg;
+		changed = true;
+	}
+	if (inst->arg1 == oldReg) {
+		inst->arg1 = newReg;
+		changed = true;
+	}
+	if (inst->arg2 == oldReg) {
+		inst->arg2 = newReg;
+		changed = true;
+	}
+	if (inst->addition == oldReg) {
+		inst->addition = newReg;
+		changed = true;
+	}
+	return changed;
+}
+
+bool replaceUsesBeforeRedef(InstIt begin, InstIt end, const std::string & oldReg, const std::string & newReg)
+{
+	bool changed = false;
+	for (auto it = begin; it != end; ++it) {
+		auto * inst = *it;
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		if (definesResultOperand(inst) && inst->result == oldReg) {
+			break;
+		}
+		changed = replaceRegisterUse(inst, oldReg, newReg) || changed;
+	}
+	return changed;
+}
+
 /// @brief 仿射地址链描述：循环内形如 base + index * 2^scale 的地址计算序列
 struct AffineAddressChain {
     InstIt baseMoveIt;                  ///< mv addrReg, baseReg 指令位置
     InstIt indexMoveIt;                 ///< mv tmpReg, indexReg 指令位置
     InstIt shiftIt;                     ///< slli tmpReg, tmpReg, scale 指令位置
     InstIt addIt;                       ///< add addrReg, addrReg/baseReg, tmpReg 指令位置
-    std::vector<InstIt> memoryUses;     ///< 使用 addrReg 作为基址的内存访问指令列表
+    std::vector<InstIt> rewriteUses;    ///< 使用 addrReg 作为地址基址或派生地址源的指令列表
     std::string baseReg;                ///< 数组基址寄存器
     std::string addrReg;                ///< 计算出的地址寄存器
     std::string tmpReg;                 ///< 中间临时寄存器
@@ -527,7 +768,7 @@ bool matchAffineAddressChain(InstList & code,
 
 	int scale = 0;
 	if (!isInst(shift, "slli", tmpReg, tmpReg) || !parseSmallNonNegativeInteger(shift->arg2, scale) ||
-	    scale > 10) {
+	    scale > 15) {
 		return false;
 	}
 
@@ -543,11 +784,11 @@ bool matchAffineAddressChain(InstList & code,
 	}
 
 	const int stride = 1 << scale;
-	if (stride <= 0 || stride > 2047 || addrReg == indexReg || tmpReg == indexReg || baseReg == indexReg) {
+	if (stride <= 0 || stride > 32767 || addrReg == indexReg || tmpReg == indexReg || baseReg == indexReg) {
 		return false;
 	}
 
-	std::vector<InstIt> memoryUses;
+	std::vector<InstIt> rewriteUses;
 	for (auto scan = nextLive(code, addIt); scan != code.end() && scan != latchIt; scan = nextLive(code, scan)) {
 		auto * inst = *scan;
 		if (!isLiveInst(inst)) {
@@ -569,17 +810,22 @@ bool matchAffineAddressChain(InstList & code,
 		if (!usesAddr) {
 			continue;
 		}
-		if (!isMemoryOpcode(inst->opcode) || isStoreOpcode(inst->opcode) ||
-		    (!operandReferencesAddressBase(inst->result, addrReg) &&
-		     !operandReferencesAddressBase(inst->arg1, addrReg) &&
-		     !operandReferencesAddressBase(inst->arg2, addrReg) &&
-		     !operandReferencesAddressBase(inst->addition, addrReg))) {
-			return false;
+
+		const bool memoryBaseUse =
+		    isMemoryOpcode(inst->opcode) &&
+		    (operandReferencesAddressBase(inst->result, addrReg) ||
+		     operandReferencesAddressBase(inst->arg1, addrReg) ||
+		     operandReferencesAddressBase(inst->arg2, addrReg) ||
+		     operandReferencesAddressBase(inst->addition, addrReg));
+		const bool derivedAddressUse =
+		    isInst(inst, "mv") && inst->arg1 == addrReg && inst->result != indexReg && inst->result != tmpReg;
+		if (!memoryBaseUse && !derivedAddressUse) {
+		    return false;
 		}
-		memoryUses.push_back(scan);
+		rewriteUses.push_back(scan);
 	}
 
-	if (memoryUses.empty()) {
+	if (rewriteUses.empty()) {
 		return false;
 	}
 
@@ -587,7 +833,7 @@ bool matchAffineAddressChain(InstList & code,
 	chain.indexMoveIt = indexMoveIt;
 	chain.shiftIt = shiftIt;
 	chain.addIt = addIt;
-	chain.memoryUses = std::move(memoryUses);
+	chain.rewriteUses = std::move(rewriteUses);
 	chain.baseReg = baseReg;
 	chain.addrReg = addrReg;
 	chain.tmpReg = tmpReg;
@@ -648,14 +894,14 @@ std::string makeUniqueDerivedLabel(const InstList & code, const std::string & he
 /// @param code 指令列表
 /// @param chains 仿射地址链列表
 /// @return true 表示所有链都成功分配了寄存器
-bool assignPointerRegisters(InstList & code, std::vector<AffineAddressChain> & chains)
+bool assignPointerRegisters(InstList & code, InstIt firstLiveRangeIt, std::vector<AffineAddressChain> & chains)
 {
 	static const std::vector<std::string> kCandidates = {"t4", "t5", "t6"};
 	std::unordered_set<std::string> reserved;
 	for (auto & chain : chains) {
 		bool assigned = false;
 		for (const auto & reg : kCandidates) {
-			if (reserved.find(reg) != reserved.end() || registerMentionedInFunction(code, reg)) {
+			if (reserved.find(reg) != reserved.end() || registerMentionedInRange(firstLiveRangeIt, code.end(), reg)) {
 				continue;
 			}
 			chain.pointerReg = reg;
@@ -670,6 +916,307 @@ bool assignPointerRegisters(InstList & code, std::vector<AffineAddressChain> & c
 	return true;
 }
 
+/// @brief 缓存循环内对同一浮点地址的重复 load。
+///
+/// 匹配形如：循环前 fsw v,0(p)，循环体中反复 flw x,0(p)，且 p 在循环体内不被重定义、
+/// 循环体不精确写同一地址。该优化只替换完全相同地址文本，不做激进别名推断。
+bool cacheLoopInvariantFloatLoads(InstList & code)
+{
+	for (auto headerIt = code.begin(); headerIt != code.end(); ++headerIt) {
+		auto * header = *headerIt;
+		if (!isLabel(header)) {
+			continue;
+		}
+
+		auto branchIt = nextLive(code, headerIt);
+		auto exitJumpIt = nextLive(code, branchIt);
+		if (branchIt == code.end() || exitJumpIt == code.end()) {
+			continue;
+		}
+
+		auto * branch = *branchIt;
+		if (!isLiveInst(branch) || branch->opcode != "blt" || branch->arg2.empty() || !isInst(*exitJumpIt, "j")) {
+			continue;
+		}
+
+		const std::string headerLabel = header->opcode;
+		const std::string bodyLabel = branch->arg2;
+		InstIt bodyLabelIt = code.end();
+		for (auto it = exitJumpIt; it != code.end(); ++it) {
+			if (isLabel(*it) && (*it)->opcode == bodyLabel) {
+				bodyLabelIt = it;
+				break;
+			}
+		}
+		if (bodyLabelIt == code.end()) {
+			continue;
+		}
+
+		auto bodyBegin = nextLive(code, bodyLabelIt);
+		InstIt latchIt = code.end();
+		for (auto it = bodyBegin; it != code.end(); it = nextLive(code, it)) {
+			if (it != bodyBegin && isLabel(*it)) {
+				break;
+			}
+			if (isInst(*it, "j", headerLabel)) {
+				latchIt = it;
+				break;
+			}
+		}
+		if (latchIt == code.end() || loopBodyHasUnsafeControlOrCall(code, bodyBegin, latchIt)) {
+			continue;
+		}
+
+		for (auto loadIt = bodyBegin; loadIt != latchIt && loadIt != code.end(); loadIt = nextLive(code, loadIt)) {
+			auto * load = *loadIt;
+			if (!isLiveInst(load) || load->opcode != "flw" || load->result.empty() || load->arg1.empty()) {
+				continue;
+			}
+
+			const std::string address = load->arg1;
+			const std::string baseReg = addressBaseRegister(address);
+			if (baseReg.empty() || registerDefinedInRange(bodyBegin, latchIt, baseReg)) {
+				continue;
+			}
+
+			bool writesSameAddress = false;
+			for (auto scan = bodyBegin; scan != latchIt && scan != code.end(); scan = nextLive(code, scan)) {
+				auto * inst = *scan;
+				if (isLiveInst(inst) && (inst->opcode == "fsw" || inst->opcode == "sw" || inst->opcode == "sd") &&
+				    inst->arg1 == address) {
+					writesSameAddress = true;
+					break;
+				}
+			}
+			if (writesSameAddress) {
+				continue;
+			}
+
+			InstIt searchStart = headerIt;
+			for (auto scan = headerIt; scan != code.begin();) {
+				--scan;
+				if (isInst(*scan, "j", headerLabel)) {
+					searchStart = scan;
+					break;
+				}
+			}
+
+			InstIt storeIt = code.end();
+			for (auto scan = searchStart; scan != code.begin();) {
+				--scan;
+				auto * inst = *scan;
+				if (isLabel(inst)) {
+					break;
+				}
+				if (!isLiveInst(inst)) {
+					continue;
+				}
+				if (definesResultOperand(inst) && inst->result == baseReg) {
+					break;
+				}
+				if (inst->opcode == "fsw" && inst->arg1 == address) {
+					storeIt = scan;
+					break;
+				}
+			}
+			if (storeIt == code.end() || (*storeIt)->result.empty()) {
+				continue;
+			}
+
+			const std::string cacheReg = chooseFreeFloatTemp(storeIt, code.end());
+			if (cacheReg.empty()) {
+				continue;
+			}
+
+			auto firstUseIt = std::next(loadIt);
+			if (!replaceUsesBeforeRedef(firstUseIt, latchIt, load->result, cacheReg)) {
+				continue;
+			}
+
+			code.insert(std::next(storeIt), new RiscV64Inst("fsgnj.s", cacheReg, (*storeIt)->result, (*storeIt)->result));
+			load->setDead();
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool registerUpdatedInLoop(InstList & code, InstIt bodyBegin, InstIt latchIt, const std::string & reg)
+{
+	for (auto it = bodyBegin; it != latchIt && it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		if ((inst->opcode == "add" || inst->opcode == "addi") && inst->result == reg && inst->arg1 == reg) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool replaceAddressBaseUntilRedef(InstList & code,
+                                  InstIt begin,
+                                  InstIt end,
+                                  const std::string & oldReg,
+                                  const std::string & newReg)
+{
+	bool changed = false;
+	for (auto it = begin; it != end && it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		if (definesResultOperand(inst) && inst->result == oldReg) {
+			break;
+		}
+		if (isMemoryOpcode(inst->opcode)) {
+			changed = replaceMemoryBase(inst, oldReg, newReg) || changed;
+		}
+	}
+	return changed;
+}
+
+bool rewriteAddressUsesUntilRedef(InstList & code,
+                                  InstIt begin,
+                                  InstIt end,
+                                  const std::string & oldReg,
+                                  const std::string & newReg)
+{
+	bool changed = false;
+	for (auto it = begin; it != end && it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		if (definesResultOperand(inst) && inst->result == oldReg) {
+			break;
+		}
+		if (isMemoryOpcode(inst->opcode)) {
+			changed = replaceMemoryBase(inst, oldReg, newReg) || changed;
+			continue;
+		}
+		if (isInst(inst, "mv") && inst->arg1 == oldReg) {
+			changed = replaceRegisterUse(inst, oldReg, newReg) || changed;
+		}
+	}
+	return changed;
+}
+
+/// @brief 将内层循环中不变的列偏移合入递推指针初值。
+///
+/// LSR 后常见形态为：
+///   mv addr,rowPtr; mv tmp,col; slli tmp,tmp,k; add addr,addr,tmp; flw/fsw ...,0(addr)
+/// 若 col 在循环内不变且 rowPtr 按 stride 递推，则把 col 偏移移到循环入口前，
+/// 循环体内直接使用 rowPtr 作为内存基址。
+bool foldInvariantAddressOffsetsIntoRecurrences(InstList & code)
+{
+	for (auto headerIt = code.begin(); headerIt != code.end(); ++headerIt) {
+		auto * header = *headerIt;
+		if (!isLabel(header)) {
+			continue;
+		}
+
+		auto branchIt = nextLive(code, headerIt);
+		auto exitJumpIt = nextLive(code, branchIt);
+		if (branchIt == code.end() || exitJumpIt == code.end()) {
+			continue;
+		}
+		auto * branch = *branchIt;
+		if (!isLiveInst(branch) || branch->opcode != "blt" || branch->arg2.empty() || !isInst(*exitJumpIt, "j")) {
+			continue;
+		}
+
+		const std::string headerLabel = header->opcode;
+		const std::string bodyLabel = branch->arg2;
+		InstIt bodyLabelIt = code.end();
+		for (auto it = exitJumpIt; it != code.end(); ++it) {
+			if (isLabel(*it) && (*it)->opcode == bodyLabel) {
+				bodyLabelIt = it;
+				break;
+			}
+		}
+		if (bodyLabelIt == code.end()) {
+			continue;
+		}
+
+		auto bodyBegin = nextLive(code, bodyLabelIt);
+		InstIt latchIt = code.end();
+		for (auto it = bodyBegin; it != code.end(); it = nextLive(code, it)) {
+			if (it != bodyBegin && isLabel(*it)) {
+				break;
+			}
+			if (isInst(*it, "j", headerLabel)) {
+				latchIt = it;
+				break;
+			}
+		}
+		if (latchIt == code.end() || loopBodyHasUnsafeControlOrCall(code, bodyBegin, latchIt)) {
+			continue;
+		}
+
+		for (auto it = bodyBegin; it != latchIt && it != code.end(); it = nextLive(code, it)) {
+			auto * baseMove = *it;
+			if (!isInst(baseMove, "mv") || baseMove->result.empty() || baseMove->arg1.empty()) {
+				continue;
+			}
+			const std::string addrReg = baseMove->result;
+			const std::string pointerReg = baseMove->arg1;
+			if (registerDefinedInRange(bodyBegin, it, pointerReg) ||
+			    !registerUpdatedInLoop(code, bodyBegin, latchIt, pointerReg)) {
+				continue;
+			}
+
+			auto indexMoveIt = nextLive(code, it);
+			auto shiftIt = nextLive(code, indexMoveIt);
+			auto addIt = nextLive(code, shiftIt);
+			if (indexMoveIt == code.end() || shiftIt == code.end() || addIt == code.end()) {
+				continue;
+			}
+			auto * indexMove = *indexMoveIt;
+			auto * shift = *shiftIt;
+			auto * add = *addIt;
+			if (!isInst(indexMove, "mv") || indexMove->result.empty() || indexMove->arg1.empty()) {
+				continue;
+			}
+			const std::string tmpReg = indexMove->result;
+			const std::string offsetReg = indexMove->arg1;
+			if (registerDefinedInRange(bodyBegin, latchIt, offsetReg)) {
+				continue;
+			}
+
+			int scale = 0;
+			if (!isInst(shift, "slli", tmpReg, tmpReg) || !parseSmallNonNegativeInteger(shift->arg2, scale)) {
+				continue;
+			}
+			if (!isInst(add, "add", addrReg)) {
+				continue;
+			}
+			const bool addAddrTmp = add->arg1 == addrReg && add->arg2 == tmpReg;
+			const bool addTmpAddr = add->arg1 == tmpReg && add->arg2 == addrReg;
+			if (!addAddrTmp && !addTmpAddr) {
+				continue;
+			}
+
+			if (!replaceAddressBaseUntilRedef(code, nextLive(code, addIt), latchIt, addrReg, pointerReg)) {
+				continue;
+			}
+
+			code.insert(headerIt, new RiscV64Inst("mv", tmpReg, offsetReg));
+			code.insert(headerIt, new RiscV64Inst("slli", tmpReg, tmpReg, std::to_string(scale)));
+			code.insert(headerIt, new RiscV64Inst("add", pointerReg, pointerReg, tmpReg));
+			baseMove->setDead();
+			indexMove->setDead();
+			shift->setDead();
+			add->setDead();
+			return true;
+		}
+	}
+
+	return false;
+}
+
 /// @brief 通用仿射地址递推优化：把循环内 base + i * stride 地址计算改为指针步进。
 ///
 /// 只匹配简单 innermost 计数循环，不读取函数名/标签名语义。触发条件包括：
@@ -679,10 +1226,6 @@ bool assignPointerRegisters(InstList & code, std::vector<AffineAddressChain> & c
 ///   - 临时指针寄存器在当前函数中完全未使用，且循环体内没有 call/额外分支。
 bool reduceAffineAddressRecurrences(InstList & code)
 {
-	if (functionHasStore(code)) {
-		return false;
-	}
-
 	bool changed = false;
 	for (auto headerIt = code.begin(); headerIt != code.end(); ++headerIt) {
 		auto * header = *headerIt;
@@ -744,7 +1287,7 @@ bool reduceAffineAddressRecurrences(InstList & code)
 				chains.push_back(std::move(chain));
 			}
 		}
-		if (chains.empty() || !assignPointerRegisters(code, chains)) {
+		if (chains.empty() || !assignPointerRegisters(code, headerIt, chains)) {
 			continue;
 		}
 
@@ -759,6 +1302,37 @@ bool reduceAffineAddressRecurrences(InstList & code)
 			code.insert(headerInsertPos, new RiscV64Inst("slli", chain.pointerReg, indexReg, std::to_string(chain.scale)));
 			code.insert(headerInsertPos, new RiscV64Inst("add", chain.pointerReg, chain.baseReg, chain.pointerReg));
 		}
+		int sharedLargeStride = 0;
+		bool canShareLargeStride = true;
+		for (const auto & chain : chains) {
+			if (chain.stride <= 2047) {
+				continue;
+			}
+			if (sharedLargeStride == 0) {
+				sharedLargeStride = chain.stride;
+			} else if (sharedLargeStride != chain.stride) {
+				canShareLargeStride = false;
+			}
+		}
+
+		std::string sharedStrideReg;
+		if (sharedLargeStride > 0 && canShareLargeStride) {
+			static const std::vector<std::string> kCandidates = {"t4", "t5", "t6"};
+			std::unordered_set<std::string> pointerRegs;
+			for (const auto & chain : chains) {
+				pointerRegs.insert(chain.pointerReg);
+			}
+			for (const auto & reg : kCandidates) {
+				if (pointerRegs.find(reg) == pointerRegs.end() &&
+				    !registerMentionedInRange(headerIt, code.end(), reg)) {
+					sharedStrideReg = reg;
+					break;
+				}
+			}
+			if (!sharedStrideReg.empty()) {
+				code.insert(headerInsertPos, new RiscV64Inst("li", sharedStrideReg, std::to_string(sharedLargeStride)));
+			}
+		}
 		code.insert(headerInsertPos, new RiscV64Inst(loopEntryLabel, ":"));
 		(*latchIt)->result = loopEntryLabel;
 
@@ -767,11 +1341,23 @@ bool reduceAffineAddressRecurrences(InstList & code)
 			(*chain.indexMoveIt)->setDead();
 			(*chain.shiftIt)->setDead();
 			(*chain.addIt)->setDead();
-			for (auto memIt : chain.memoryUses) {
-				replaceMemoryBase(*memIt, chain.addrReg, chain.pointerReg);
+			for (auto useIt : chain.rewriteUses) {
+				if (isMemoryOpcode((*useIt)->opcode)) {
+					replaceMemoryBase(*useIt, chain.addrReg, chain.pointerReg);
+				} else {
+					replaceRegisterUse(*useIt, chain.addrReg, chain.pointerReg);
+				}
 			}
-			code.insert(updateInsertIt,
-			            new RiscV64Inst("addi", chain.pointerReg, chain.pointerReg, std::to_string(chain.stride)));
+			rewriteAddressUsesUntilRedef(code, nextLive(code, chain.addIt), latchIt, chain.addrReg, chain.pointerReg);
+			if (chain.stride <= 2047) {
+				code.insert(updateInsertIt,
+				            new RiscV64Inst("addi", chain.pointerReg, chain.pointerReg, std::to_string(chain.stride)));
+			} else if (!sharedStrideReg.empty() && chain.stride == sharedLargeStride) {
+				code.insert(updateInsertIt, new RiscV64Inst("add", chain.pointerReg, chain.pointerReg, sharedStrideReg));
+			} else {
+				code.insert(updateInsertIt, new RiscV64Inst("li", chain.tmpReg, std::to_string(chain.stride)));
+				code.insert(updateInsertIt, new RiscV64Inst("add", chain.pointerReg, chain.pointerReg, chain.tmpReg));
+			}
 		}
 
 		return true;
@@ -783,15 +1369,22 @@ bool reduceAffineAddressRecurrences(InstList & code)
 
 bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel)
 {
-	(void) optLevel;  // 当前所有窥孔优化均不依赖优化级别
 	bool changed = false;
 	bool localChanged = false;
 	auto & code = iloc.getCode();
 	do {
 		localChanged = false;
+		// FMA融合优化：将 fmul.s + fadd.s/fsub.s 融合为 fmadd.s/fmsub.s
+		// 仅在O2及以上启用，因为FMA比分开fmul+fadd精度更高，会导致浮点结果差异
+		if (optLevel > 1) {
+			localChanged = fuseFMA(code) || localChanged;
+		}
+		localChanged = cacheLoopInvariantFloatLoads(code) || localChanged;
 		// 仿射地址递推优化：将循环内 base+i*stride 地址计算改为指针步进
 		localChanged = reduceAffineAddressRecurrences(code) || localChanged;
+		localChanged = foldInvariantAddressOffsetsIntoRecurrences(code) || localChanged;
 		localChanged = reduceMulByConst(code) || localChanged;
+		localChanged = foldUnitStepIncrements(code) || localChanged;
 		localChanged = foldZeroSubCompare(code) || localChanged;
 		localChanged = removeSelfMoves(code) || localChanged;
 		localChanged = removeConsecutiveDuplicates(code) || localChanged;
