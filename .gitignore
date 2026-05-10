@@ -1,4 +1,5 @@
 build/
+build-local/
 frontend/antlr4/.antlr/
 
 tests/
@@ -6,3 +7,13 @@ tools/
 
 .DS_Store
 .cache/
+.arts
+.claude
+
+tests/2025_performance/
+tests/2025_function/
+
+passed_tests.md
+.vscode
+asm_analysis
+ir_analysis
