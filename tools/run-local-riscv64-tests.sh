@@ -219,6 +219,16 @@ compute_md5() {
 	return 1
 }
 
+## @brief Compare two text files after normalizing CRLF line endings to LF
+# @param $1 First file path
+# @param $2 Second file path
+normalized_text_files_equal() {
+	local lhs="$1"
+	local rhs="$2"
+
+	cmp -s <(sed 's/\r$//' "${lhs}") <(sed 's/\r$//' "${rhs}")
+}
+
 file_size_bytes() {
 	wc -c < "$1" | tr -d '[:space:]'
 }
@@ -327,12 +337,14 @@ run_riscv64_check() {
 	}
 
 	if [[ "${actual_md5}" != "${expected_md5}" ]]; then
-		actual_size=$(file_size_bytes "${result_file}")
-		expected_size=$(file_size_bytes "${outfile}")
-		echo "${source_name} NG [riscv64]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
-		echo "  expected md5=${expected_md5} size=${expected_size} tail16=$(tail_bytes_hex "${outfile}")"
-		echo "  actual   md5=${actual_md5} size=${actual_size} tail16=$(tail_bytes_hex "${result_file}")"
-		return 1
+		if ! normalized_text_files_equal "${result_file}" "${outfile}"; then
+			actual_size=$(file_size_bytes "${result_file}")
+			expected_size=$(file_size_bytes "${outfile}")
+			echo "${source_name} NG [riscv64]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
+			echo "  expected md5=${expected_md5} size=${expected_size} tail16=$(tail_bytes_hex "${outfile}")"
+			echo "  actual   md5=${actual_md5} size=${actual_size} tail16=$(tail_bytes_hex "${result_file}")"
+			return 1
+		fi
 	fi
 
 	printf "%-${STATUS_COL_WIDTH}s %s\n" "${source_name} OK [riscv64]" "compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
