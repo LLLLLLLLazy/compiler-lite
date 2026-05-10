@@ -168,6 +168,14 @@ std::vector<int> computeSavedRegs(
 	return regs;
 }
 
+/// @brief 判断叶子函数是否可以省略栈帧
+/// @param func 当前函数
+/// @param allocMap 寄存器分配映射表
+/// @param savedRegs 需要保存的callee-saved寄存器列表
+/// @param outgoingArgBytes 调用其他函数时超出寄存器传递的参数字节数
+/// @return 若可以省略栈帧则返回true
+///
+/// 条件：无调用指令、无超出寄存器传递的参数、仅需保存FP、无栈分配的值
 bool canOmitLeafFrame(Function * func,
                       const std::unordered_map<Value *, RegAllocInfo> & allocMap,
                       const std::vector<int> & savedRegs,
@@ -198,6 +206,22 @@ CodeGeneratorRiscV64::CodeGeneratorRiscV64(Module * _module,
 	: CodeGeneratorAsm(_module),
 	  greedyAllocator(nullptr, enableCalleeSavedFPR, enableCoalesce, enableSplit)
 {}
+
+/// @brief 产生汇编文件
+/// @return 始终返回true
+///
+/// 依次输出：文件头部 -> 数据段 -> 代码段 -> 内置循环并行运行时（若需要）
+bool CodeGeneratorRiscV64::run()
+{
+	genHeader();
+	genDataSection();
+	CodeGeneratorAsm::genCodeSection();
+	// 若模块中调用了循环并行运行时函数，则输出对应的汇编实现
+	if (moduleUsesMtRuntime()) {
+		emitMtRuntime();
+	}
+	return true;
+}
 
 /// @brief 生成汇编文件头部，输出RISC-V64架构属性
 void CodeGeneratorRiscV64::genHeader()
@@ -386,6 +410,347 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	// 输出汇编指令序列
 	iloc.outPut(fp);
 	std::fprintf(fp, ".size %s, .-%s\n", func->getName().c_str(), func->getName().c_str());
+}
+
+/// @brief 判断当前模块是否使用了内置循环并行运行时函数
+/// @return 若模块中存在对 __mtstart/__mtend/__mtstart4 等函数的调用则返回true
+bool CodeGeneratorRiscV64::moduleUsesMtRuntime() const
+{
+	if (module == nullptr) {
+		return false;
+	}
+
+	for (auto * func : module->getFunctionList()) {
+		if (func == nullptr || func->isBuiltin()) {
+			continue;
+		}
+		for (auto * bb : func->getBlocks()) {
+			for (auto * inst : bb->getInstructions()) {
+				auto * call = dynamic_cast<CallInst *>(inst);
+				if (call == nullptr || call->getCallee() == nullptr) {
+					continue;
+				}
+				const std::string & name = call->getCallee()->getName();
+				if (name == "__mtstart" || name == "__mtend" ||
+				    name == "__mtstart4" || name == "__mtthreadcount4" ||
+				    name == "__mtstorei32" || name == "__mtloadi32" ||
+				    name == "__mtend4") {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+/// @brief 输出内置循环并行运行时汇编
+///
+/// 生成以下运行时函数的RISC-V64汇编实现：
+/// - __mtstart: 启动1路并行线程（clone系统调用），复制当前栈帧到独立栈
+/// - __mtend: 等待并行线程完成（自旋等待done标志）
+/// - __mtstart4: 启动4路并行线程，使用门控同步确保所有线程同时开始执行
+/// - __mtthreadcount4: 返回当前并行线程数
+/// - __mtstorei32: 线程安全地存储32位结果到共享结果数组
+/// - __mtloadi32: 线程安全地从共享结果数组加载32位结果
+/// - __mtend4: 4路并行结束，子线程标记完成并退出，主线程等待所有子线程
+void CodeGeneratorRiscV64::emitMtRuntime()
+{
+	// 每个并行线程的栈大小：16MB
+	constexpr int kThreadStackBytes = 16 * 1024 * 1024;
+	// clone标志位组合，共享父进程的地址空间和文件描述符
+	constexpr int kCloneFlags = 0x100 | 0x200 | 0x400 | 0x800 | 0x10000 | 0x40000;
+
+	// ---- BSS段：单线程并行运行时的全局变量 ----
+	std::fprintf(fp, "\n.bss\n");
+	std::fprintf(fp, ".align 4\n");
+	std::fprintf(fp, "__minic_mt_done:\n");		// 并行完成标志
+	std::fprintf(fp, "\t.word 0\n");
+	std::fprintf(fp, ".align 4\n");
+	std::fprintf(fp, "__minic_mt_stack:\n");	// 并行线程的独立栈空间
+	std::fprintf(fp, "\t.zero %d\n", kThreadStackBytes);
+	std::fprintf(fp, "__minic_mt_stack_end:\n");
+	std::fprintf(fp, "\n.text\n");
+
+	// ---- __mtstart: 启动1路并行线程 ----
+	// 将当前栈帧复制到独立栈，然后通过clone系统调用创建线程
+	std::fprintf(fp, ".align 2\n");
+	std::fprintf(fp, ".global __mtstart\n");
+	std::fprintf(fp, ".type __mtstart, %%function\n");
+	std::fprintf(fp, "__mtstart:\n");
+	// 计算当前栈帧大小并复制到并行线程的独立栈
+	std::fprintf(fp, "\tmv t0,sp\n");
+	std::fprintf(fp, "\tmv t1,s0\n");
+	std::fprintf(fp, "\tsub t2,t1,t0\n");
+	std::fprintf(fp, "\tla t3,__minic_mt_stack_end\n");
+	std::fprintf(fp, "\tsub t4,t3,t2\n");
+	std::fprintf(fp, "\tmv t5,t0\n");
+	std::fprintf(fp, "\tmv t6,t4\n");
+	std::fprintf(fp, ".L_minic_mt_copy_loop:\n");
+	std::fprintf(fp, "\tbgeu t5,t1,.L_minic_mt_copy_done\n");
+	std::fprintf(fp, "\tld a5,0(t5)\n");
+	std::fprintf(fp, "\tsd a5,0(t6)\n");
+	std::fprintf(fp, "\taddi t5,t5,8\n");
+	std::fprintf(fp, "\taddi t6,t6,8\n");
+	std::fprintf(fp, "\tj .L_minic_mt_copy_loop\n");
+	std::fprintf(fp, ".L_minic_mt_copy_done:\n");
+	// 清除完成标志，确保内存可见性后发起clone系统调用
+	std::fprintf(fp, "\tla a5,__minic_mt_done\n");
+	std::fprintf(fp, "\tsw zero,0(a5)\n");
+	std::fprintf(fp, "\tfence rw,rw\n");
+	// clone系统调用：创建共享地址空间的线程
+	std::fprintf(fp, "\tli a0,%d\n", kCloneFlags);
+	std::fprintf(fp, "\tmv a1,t4\n");
+	std::fprintf(fp, "\tli a2,0\n");
+	std::fprintf(fp, "\tli a3,0\n");
+	std::fprintf(fp, "\tli a4,0\n");
+	std::fprintf(fp, "\tli a7,220\n");
+	std::fprintf(fp, "\tecall\n");
+	// 父线程：clone返回子线程TID（>0），直接返回0
+	std::fprintf(fp, "\tbeqz a0,.L_minic_mt_child\n");
+	std::fprintf(fp, "\tblt a0,zero,.L_minic_mt_clone_failed\n");
+	std::fprintf(fp, "\tli a0,0\n");
+	std::fprintf(fp, "\tret\n");
+	// clone失败：设置done标志为1，返回0
+	std::fprintf(fp, ".L_minic_mt_clone_failed:\n");
+	std::fprintf(fp, "\tla a5,__minic_mt_done\n");
+	std::fprintf(fp, "\tli a4,1\n");
+	std::fprintf(fp, "\tsw a4,0(a5)\n");
+	std::fprintf(fp, "\tli a0,0\n");
+	std::fprintf(fp, "\tret\n");
+	// 子线程：设置FP为独立栈顶，返回1表示子线程身份
+	std::fprintf(fp, ".L_minic_mt_child:\n");
+	std::fprintf(fp, "\tmv s0,t3\n");
+	std::fprintf(fp, "\tli a0,1\n");
+	std::fprintf(fp, "\tret\n");
+	std::fprintf(fp, ".size __mtstart, .-__mtstart\n");
+
+	// ---- __mtend: 等待并行线程完成 ----
+	// 子线程(a0!=0)：设置done标志后通过exit系统调用退出
+	// 父线程(a0==0)：自旋等待done标志变为非零
+	std::fprintf(fp, ".align 2\n");
+	std::fprintf(fp, ".global __mtend\n");
+	std::fprintf(fp, ".type __mtend, %%function\n");
+	std::fprintf(fp, "__mtend:\n");
+	std::fprintf(fp, "\tbnez a0,.L_minic_mt_child_exit\n");
+	std::fprintf(fp, "\tla t0,__minic_mt_done\n");
+	std::fprintf(fp, ".L_minic_mt_parent_wait:\n");
+	std::fprintf(fp, "\tfence r,rw\n");
+	std::fprintf(fp, "\tlw t1,0(t0)\n");
+	std::fprintf(fp, "\tbeqz t1,.L_minic_mt_parent_wait\n");
+	std::fprintf(fp, "\tret\n");
+	std::fprintf(fp, ".L_minic_mt_child_exit:\n");
+	std::fprintf(fp, "\tla t0,__minic_mt_done\n");
+	std::fprintf(fp, "\tli t1,1\n");
+	std::fprintf(fp, "\tfence rw,w\n");
+	std::fprintf(fp, "\tsw t1,0(t0)\n");
+	std::fprintf(fp, "\tfence rw,rw\n");
+	std::fprintf(fp, "\tli a0,0\n");
+	std::fprintf(fp, "\tli a7,93\n");
+	std::fprintf(fp, "\tecall\n");
+	std::fprintf(fp, ".size __mtend, .-__mtend\n");
+
+	// ---- 4路并行运行时的全局变量 ----
+	// 每个并行线程的独立栈大小（与2路版本保持一致）
+	constexpr int kThreadStackBytes4 = 16 * 1024 * 1024;
+
+	std::fprintf(fp, "\n.bss\n");
+	std::fprintf(fp, ".align 4\n");
+	std::fprintf(fp, "__minic_mt4_gate:\n");			// 门控同步标志：0=未启动, 1=启动, -1=失败
+	std::fprintf(fp, "\t.word 0\n");
+	std::fprintf(fp, ".align 4\n");
+	std::fprintf(fp, "__minic_mt4_thread_count:\n");	// 实际并行线程数
+	std::fprintf(fp, "\t.word 0\n");
+	std::fprintf(fp, ".align 4\n");
+	std::fprintf(fp, "__minic_mt4_done:\n");			// 各线程完成标志数组（4个int32）
+	std::fprintf(fp, "\t.zero 16\n");
+	std::fprintf(fp, ".align 4\n");
+	std::fprintf(fp, "__minic_mt4_result:\n");			// 各线程结果数组（4个int32）
+	std::fprintf(fp, "\t.zero 16\n");
+	std::fprintf(fp, ".align 4\n");
+	std::fprintf(fp, "__minic_mt4_stack1:\n");			// 线程1的独立栈空间
+	std::fprintf(fp, "\t.zero %d\n", kThreadStackBytes4);
+	std::fprintf(fp, "__minic_mt4_stack1_end:\n");
+	std::fprintf(fp, ".align 4\n");
+	std::fprintf(fp, "__minic_mt4_stack2:\n");			// 线程2的独立栈空间
+	std::fprintf(fp, "\t.zero %d\n", kThreadStackBytes4);
+	std::fprintf(fp, "__minic_mt4_stack2_end:\n");
+	std::fprintf(fp, ".align 4\n");
+	std::fprintf(fp, "__minic_mt4_stack3:\n");			// 线程3的独立栈空间
+	std::fprintf(fp, "\t.zero %d\n", kThreadStackBytes4);
+	std::fprintf(fp, "__minic_mt4_stack3_end:\n");
+	std::fprintf(fp, "\n.text\n");
+
+	// ---- __mtstart4: 启动4路并行线程 ----
+	// 初始化门控和结果数组，依次clone 3个子线程，然后设置线程数为4并打开门控
+	std::fprintf(fp, ".align 2\n");
+	std::fprintf(fp, ".global __mtstart4\n");
+	std::fprintf(fp, ".type __mtstart4, %%function\n");
+	std::fprintf(fp, "__mtstart4:\n");
+	// 初始化：清除门控标志，设置线程数为1（仅主线程），清零完成和结果数组
+	std::fprintf(fp, "\tla a5,__minic_mt4_gate\n");
+	std::fprintf(fp, "\tsw zero,0(a5)\n");
+	std::fprintf(fp, "\tla a5,__minic_mt4_thread_count\n");
+	std::fprintf(fp, "\tli a4,1\n");
+	std::fprintf(fp, "\tsw a4,0(a5)\n");
+	std::fprintf(fp, "\tla a5,__minic_mt4_done\n");
+	std::fprintf(fp, "\tsw zero,0(a5)\n");
+	std::fprintf(fp, "\tsw zero,4(a5)\n");
+	std::fprintf(fp, "\tsw zero,8(a5)\n");
+	std::fprintf(fp, "\tsw zero,12(a5)\n");
+	std::fprintf(fp, "\tla a5,__minic_mt4_result\n");
+	std::fprintf(fp, "\tsw zero,0(a5)\n");
+	std::fprintf(fp, "\tsw zero,4(a5)\n");
+	std::fprintf(fp, "\tsw zero,8(a5)\n");
+	std::fprintf(fp, "\tsw zero,12(a5)\n");
+	std::fprintf(fp, "\tfence rw,rw\n");
+
+	// 为指定线程ID复制栈帧并clone子线程的辅助lambda
+	auto emitCloneChild = [&](int tid, const char * stackEndLabel) {
+		// 计算栈帧大小并定位子线程独立栈的底部
+		std::fprintf(fp, "\tli t0,%d\n", tid);			// t0 = 线程ID
+		std::fprintf(fp, "\tla t1,%s\n", stackEndLabel);	// t1 = 子线程栈顶
+		std::fprintf(fp, "\tmv t2,sp\n");			// t2 = 父线程sp
+		std::fprintf(fp, "\tmv t3,s0\n");			// t3 = 父线程fp
+		std::fprintf(fp, "\tsub t4,t3,t2\n");			// t4 = 栈帧大小
+		std::fprintf(fp, "\tsub t5,t1,t4\n");			// t5 = 子线程栈底
+		std::fprintf(fp, "\tmv t6,t2\n");			// t6 = 源地址（父线程栈底）
+		std::fprintf(fp, "\tmv a2,t5\n");			// a2 = 目标地址（子线程栈底）
+		// 逐8字节复制栈帧内容到子线程独立栈
+		std::fprintf(fp, ".L_minic_mt4_copy_%d:\n", tid);
+		std::fprintf(fp, "\tbgeu t6,t3,.L_minic_mt4_copy_done_%d\n", tid);
+		std::fprintf(fp, "\tld a3,0(t6)\n");
+		std::fprintf(fp, "\tsd a3,0(a2)\n");
+		std::fprintf(fp, "\taddi t6,t6,8\n");
+		std::fprintf(fp, "\taddi a2,a2,8\n");
+		std::fprintf(fp, "\tj .L_minic_mt4_copy_%d\n", tid);
+		std::fprintf(fp, ".L_minic_mt4_copy_done_%d:\n", tid);
+		// 调用clone系统调用创建共享地址空间的子线程
+		std::fprintf(fp, "\tli a0,%d\n", kCloneFlags);	// clone标志
+		std::fprintf(fp, "\tmv a1,t5\n");			// 子线程栈底
+		std::fprintf(fp, "\tli a2,0\n");
+		std::fprintf(fp, "\tli a3,0\n");
+		std::fprintf(fp, "\tli a4,0\n");
+		std::fprintf(fp, "\tli a7,220\n");			// 系统调用号：clone
+		std::fprintf(fp, "\tecall\n");
+		// 父线程进入子线程入口，子线程（a0==0）跳转到公共子线程标签
+		std::fprintf(fp, "\tbeqz a0,.L_minic_mt4_child\n");
+		// clone失败（a0<0）跳转到统一失败处理
+		std::fprintf(fp, "\tblt a0,zero,.L_minic_mt4_clone_failed\n");
+	};
+
+	// 依次为线程1、2、3复制栈帧并clone
+	emitCloneChild(1, "__minic_mt4_stack1_end");
+	emitCloneChild(2, "__minic_mt4_stack2_end");
+	emitCloneChild(3, "__minic_mt4_stack3_end");
+
+	// 所有子线程clone成功：设置线程数为4，打开门控标志，主线程返回0
+	std::fprintf(fp, "\tla a5,__minic_mt4_thread_count\n");
+	std::fprintf(fp, "\tli a4,4\n");
+	std::fprintf(fp, "\tsw a4,0(a5)\n");
+	std::fprintf(fp, "\tfence rw,rw\n");
+	std::fprintf(fp, "\tla a5,__minic_mt4_gate\n");
+	std::fprintf(fp, "\tli a4,1\n");
+	std::fprintf(fp, "\tsw a4,0(a5)\n");
+	std::fprintf(fp, "\tfence rw,rw\n");
+	std::fprintf(fp, "\tli a0,0\n");
+	std::fprintf(fp, "\tret\n");
+	// clone失败：设置门控为-1，通知子线程取消，主线程返回0
+	std::fprintf(fp, ".L_minic_mt4_clone_failed:\n");
+	std::fprintf(fp, "\tla a5,__minic_mt4_gate\n");
+	std::fprintf(fp, "\tli a4,-1\n");
+	std::fprintf(fp, "\tsw a4,0(a5)\n");
+	std::fprintf(fp, "\tfence rw,rw\n");
+	std::fprintf(fp, "\tli a0,0\n");
+	std::fprintf(fp, "\tret\n");
+	// 子线程入口：设置FP为独立栈顶，自旋等待门控标志变为非零
+	// 门控为1时开始执行（返回线程ID），门控为-1时取消执行（exit退出）
+	std::fprintf(fp, ".L_minic_mt4_child:\n");
+	std::fprintf(fp, "\tmv s0,t1\n");
+	std::fprintf(fp, "\tla a5,__minic_mt4_gate\n");
+	std::fprintf(fp, ".L_minic_mt4_child_wait:\n");
+	std::fprintf(fp, "\tfence r,rw\n");
+	std::fprintf(fp, "\tlw a4,0(a5)\n");
+	std::fprintf(fp, "\tbeqz a4,.L_minic_mt4_child_wait\n");
+	std::fprintf(fp, "\tblt a4,zero,.L_minic_mt4_child_cancel\n");
+	std::fprintf(fp, "\tmv a0,t0\n");
+	std::fprintf(fp, "\tret\n");
+	std::fprintf(fp, ".L_minic_mt4_child_cancel:\n");
+	std::fprintf(fp, "\tli a0,0\n");
+	std::fprintf(fp, "\tli a7,93\n");
+	std::fprintf(fp, "\tecall\n");
+	std::fprintf(fp, ".size __mtstart4, .-__mtstart4\n");
+
+	// ---- __mtthreadcount4: 返回当前并行线程数 ----
+	std::fprintf(fp, ".align 2\n");
+	std::fprintf(fp, ".type __mtthreadcount4, %%function\n");
+	std::fprintf(fp, "__mtthreadcount4:\n");
+	std::fprintf(fp, "\tla t0,__minic_mt4_thread_count\n");
+	std::fprintf(fp, "\tlw a0,0(t0)\n");
+	std::fprintf(fp, "\tret\n");
+	std::fprintf(fp, ".size __mtthreadcount4, .-__mtthreadcount4\n");
+
+	// ---- __mtstorei32: 线程安全地存储32位结果 ----
+	// a0=结果索引, a1=结果值；写入后执行fence确保可见性
+	std::fprintf(fp, ".align 2\n");
+	std::fprintf(fp, ".type __mtstorei32, %%function\n");
+	std::fprintf(fp, "__mtstorei32:\n");
+	std::fprintf(fp, "\tla t0,__minic_mt4_result\n");
+	std::fprintf(fp, "\tslli t1,a0,2\n");
+	std::fprintf(fp, "\tadd t0,t0,t1\n");
+	std::fprintf(fp, "\tsw a1,0(t0)\n");
+	std::fprintf(fp, "\tfence rw,w\n");
+	std::fprintf(fp, "\tret\n");
+	std::fprintf(fp, ".size __mtstorei32, .-__mtstorei32\n");
+
+	// ---- __mtloadi32: 线程安全地加载32位结果 ----
+	// a0=结果索引；加载前执行fence确保读到最新值
+	std::fprintf(fp, ".align 2\n");
+	std::fprintf(fp, ".type __mtloadi32, %%function\n");
+	std::fprintf(fp, "__mtloadi32:\n");
+	std::fprintf(fp, "\tla t0,__minic_mt4_result\n");
+	std::fprintf(fp, "\tslli t1,a0,2\n");
+	std::fprintf(fp, "\tadd t0,t0,t1\n");
+	std::fprintf(fp, "\tfence r,rw\n");
+	std::fprintf(fp, "\tlw a0,0(t0)\n");
+	std::fprintf(fp, "\tret\n");
+	std::fprintf(fp, ".size __mtloadi32, .-__mtloadi32\n");
+
+	// ---- __mtend4: 4路并行结束 ----
+	// 子线程(a0!=0)：在done数组中标记完成，然后exit退出
+	// 父线程(a0==0)：依次等待所有子线程的done标志变为1
+	std::fprintf(fp, ".align 2\n");
+	std::fprintf(fp, ".type __mtend4, %%function\n");
+	std::fprintf(fp, "__mtend4:\n");
+	std::fprintf(fp, "\tbnez a0,.L_minic_mt4_child_exit\n");
+	std::fprintf(fp, "\tla t0,__minic_mt4_thread_count\n");
+	std::fprintf(fp, "\tlw t1,0(t0)\n");
+	std::fprintf(fp, "\tli t2,1\n");
+	std::fprintf(fp, "\tla t3,__minic_mt4_done\n");
+	std::fprintf(fp, ".L_minic_mt4_parent_next:\n");
+	std::fprintf(fp, "\tbge t2,t1,.L_minic_mt4_parent_done\n");
+	std::fprintf(fp, "\tslli t4,t2,2\n");
+	std::fprintf(fp, "\tadd t5,t3,t4\n");
+	std::fprintf(fp, ".L_minic_mt4_parent_wait:\n");
+	std::fprintf(fp, "\tfence r,rw\n");
+	std::fprintf(fp, "\tlw t6,0(t5)\n");
+	std::fprintf(fp, "\tbeqz t6,.L_minic_mt4_parent_wait\n");
+	std::fprintf(fp, "\taddi t2,t2,1\n");
+	std::fprintf(fp, "\tj .L_minic_mt4_parent_next\n");
+	std::fprintf(fp, ".L_minic_mt4_parent_done:\n");
+	std::fprintf(fp, "\tret\n");
+	std::fprintf(fp, ".L_minic_mt4_child_exit:\n");
+	std::fprintf(fp, "\tla t0,__minic_mt4_done\n");
+	std::fprintf(fp, "\tslli t1,a0,2\n");
+	std::fprintf(fp, "\tadd t0,t0,t1\n");
+	std::fprintf(fp, "\tli t2,1\n");
+	std::fprintf(fp, "\tfence rw,w\n");
+	std::fprintf(fp, "\tsw t2,0(t0)\n");
+	std::fprintf(fp, "\tfence rw,rw\n");
+	std::fprintf(fp, "\tli a0,0\n");
+	std::fprintf(fp, "\tli a7,93\n");
+	std::fprintf(fp, "\tecall\n");
+	std::fprintf(fp, ".size __mtend4, .-__mtend4\n");
 }
 
 /// @brief 执行寄存器分配，包括Greedy分配和栈空间分配

@@ -27,6 +27,9 @@ public:
 	using CodeGenerator::run;
 
 protected:
+	/// @brief 产生汇编文件
+	bool run() override;
+
 	/// @brief 生成汇编文件头部（架构属性等）
 	void genHeader() override;
 
@@ -59,6 +62,12 @@ protected:
 	void getIRValueStr(Value * val, std::string & str);
 
 private:
+	/// @brief 当前模块是否使用内置循环并行运行时
+	bool moduleUsesMtRuntime() const;
+
+	/// @brief 输出内置循环并行运行时汇编
+	void emitMtRuntime();
+
 	/// @brief Greedy寄存器分配器实例
 	GreedyRegAllocator greedyAllocator;
 
