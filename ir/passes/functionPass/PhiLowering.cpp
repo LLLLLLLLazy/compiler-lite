@@ -22,11 +22,89 @@
 
 #include "BasicBlock.h"
 #include "CopyInst.h"
+#include "BranchInst.h"
+#include "CondBranchInst.h"
 #include "Function.h"
 #include "Instruction.h"
 #include "Module.h"
 #include "PhiInst.h"
 #include "Value.h"
+
+namespace {
+
+bool retargetTerminator(BasicBlock * pred, BasicBlock * oldTarget, BasicBlock * newTarget)
+{
+    if (!pred || !oldTarget || !newTarget) {
+        return false;
+    }
+
+    if (auto * branch = dynamic_cast<BranchInst *>(pred->getTerminator())) {
+        if (branch->getTarget() != oldTarget) {
+            return false;
+        }
+        branch->setTarget(newTarget);
+        return true;
+    }
+
+    if (auto * cond = dynamic_cast<CondBranchInst *>(pred->getTerminator())) {
+        bool changed = false;
+        if (cond->getTrueDest() == oldTarget) {
+            cond->setTrueDest(newTarget);
+            changed = true;
+        }
+        if (cond->getFalseDest() == oldTarget) {
+            cond->setFalseDest(newTarget);
+            changed = true;
+        }
+        return changed;
+    }
+
+    return false;
+}
+
+void insertBlockBefore(Function * func, BasicBlock * bb, BasicBlock * before)
+{
+    if (!func || !bb || !before || bb == before) {
+        return;
+    }
+
+    auto & blocks = func->getBlocks();
+    auto bbPos = std::find(blocks.begin(), blocks.end(), bb);
+    auto beforePos = std::find(blocks.begin(), blocks.end(), before);
+    if (bbPos == blocks.end() || beforePos == blocks.end()) {
+        return;
+    }
+
+    blocks.erase(bbPos);
+    beforePos = std::find(blocks.begin(), blocks.end(), before);
+    blocks.insert(beforePos, bb);
+}
+
+BasicBlock * splitCriticalEdge(Function * func, BasicBlock * pred, BasicBlock * succ)
+{
+    if (!func || !pred || !succ || pred->getSuccessors().size() <= 1 || succ->getPredecessors().size() <= 1) {
+        return pred;
+    }
+
+    auto * split = func->newBasicBlock();
+    insertBlockBefore(func, split, succ);
+
+    split->addInstruction(new BranchInst(func, succ));
+    split->linkSuccessor(succ);
+
+    if (!retargetTerminator(pred, succ, split)) {
+        return pred;
+    }
+
+    pred->removeSuccessor(succ);
+    pred->addSuccessor(split);
+    split->addPredecessor(pred);
+    succ->removePredecessor(pred);
+
+    return split;
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // 构造函数
@@ -53,7 +131,8 @@ void PhiLowering::run()
     // 遍历基本块列表的快照即可，因为删除 phi 只会改动指令链表，不会改动块列表
     std::vector<PhiInst *> toDelete;
 
-    for (auto * bb : func->getBlocks()) {
+    std::vector<BasicBlock *> blocks = func->getBlocks();
+    for (auto * bb : blocks) {
         // 收集当前块顶部连续出现的 phi 节点
         std::vector<PhiInst *> phis;
         for (auto * inst : bb->getInstructions()) {
@@ -65,6 +144,27 @@ void PhiLowering::run()
         }
         if (phis.empty()) {
             continue;
+        }
+
+        std::vector<BasicBlock *> incomingPreds;
+        for (auto * phi : phis) {
+            for (int i = 0; i < phi->getIncomingCount(); ++i) {
+                BasicBlock * pred = phi->getIncomingBlock(i);
+                if (std::find(incomingPreds.begin(), incomingPreds.end(), pred) == incomingPreds.end()) {
+                    incomingPreds.push_back(pred);
+                }
+            }
+        }
+
+        for (auto * pred : incomingPreds) {
+            BasicBlock * copyBlock = splitCriticalEdge(func, pred, bb);
+            if (copyBlock == pred) {
+                continue;
+            }
+
+            for (auto * phi : phis) {
+                phi->replaceIncomingBlock(pred, copyBlock);
+            }
         }
 
         // 按前驱块构造并行复制集合：
