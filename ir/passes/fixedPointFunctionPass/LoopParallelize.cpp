@@ -3,7 +3,7 @@
 /// @brief 保守的循环并行 pass 实现
 ///
 /// 识别并改写满足安全条件的循环为多路并行执行：
-/// - 规范循环（步长>=16，依赖安全）→ 2路clone线程并行
+/// - 规范循环（步长>=1，依赖安全）→ 4路线程并行
 /// - 归约循环（add+mod归约，无副作用）→ 4路线程并行+结果合并
 ///
 
@@ -11,7 +11,8 @@
 
 #include <algorithm>
 #include <iterator>
-#include <unordered_set>
+#include <unordered_map>  // 用于ReadOnlyCallAnalyzer的状态映射
+#include <unordered_set>  // 用于循环体基本块集合和访问标记
 #include <vector>
 
 #include "AllocaInst.h"
@@ -40,13 +41,9 @@
 
 namespace {
 
-/// 规范循环的并行线程数（2路：主线程+1个子线程）
-constexpr int32_t kParallelThreads = 2;
 /// 归约循环的并行线程数（4路：主线程+3个子线程）
 constexpr int32_t kReductionParallelThreads = 4;
-/// 规范循环并行化的最小步长要求
-constexpr int32_t kMinParallelStep = 16;
-/// 循环并行化的最小迭代次数要求
+/// 循环并行化的最小迭代次数要求（低于此值不进行并行化，避免线程开销大于收益）
 constexpr int32_t kMinParallelTripCount = 128;
 
 /// @brief 规范循环结构描述
@@ -95,6 +92,13 @@ enum class RootKind {
     Formal,		// 函数形参（可并行写）
     Global,		// 全局变量（可并行写）
     Alloca,		// 局部分配（不可并行写）
+};
+
+/// @brief 函数只读分析状态，用于判断归约循环中的调用是否可并行执行
+enum class ReadOnlyState {
+    Visiting,
+    ReadOnly,
+    Unsafe,
 };
 
 /// @brief 指针根信息，用于判断store/load是否指向同一内存对象
@@ -220,6 +224,78 @@ PointerRoot stripPointerRoot(Value * value)
     std::unordered_set<Value *> visiting;
     return stripPointerRoot(value, visiting);
 }
+
+/// @brief 判断指针是否指向函数私有局部对象
+bool isLocalAllocaRoot(Value * pointer)
+{
+    return stripPointerRoot(pointer).kind == RootKind::Alloca;
+}
+
+/// @brief 判断函数调用是否不会写入调用者可见状态
+class ReadOnlyCallAnalyzer {
+public:
+    explicit ReadOnlyCallAnalyzer(Module * module) : mod(module)
+    {}
+
+    bool isReadOnly(Function * function)
+    {
+        if (!mod || !function || function->isBuiltin() || function->getBlocks().empty()) {
+            return false;
+        }
+
+        auto it = states.find(function);
+        if (it != states.end()) {
+            return it->second == ReadOnlyState::ReadOnly;
+        }
+
+        states[function] = ReadOnlyState::Visiting;
+        bool readOnly = true;
+        for (auto * bb : function->getBlocks()) {
+            for (auto * inst : bb->getInstructions()) {
+                if (!isInstructionReadOnly(inst)) {
+                    readOnly = false;
+                    break;
+                }
+            }
+            if (!readOnly) {
+                break;
+            }
+        }
+
+        states[function] = readOnly ? ReadOnlyState::ReadOnly : ReadOnlyState::Unsafe;
+        return readOnly;
+    }
+
+private:
+    bool isInstructionReadOnly(Instruction * inst)
+    {
+        if (!inst || inst->isDead() || inst->isTerminator()) {
+            return true;
+        }
+
+        if (dynamic_cast<AllocaInst *>(inst) || dynamic_cast<LoadInst *>(inst)) {
+            return true;
+        }
+
+        if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+            return isLocalAllocaRoot(store->getPointerOperand());
+        }
+
+        if (auto * call = dynamic_cast<CallInst *>(inst)) {
+            Function * callee = call->getCallee();
+            auto it = states.find(callee);
+            if (it != states.end() && it->second == ReadOnlyState::Visiting) {
+                return false;
+            }
+            return isReadOnly(callee);
+        }
+
+        return !inst->mayHaveSideEffects() && !inst->mayWriteMemory();
+    }
+
+    Module * mod = nullptr;
+    std::unordered_map<Function *, ReadOnlyState> states;
+};
 
 /// @brief 尝试将value匹配为"induction + 常数步长"的形式，提取步长值
 /// @param value 待匹配的值
@@ -747,12 +823,28 @@ bool isDependenceSafe(const CanonicalLoop & loop, const std::unordered_set<Basic
     return true;
 }
 
-/// @brief 判断归约循环体是否含有不支持的副作用（CallInst或StoreInst）
-bool reductionLoopHasUnsupportedSideEffects(const std::unordered_set<BasicBlock *> & loopBody)
+/// @brief 判断归约循环体是否含有不支持的副作用
+/// 检查是否存在store指令、非只读调用、或其他有副作用的指令
+/// @param mod 所属模块，用于ReadOnlyCallAnalyzer分析调用是否只读
+/// @param loopBody 循环体基本块集合
+/// @return 若存在不支持的副作用则返回true
+bool reductionLoopHasUnsupportedSideEffects(Module * mod, const std::unordered_set<BasicBlock *> & loopBody)
 {
+    ReadOnlyCallAnalyzer readOnlyCalls(mod);
     for (auto * bb : loopBody) {
         for (auto * inst : bb->getInstructions()) {
-            if (dynamic_cast<CallInst *>(inst) || dynamic_cast<StoreInst *>(inst)) {
+            if (dynamic_cast<StoreInst *>(inst)) {
+                return true;
+            }
+
+            if (auto * call = dynamic_cast<CallInst *>(inst)) {
+                if (!readOnlyCalls.isReadOnly(call->getCallee())) {
+                    return true;
+                }
+                continue;
+            }
+
+            if (!inst->isTerminator() && inst->mayHaveSideEffects()) {
                 return true;
             }
         }
@@ -947,18 +1039,6 @@ bool retargetHeaderPhiInitialValues(Function * func,
     return true;
 }
 
-/// @brief 获取或创建2路并行启动函数__mtstart
-/// @param mod 所属模块
-/// @return __mtstart函数指针
-Function * getOrCreateMtStart(Module * mod)
-{
-    if (auto * existing = mod->findFunction("__mtstart")) {
-        return existing;
-    }
-
-    return mod->newFunction("__mtstart", IntegerType::getTypeInt32(), {}, true);
-}
-
 /// @brief 获取或创建4路并行启动函数__mtstart4
 /// @param mod 所属模块
 /// @return __mtstart4函数指针
@@ -1024,21 +1104,6 @@ Function * getOrCreateMtEnd4(Module * mod)
     }
 
     return mod->newFunction("__mtend4",
-                            VoidType::getType(),
-                            {new FormalParam{IntegerType::getTypeInt32(), ""}},
-                            true);
-}
-
-/// @brief 获取或创建2路并行结束函数__mtend
-/// @param mod 所属模块
-/// @return __mtend函数指针
-Function * getOrCreateMtEnd(Module * mod)
-{
-    if (auto * existing = mod->findFunction("__mtend")) {
-        return existing;
-    }
-
-    return mod->newFunction("__mtend",
                             VoidType::getType(),
                             {new FormalParam{IntegerType::getTypeInt32(), ""}},
                             true);
@@ -1151,10 +1216,10 @@ bool LoopParallelize::run()
     return changed;
 }
 
-/// @brief 尝试对规范循环头进行2路并行化
+/// @brief 尝试对规范循环头进行4路并行化
 /// 先尝试归约循环并行化，若不满足则尝试规范循环并行化：
-/// 将循环迭代范围均分为2份，通过__mtstart获取线程id，
-/// 各线程执行各自的迭代分块，最后调用__mtend同步
+/// 将循环迭代范围均分为4份，通过__mtstart4获取线程id，
+/// 各线程执行各自的迭代分块，最后调用__mtend4同步
 /// @param header 循环头基本块
 /// @param loopInfo 循环信息
 /// @return 若成功并行化则返回true
@@ -1169,7 +1234,7 @@ bool LoopParallelize::tryParallelizeHeader(BasicBlock * header, LoopInfo & loopI
     }
 
     CanonicalLoop loop;
-    if (!matchCanonicalLoop(header, loop) || loop.step < kMinParallelStep || !headerPhisAreAdjustable(loop)) {
+    if (!matchCanonicalLoop(header, loop) || !headerPhisAreAdjustable(loop)) {
         return false;
     }
 
@@ -1178,30 +1243,38 @@ bool LoopParallelize::tryParallelizeHeader(BasicBlock * header, LoopInfo & loopI
         return false;
     }
 
-    Function * mtStart = getOrCreateMtStart(mod);
-    Function * mtEnd = getOrCreateMtEnd(mod);
-    if (!mtStart || !mtEnd) {
+    // 获取或创建4路并行运行时函数：启动、查询线程数、同步结束
+    Function * mtStart4 = getOrCreateMtStart4(mod);
+    Function * mtThreadCount4 = getOrCreateMtThreadCount4(mod);
+    Function * mtEnd4 = getOrCreateMtEnd4(mod);
+    if (!mtStart4 || !mtThreadCount4 || !mtEnd4) {
         return false;
     }
 
-    auto * two = mod->newConstInt32(kParallelThreads);
+    auto * int32Type = IntegerType::getTypeInt32();
     auto * one = mod->newConstInt32(1);
     auto * total = loop.bound;
 
-    auto * tid = new CallInst(func, mtStart, {}, IntegerType::getTypeInt32());
+    // 在前驱头块中调用运行时获取当前线程id和总线程数
+    auto * tid = new CallInst(func, mtStart4, {}, int32Type);
+    auto * threadCount = new CallInst(func, mtThreadCount4, {}, int32Type);
     insertBeforeTerminator(loop.preheader, tid);
+    insertBeforeTerminator(loop.preheader, threadCount);
 
-    auto * tidPlusOne = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, tid, one, tid->getType());
-    auto * startProduct = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, total, tid, tid->getType());
-    auto * rawStart = new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, startProduct, two, tid->getType());
-    auto * endProduct = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, total, tidPlusOne, tid->getType());
-    auto * rawEnd = new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, endProduct, two, tid->getType());
+    // 计算当前线程的迭代分块范围：[rawStart, rawEnd)
+    // rawStart = total * tid / threadCount, rawEnd = total * (tid+1) / threadCount
+    auto * tidPlusOne = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, tid, one, int32Type);
+    auto * startProduct = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, total, tid, int32Type);
+    auto * rawStart = new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, startProduct, threadCount, int32Type);
+    auto * endProduct = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, total, tidPlusOne, int32Type);
+    auto * rawEnd = new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, endProduct, threadCount, int32Type);
     insertBeforeTerminator(loop.preheader, tidPlusOne);
     insertBeforeTerminator(loop.preheader, startProduct);
     insertBeforeTerminator(loop.preheader, rawStart);
     insertBeforeTerminator(loop.preheader, endProduct);
     insertBeforeTerminator(loop.preheader, rawEnd);
 
+    // 将分块边界对齐到步长的整数倍，确保并行分块与循环步长对齐
     Value * chunkStart = createAlignedChunkBoundary(func, mod, loop.preheader, rawStart, loop);
     Value * chunkEnd = createAlignedChunkBoundary(func, mod, loop.preheader, rawEnd, loop);
 
@@ -1210,9 +1283,10 @@ bool LoopParallelize::tryParallelizeHeader(BasicBlock * header, LoopInfo & loopI
     }
     loop.cmp->setOperand(1, chunkEnd);
 
+    // 创建同步结束块：调用__mtend4(tid)同步所有线程后跳转到循环出口
     auto * mtEndBlock = func->newBasicBlock();
     insertBlockBefore(func, mtEndBlock, loop.exit);
-    auto * endCall = new CallInst(func, mtEnd, {tid}, VoidType::getType());
+    auto * endCall = new CallInst(func, mtEnd4, {tid}, VoidType::getType());
     mtEndBlock->addInstruction(endCall);
     mtEndBlock->addInstruction(new BranchInst(func, loop.exit));
     mtEndBlock->linkSuccessor(loop.exit);
@@ -1248,11 +1322,12 @@ bool LoopParallelize::tryParallelizeReductionHeader(BasicBlock * header, LoopInf
     const auto * body = loopInfo.getLoopBody(loop.header);
     if (!body || !hasSingleLoopExitEdge(*body, loop.exit, loop.header) ||
         loop.exit->getPredecessors().size() != 1 || !hasPred(loop.exit, loop.header) ||
-        reductionLoopHasUnsupportedSideEffects(*body) ||
+        reductionLoopHasUnsupportedSideEffects(mod, *body) ||
         !canMaterializePreheaderValue(loop.bound, *body)) {
         return false;
     }
 
+    // 获取或创建4路并行归约所需的运行时函数
     Function * mtStart4 = getOrCreateMtStart4(mod);
     Function * mtThreadCount4 = getOrCreateMtThreadCount4(mod);
     Function * mtStoreI32 = getOrCreateMtStoreI32(mod);
@@ -1267,16 +1342,19 @@ bool LoopParallelize::tryParallelizeReductionHeader(BasicBlock * header, LoopInf
     auto * zero = mod->newConstInt32(0);
     auto * one = mod->newConstInt32(1);
 
+    // 在前驱头块中调用运行时获取当前线程id和总线程数
     auto * tid = new CallInst(func, mtStart4, {}, int32Type);
     auto * threadCount = new CallInst(func, mtThreadCount4, {}, int32Type);
     insertBeforeTerminator(loop.preheader, tid);
     insertBeforeTerminator(loop.preheader, threadCount);
 
+    // 将循环上界物化到前驱头块中（若bound定义在循环内则克隆Load指令）
     Value * preheaderBound = materializePreheaderValue(func, loop.bound, loop.preheader, *body);
     if (!preheaderBound) {
         return false;
     }
 
+    // 计算总迭代次数：tripBase = bound - init，若上界包含(inclusive)则+1
     auto * tripBase = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, preheaderBound, loop.init, int32Type);
     insertBeforeTerminator(loop.preheader, tripBase);
     Value * totalTripCount = tripBase;
@@ -1286,6 +1364,10 @@ bool LoopParallelize::tryParallelizeReductionHeader(BasicBlock * header, LoopInf
         totalTripCount = inclusiveTripCount;
     }
 
+    // 计算当前线程的迭代分块偏移量和范围：[chunkStart, chunkEnd)
+    // startOffset = totalTripCount * tid / threadCount
+    // endOffset = totalTripCount * (tid+1) / threadCount
+    // chunkStart = init + startOffset, chunkEnd = init + endOffset
     auto * tidPlusOne = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, tid, one, int32Type);
     auto * startProduct = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, totalTripCount, tid, int32Type);
     auto * startOffset = new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, startProduct, threadCount, int32Type);
@@ -1301,18 +1383,22 @@ bool LoopParallelize::tryParallelizeReductionHeader(BasicBlock * header, LoopInf
     insertBeforeTerminator(loop.preheader, chunkStart);
     insertBeforeTerminator(loop.preheader, chunkEnd);
 
+    // 更新归纳变量和归约变量的初始值：归纳变量从chunkStart开始，归约变量从0开始
     if (!updatePhiIncomingValue(loop.induction, loop.preheader, chunkStart) ||
         !updatePhiIncomingValue(loop.reduction, loop.preheader, zero)) {
         return false;
     }
 
+    // 替换循环条件为与chunkEnd比较
     auto * chunkCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, loop.induction, chunkEnd, int1Type);
     insertBeforeTerminator(loop.header, chunkCmp);
     loop.branch->setOperand(0, chunkCmp);
 
+    // 创建归约结果合并块：依次加载各线程的部分归约值并累加取模
     auto * combineBlock = func->newBasicBlock();
     insertBlockBefore(func, combineBlock, loop.exit);
 
+    // 合并所有线程的部分归约结果：combined = (combined + load(tid)) % modulus
     Value * combined = zero;
     for (int32_t tidValue = 0; tidValue < kReductionParallelThreads; ++tidValue) {
         auto * part = new CallInst(func, mtLoadI32, {mod->newConstInt32(tidValue)}, int32Type);
@@ -1324,11 +1410,13 @@ bool LoopParallelize::tryParallelizeReductionHeader(BasicBlock * header, LoopInf
         combined = reduced;
     }
 
+    // 将循环外对归约变量的使用替换为合并后的结果
     replaceUsesOutsideLoop(loop.reduction, combined, *body);
 
     combineBlock->addInstruction(new BranchInst(func, loop.exit));
     combineBlock->linkSuccessor(loop.exit);
 
+    // 创建同步结束块：存储当前线程的部分归约结果，然后同步所有线程
     auto * mtEndBlock = func->newBasicBlock();
     insertBlockBefore(func, mtEndBlock, combineBlock);
     mtEndBlock->addInstruction(new CallInst(func, mtStoreI32, {tid, loop.reduction}, VoidType::getType()));
