@@ -76,3 +76,6 @@ jobs:
 
       - name: Run 2026 RISCV64 asm full test suite
         run: MINIC_RISCV64_TIMEOUT=60 bash ./tools/run-local-riscv64-tests.sh 2026
+
+      - name: Run 2026 RISCV64 asm performance test suite
+        run: MINIC_RISCV64_TIMEOUT=120 bash ./tools/run-local-riscv64-tests.sh 2026_performance
