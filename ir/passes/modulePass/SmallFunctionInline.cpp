@@ -475,6 +475,46 @@ bool shouldPreserveForPureCallLoopCache(CallInst * call)
     return candidate == call;
 }
 
+/// @brief 判断调用点是否位于自然循环内。
+bool isCallInLoop(CallInst * call)
+{
+    if (!call || !call->getFunction() || !call->getParentBlock()) {
+        return false;
+    }
+
+    Function * caller = call->getFunction();
+    if (caller->getBlocks().empty()) {
+        return false;
+    }
+
+    DominatorTree domTree(caller);
+    LoopInfo loopInfo(caller, &domTree);
+    return loopInfo.getLoopDepth(call->getParentBlock()) > 0;
+}
+
+/// @brief 判断函数体是否包含自然循环。
+/// 通过构建支配树和循环信息，检查是否存在循环头基本块。
+/// 用于避免将包含循环的"循环密集型"函数内联到循环内的热点调用点，
+/// 防止内联后循环嵌套加深导致性能退化。
+/// @param func 待检查的函数
+/// @return 若函数体包含自然循环则返回true
+bool containsNaturalLoop(Function * func)
+{
+    if (!func || func->isBuiltin() || func->getBlocks().empty()) {
+        return false;
+    }
+
+    DominatorTree domTree(func);
+    LoopInfo loopInfo(func, &domTree);
+    for (auto * bb : func->getBlocks()) {
+        if (loopInfo.isLoopHeader(bb)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /// @brief 判断指令是否属于内联支持的指令类型
 /// @param inst 待检查的指令
 /// @return true 表示该指令可以被安全地克隆和内联
@@ -661,6 +701,13 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
 
     int32_t blockCount = static_cast<int32_t>(callee->getBlocks().size());
     int32_t instCount = countInstructions(callee);
+    // 循环密集型热点调用：若被调用函数包含循环且体积超过叶子函数阈值，
+    // 则拒绝内联，避免在循环内展开另一个大循环导致性能退化
+    const bool loopHeavyHotCall = hotCallSite && containsNaturalLoop(callee) &&
+                                  (blockCount > kLeafMaxBlocks || instCount > kLeafMaxInsts);
+    if (loopHeavyHotCall) {
+        return false;
+    }
 
     // 叶子函数：普通调用点保守，循环内热点调用点使用更宽松阈值。
     if (!hasNonSelfUserCall(callee)) {
