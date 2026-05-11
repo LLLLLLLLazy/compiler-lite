@@ -66,6 +66,357 @@ ConstInteger * asConstInt(Value * value)
     return dynamic_cast<ConstInteger *>(value);
 }
 
+bool sameRoot(const PointerRoot & lhs, const PointerRoot & rhs);
+bool isKnownRoot(const PointerRoot & root);
+PointerRoot stripPointerRoot(Value * value);
+bool isAddConstStep(Value * value, PhiInst * induction, int32_t expectedStep);
+
+/// @brief 判断值是否定义在循环体内部
+/// @param value 待判断的值
+/// @param loopBody 循环体基本块集合
+/// @return 若值是指令且定义在循环体内则返回true
+bool isDefinedInLoop(Value * value, const std::unordered_set<BasicBlock *> & loopBody)
+{
+    auto * inst = dynamic_cast<Instruction *>(value);
+    return inst && loopBody.find(inst->getParentBlock()) != loopBody.end();
+}
+
+/// @brief 递归判断value的操作数链中是否依赖needle
+/// @param value 待判断的值
+/// @param needle 目标依赖值
+/// @param visiting 已访问集合，防止循环
+/// @return 若value依赖needle则返回true
+bool valueDependsOn(Value * value, Value * needle, std::unordered_set<Value *> & visiting)
+{
+    if (value == needle) {
+        return true;
+    }
+    if (!value || !visiting.insert(value).second) {
+        return false;
+    }
+
+    auto * inst = dynamic_cast<Instruction *>(value);
+    if (!inst) {
+        return false;
+    }
+
+    for (auto * operand : inst->getOperandsValue()) {
+        if (valueDependsOn(operand, needle, visiting)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/// @brief valueDependsOn的无状态包装，内部创建visiting集合
+bool valueDependsOn(Value * value, Value * needle)
+{
+    std::unordered_set<Value *> visiting;
+    return valueDependsOn(value, needle, visiting);
+}
+
+/// @brief 获取值在函数形参列表中的索引
+/// @param func 所属函数
+/// @param value 待查找的值
+/// @return 形参索引，若不是形参则返回-1
+int32_t formalParamIndex(Function * func, Value * value)
+{
+    if (!func || !value) {
+        return -1;
+    }
+
+    auto & params = func->getParams();
+    for (std::size_t index = 0; index < params.size(); ++index) {
+        if (params[index] == value) {
+            return static_cast<int32_t>(index);
+        }
+    }
+
+    return -1;
+}
+
+/// @brief 获取指针的形参根在函数形参列表中的索引
+/// @param func 所属函数
+/// @param pointer 待分析的指针
+/// @return 形参索引，若指针根不是形参则返回-1
+int32_t pointerFormalIndex(Function * func, Value * pointer)
+{
+    PointerRoot root = stripPointerRoot(pointer);
+    if (root.kind != RootKind::Formal) {
+        return -1;
+    }
+    return formalParamIndex(func, root.value);
+}
+
+/// @brief 被调用函数的内存访问摘要，记录读写操作涉及的形参索引
+struct CalleeMemorySummary {
+    bool valid = false;                          // 摘要是否有效
+    std::unordered_set<int32_t> readArgs;        // 被读取的形参索引集合
+    std::unordered_set<int32_t> writtenArgs;     // 被写入的形参索引集合
+};
+
+/// @brief 分析被调用函数的内存访问模式，生成读写形参摘要
+/// 遍历被调用函数体中的load/store指令，记录涉及的形参索引
+/// 若存在嵌套调用、store目标不是形参、或有其他内存写操作则标记为无效
+/// @param callee 被调用函数
+/// @return 内存访问摘要
+CalleeMemorySummary summarizeCalleeMemory(Function * callee)
+{
+    CalleeMemorySummary summary;
+    if (!callee || callee->isBuiltin() || callee->getBlocks().empty()) {
+        return summary;
+    }
+
+    summary.valid = true;
+    for (auto * bb : callee->getBlocks()) {
+        for (auto * inst : bb->getInstructions()) {
+            if (dynamic_cast<CallInst *>(inst)) {
+                summary.valid = false;
+                return summary;
+            }
+
+            if (auto * load = dynamic_cast<LoadInst *>(inst)) {
+                int32_t index = pointerFormalIndex(callee, load->getPointerOperand());
+                if (index >= 0) {
+                    summary.readArgs.insert(index);
+                }
+                continue;
+            }
+
+            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+                int32_t index = pointerFormalIndex(callee, store->getPointerOperand());
+                if (index < 0) {
+                    summary.valid = false;
+                    return summary;
+                }
+                summary.writtenArgs.insert(index);
+                continue;
+            }
+
+            if (inst->mayWriteMemory()) {
+                summary.valid = false;
+                return summary;
+            }
+        }
+    }
+
+    summary.valid = summary.valid && !summary.writtenArgs.empty();
+    return summary;
+}
+
+/// @brief 判断指针根是否在给定根集合中
+bool rootInSet(const PointerRoot & root, const std::vector<PointerRoot> & roots)
+{
+    return std::any_of(roots.begin(), roots.end(), [&root](const PointerRoot & item) {
+        return sameRoot(root, item);
+    });
+}
+
+/// @brief 判断循环体在重复执行时是否保持不变性
+/// 检查条件：store目标必须在writableRoots中且不依赖归纳变量，
+/// 除preservedCall外无其他调用，条件分支不依赖归纳变量（循环条件除外）
+/// @param loopBody 循环体基本块集合
+/// @param induction 归纳变量
+/// @param loopCmp 循环比较指令
+/// @param inductionNext 归纳变量步进指令
+/// @param preservedCall 允许保留的唯一调用指令
+/// @param writableRoots 可写入的指针根集合
+/// @return 若循环体满足不变性则返回true
+bool repeatedLoopBodyIsInvariant(const std::unordered_set<BasicBlock *> & loopBody,
+                                 PhiInst * induction,
+                                 ICmpInst * loopCmp,
+                                 Instruction * inductionNext,
+                                 CallInst * preservedCall,
+                                 const std::vector<PointerRoot> & writableRoots)
+{
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            if (inst == loopCmp || inst == inductionNext || dynamic_cast<PhiInst *>(inst)) {
+                continue;
+            }
+
+            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+                PointerRoot storeRoot = stripPointerRoot(store->getPointerOperand());
+                if (!rootInSet(storeRoot, writableRoots) ||
+                    valueDependsOn(store->getPointerOperand(), induction) ||
+                    valueDependsOn(store->getValueOperand(), induction)) {
+                    return false;
+                }
+                continue;
+            }
+
+            if (auto * call = dynamic_cast<CallInst *>(inst)) {
+                if (call != preservedCall) {
+                    return false;
+                }
+                continue;
+            }
+
+            if (auto * cond = dynamic_cast<CondBranchInst *>(inst)) {
+                if (cond->getCondition() != loopCmp && valueDependsOn(cond->getCondition(), induction)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+/// @brief 折叠每轮执行同一组内存覆盖和同一用户调用的常量重复循环。
+///
+/// 只在可证明循环归纳变量不影响写地址、写值和调用实参，且唯一用户调用的
+/// 写集合来自形参根对象并被循环体中的不变 store 重新覆盖时触发。
+bool collapseRepeatedInvariantCallLoop(Function * func, Module * mod)
+{
+    if (!func || !mod || func->getBlocks().empty()) {
+        return false;
+    }
+
+    DominatorTree domTree(func);
+    LoopInfo loopInfo(func, &domTree);
+
+    // 遍历所有循环头，寻找可折叠的重复不变调用循环
+    for (auto * header : func->getBlocks()) {
+        if (!loopInfo.isLoopHeader(header)) {
+            continue;
+        }
+
+        // 匹配循环头结构：条件分支 + 比较指令 + 归纳变量phi + 常量上界
+        auto * condBr = dynamic_cast<CondBranchInst *>(header->getTerminator());
+        auto * cmp = condBr ? dynamic_cast<ICmpInst *>(condBr->getCondition()) : nullptr;
+        auto * induction = cmp ? dynamic_cast<PhiInst *>(cmp->getLHS()) : nullptr;
+        auto * bound = cmp ? asConstInt(cmp->getRHS()) : nullptr;
+        if (!condBr || !cmp || cmp->getOp() != IRInstOperator::IRINST_OP_LT_I ||
+            !induction || induction->getParentBlock() != header || !bound ||
+            induction->getIncomingCount() != 2) {
+            continue;
+        }
+
+        // 提取归纳变量的初始值和步进指令（步长必须为1）
+        BasicBlock * latch = nullptr;
+        ConstInteger * init = nullptr;
+        Instruction * inductionNext = nullptr;
+        for (int32_t index = 0; index < induction->getIncomingCount(); ++index) {
+            Value * incoming = induction->getIncomingValue(index);
+            auto * initConst = asConstInt(incoming);
+            if (initConst) {
+                init = initConst;
+                continue;
+            }
+
+            if (isAddConstStep(incoming, induction, 1)) {
+                latch = induction->getIncomingBlock(index);
+                inductionNext = dynamic_cast<Instruction *>(incoming);
+            }
+        }
+        if (!init || !latch || !inductionNext || bound->getVal() - init->getVal() <= 1) {
+            continue;
+        }
+
+        const auto * loopBody = loopInfo.getLoopBody(header);
+        if (!loopBody || loopBody->empty()) {
+            continue;
+        }
+
+        // 在循环体中查找唯一的非内建调用指令，多个或不支持的调用则跳过
+        CallInst * candidateCall = nullptr;
+        bool multipleOrUnsupportedCalls = false;
+        for (auto * bb : *loopBody) {
+            for (auto * inst : bb->getInstructions()) {
+                auto * call = dynamic_cast<CallInst *>(inst);
+                if (!call) {
+                    continue;
+                }
+
+                if (!call->getCallee() || call->getCallee()->isBuiltin() || candidateCall) {
+                    multipleOrUnsupportedCalls = true;
+                    break;
+                }
+                candidateCall = call;
+            }
+            if (multipleOrUnsupportedCalls) {
+                break;
+            }
+        }
+        if (!candidateCall || multipleOrUnsupportedCalls) {
+            continue;
+        }
+
+        // 分析被调用函数的内存访问模式
+        CalleeMemorySummary summary = summarizeCalleeMemory(candidateCall->getCallee());
+        if (!summary.valid) {
+            continue;
+        }
+
+        // 收集循环体中不依赖归纳变量的不变store的指针根
+        std::vector<PointerRoot> invariantStoreRoots;
+        for (auto * bb : *loopBody) {
+            for (auto * inst : bb->getInstructions()) {
+                auto * store = dynamic_cast<StoreInst *>(inst);
+                if (!store || valueDependsOn(store->getPointerOperand(), induction) ||
+                    valueDependsOn(store->getValueOperand(), induction)) {
+                    continue;
+                }
+
+                PointerRoot root = stripPointerRoot(store->getPointerOperand());
+                if (isKnownRoot(root) && !rootInSet(root, invariantStoreRoots)) {
+                    invariantStoreRoots.push_back(root);
+                }
+            }
+        }
+
+        // 验证被调用函数的写入形参对应的实参：必须在循环外定义、不依赖归纳变量、
+        // 且其指针根必须是不变store的根（确保store会覆盖调用的写入）
+        std::vector<PointerRoot> writableRoots;
+        bool argsValid = true;
+        for (int32_t index : summary.writtenArgs) {
+            if (index < 0 || index >= candidateCall->getArgCount()) {
+                argsValid = false;
+                break;
+            }
+            if (isDefinedInLoop(candidateCall->getArg(index), *loopBody) ||
+                valueDependsOn(candidateCall->getArg(index), induction)) {
+                argsValid = false;
+                break;
+            }
+            PointerRoot root = stripPointerRoot(candidateCall->getArg(index));
+            if (!isKnownRoot(root)) {
+                argsValid = false;
+                break;
+            }
+            if (!rootInSet(root, invariantStoreRoots)) {
+                argsValid = false;
+                break;
+            }
+            writableRoots.push_back(root);
+        }
+        // 验证所有调用实参都不在循环内定义且不依赖归纳变量
+        for (int32_t arg = 0; arg < candidateCall->getArgCount(); ++arg) {
+            if (isDefinedInLoop(candidateCall->getArg(arg), *loopBody) ||
+                valueDependsOn(candidateCall->getArg(arg), induction)) {
+                argsValid = false;
+                break;
+            }
+        }
+        if (!argsValid || writableRoots.empty()) {
+            continue;
+        }
+
+        // 验证循环体满足不变性条件
+        if (!repeatedLoopBodyIsInvariant(*loopBody, induction, cmp, inductionNext, candidateCall, writableRoots)) {
+            continue;
+        }
+
+        // 折叠循环：将上界设为init+1，使循环只执行一次
+        cmp->setOperand(1, mod->newConstInt32(init->getVal() + 1));
+        return true;
+    }
+
+    return false;
+}
+
 bool sameRoot(const PointerRoot & lhs, const PointerRoot & rhs)
 {
     return lhs.kind == rhs.kind && lhs.value == rhs.value;
@@ -708,6 +1059,11 @@ bool LoopTiling::run()
 {
     if (!func || !mod || func->isBuiltin() || func->getBlocks().empty() || tileSize <= 1) {
         return false;
+    }
+
+    // 优先尝试折叠重复不变调用循环（将多次相同调用折叠为一次）
+    if (collapseRepeatedInvariantCallLoop(func, mod)) {
+        return true;
     }
 
     bool changed = false;
