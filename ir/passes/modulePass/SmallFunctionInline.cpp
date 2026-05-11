@@ -126,28 +126,6 @@ bool hasNonSelfUserCall(Function * func)
     return false;
 }
 
-/// @brief 判断函数体内是否包含自然循环
-///
-/// 通过构建支配树和循环信息来判断函数是否包含循环。
-/// 包含循环的函数内联后可能导致代码膨胀且不利于后续优化，因此不予内联。
-/// @param func 目标函数
-/// @return true 表示函数内存在循环
-bool containsNaturalLoop(Function * func)
-{
-    if (!func || func->getBlocks().empty()) {
-        return false;
-    }
-
-    DominatorTree domTree(func);
-    LoopInfo loopInfo(func, &domTree);
-    for (auto * bb : func->getBlocks()) {
-        if (loopInfo.isLoopHeader(bb)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /// @brief 统计模块中直接调用某个函数的调用点数量
 ///
 /// 遍历模块中所有非内置函数，统计直接调用 callee 的调用点个数。
