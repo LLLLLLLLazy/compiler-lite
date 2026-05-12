@@ -46,6 +46,7 @@ ScalarEvolution::UnknownExpr::UnknownExpr(Value * value)
 {}
 
 ScalarEvolution::AddRecurrenceExpr::AddRecurrenceExpr(PhiInst * phi,
+                                                      Value * representativeValue,
                                                       Value * startValue,
                                                       const Expr * startExpr,
                                                       Value * backEdgeValue,
@@ -56,6 +57,7 @@ ScalarEvolution::AddRecurrenceExpr::AddRecurrenceExpr(PhiInst * phi,
                                                       BasicBlock * latch)
     : Expr(ExprKind::AddRecurrence, phi ? phi->getType() : nullptr),
       phi(phi),
+        representativeValue(representativeValue),
       startValue(startValue),
       startExpr(startExpr),
       backEdgeValue(backEdgeValue),
@@ -204,7 +206,8 @@ const ScalarEvolution::Expr * ScalarEvolution::analyzeValue(Value * value)
         return createUnknown(value);
     }
 
-    return createAddRecurrence(phi, startValue, getSCEV(startValue), backEdgeValue, step, stepKind, header, preheader, latch);
+    return createAddRecurrence(
+        phi, phi, startValue, getSCEV(startValue), backEdgeValue, step, stepKind, header, preheader, latch);
 }
 
 const ScalarEvolution::Expr * ScalarEvolution::analyzeBinary(BinaryInst * binary)
@@ -217,11 +220,14 @@ const ScalarEvolution::Expr * ScalarEvolution::analyzeBinary(BinaryInst * binary
     const Expr * rhs = getSCEV(binary->getRHS());
     switch (binary->getOp()) {
     case IRInstOperator::IRINST_OP_ADD_I:
-        return createAdd(binary->getType(), lhs, rhs);
+        return createAdd(binary->getType(), lhs, rhs, binary);
     case IRInstOperator::IRINST_OP_SUB_I:
-        return createAdd(binary->getType(), lhs, createMultiply(binary->getType(), rhs, createConstant(binary->getType(), -1)));
+        return createAdd(binary->getType(),
+                         lhs,
+                         createMultiply(binary->getType(), rhs, createConstant(binary->getType(), -1)),
+                         binary);
     case IRInstOperator::IRINST_OP_MUL_I:
-        return createMultiply(binary->getType(), lhs, rhs);
+        return createMultiply(binary->getType(), lhs, rhs, binary);
     default:
         return createUnknown(binary);
     }
@@ -241,7 +247,10 @@ const ScalarEvolution::ConstantExpr * ScalarEvolution::createConstant(Type * typ
     return static_cast<const ConstantExpr *>(exprArena.back().get());
 }
 
-const ScalarEvolution::Expr * ScalarEvolution::createAdd(Type * type, const Expr * lhs, const Expr * rhs)
+const ScalarEvolution::Expr * ScalarEvolution::createAdd(Type * type,
+                                                         const Expr * lhs,
+                                                         const Expr * rhs,
+                                                         Value * representativeValue)
 {
     int32_t lhsConstant = 0;
     int32_t rhsConstant = 0;
@@ -257,8 +266,11 @@ const ScalarEvolution::Expr * ScalarEvolution::createAdd(Type * type, const Expr
         return lhs;
     }
 
-    if (const Expr * affineRecurrence = tryCreateAffineAddRecurrenceForAdd(type, lhs, rhs)) {
-        return affineRecurrence;
+    if (representativeValue != nullptr) {
+        if (const Expr * affineRecurrence =
+                tryCreateAffineAddRecurrenceForAdd(type, lhs, rhs, representativeValue)) {
+            return affineRecurrence;
+        }
     }
 
     exprArena.push_back(std::make_unique<AddExpr>(type, lhs, rhs));
@@ -267,7 +279,8 @@ const ScalarEvolution::Expr * ScalarEvolution::createAdd(Type * type, const Expr
 
 const ScalarEvolution::Expr * ScalarEvolution::createMultiply(Type * type,
                                                               const Expr * lhs,
-                                                              const Expr * rhs)
+                                                              const Expr * rhs,
+                                                              Value * representativeValue)
 {
     int32_t lhsConstant = 0;
     int32_t rhsConstant = 0;
@@ -286,8 +299,11 @@ const ScalarEvolution::Expr * ScalarEvolution::createMultiply(Type * type,
         return lhs;
     }
 
-    if (const Expr * affineRecurrence = tryCreateAffineAddRecurrenceForMultiply(type, lhs, rhs)) {
-        return affineRecurrence;
+    if (representativeValue != nullptr) {
+        if (const Expr * affineRecurrence =
+                tryCreateAffineAddRecurrenceForMultiply(type, lhs, rhs, representativeValue)) {
+            return affineRecurrence;
+        }
     }
 
     exprArena.push_back(std::make_unique<MultiplyExpr>(type, lhs, rhs));
@@ -295,6 +311,7 @@ const ScalarEvolution::Expr * ScalarEvolution::createMultiply(Type * type,
 }
 
 const ScalarEvolution::AddRecurrenceExpr * ScalarEvolution::createAddRecurrence(PhiInst * phi,
+                                                                                Value * representativeValue,
                                                                                 Value * startValue,
                                                                                 const Expr * startExpr,
                                                                                 Value * backEdgeValue,
@@ -305,13 +322,14 @@ const ScalarEvolution::AddRecurrenceExpr * ScalarEvolution::createAddRecurrence(
                                                                                 BasicBlock * latch)
 {
     exprArena.push_back(std::make_unique<AddRecurrenceExpr>(
-        phi, startValue, startExpr, backEdgeValue, step, stepKind, loopHeader, preheader, latch));
+        phi, representativeValue, startValue, startExpr, backEdgeValue, step, stepKind, loopHeader, preheader, latch));
     return static_cast<const AddRecurrenceExpr *>(exprArena.back().get());
 }
 
 const ScalarEvolution::Expr * ScalarEvolution::tryCreateAffineAddRecurrenceForAdd(Type * type,
                                                                                    const Expr * lhs,
-                                                                                   const Expr * rhs)
+                                                                                   const Expr * rhs,
+                                                                                   Value * representativeValue)
 {
     const auto * lhsRecurrence = dynamic_cast<const AddRecurrenceExpr *>(lhs);
     const auto * rhsRecurrence = dynamic_cast<const AddRecurrenceExpr *>(rhs);
@@ -320,6 +338,7 @@ const ScalarEvolution::Expr * ScalarEvolution::tryCreateAffineAddRecurrenceForAd
         isLoopInvariantExpr(rhs, lhsRecurrence->getLoopHeader())) {
         const Expr * startExpr = createAdd(type, lhsRecurrence->getStartExpr(), rhs);
         return createAddRecurrence(lhsRecurrence->getPhi(),
+                                   representativeValue,
                                    getRepresentativeValue(startExpr),
                                    startExpr,
                                    nullptr,
@@ -334,6 +353,7 @@ const ScalarEvolution::Expr * ScalarEvolution::tryCreateAffineAddRecurrenceForAd
         isLoopInvariantExpr(lhs, rhsRecurrence->getLoopHeader())) {
         const Expr * startExpr = createAdd(type, lhs, rhsRecurrence->getStartExpr());
         return createAddRecurrence(rhsRecurrence->getPhi(),
+                                   representativeValue,
                                    getRepresentativeValue(startExpr),
                                    startExpr,
                                    nullptr,
@@ -361,6 +381,7 @@ const ScalarEvolution::Expr * ScalarEvolution::tryCreateAffineAddRecurrenceForAd
         }
 
         return createAddRecurrence(lhsRecurrence->getPhi(),
+                                   representativeValue,
                                    getRepresentativeValue(startExpr),
                                    startExpr,
                                    nullptr,
@@ -376,7 +397,8 @@ const ScalarEvolution::Expr * ScalarEvolution::tryCreateAffineAddRecurrenceForAd
 
 const ScalarEvolution::Expr * ScalarEvolution::tryCreateAffineAddRecurrenceForMultiply(Type * type,
                                                                                         const Expr * lhs,
-                                                                                        const Expr * rhs)
+                                                                                        const Expr * rhs,
+                                                                                        Value * representativeValue)
 {
     const auto * lhsRecurrence = dynamic_cast<const AddRecurrenceExpr *>(lhs);
     const auto * rhsRecurrence = dynamic_cast<const AddRecurrenceExpr *>(rhs);
@@ -403,6 +425,7 @@ const ScalarEvolution::Expr * ScalarEvolution::tryCreateAffineAddRecurrenceForMu
         }
 
         return createAddRecurrence(recurrence->getPhi(),
+                                   representativeValue,
                                    getRepresentativeValue(startExpr),
                                    startExpr,
                                    nullptr,
@@ -650,9 +673,78 @@ bool ScalarEvolution::dependsOnLoopValue(Value * value,
 
 bool ScalarEvolution::isLoopInvariantExpr(const Expr * expr, BasicBlock * loopHeader)
 {
+    LoopInfo * currentLoopInfo = ensureLoopInfo();
+    const auto * loopBody = currentLoopInfo ? currentLoopInfo->getLoopBody(loopHeader) : nullptr;
+    if (!expr || !loopHeader || !loopBody) {
+        return false;
+    }
+
     std::unordered_set<const Expr *> exprVisiting;
     std::unordered_set<Value *> valueVisiting;
-    return !dependsOnLoopExpr(expr, loopHeader, exprVisiting, valueVisiting);
+    return isLoopInvariantExprInLoop(expr, loopHeader, *loopBody, exprVisiting, valueVisiting);
+}
+
+bool ScalarEvolution::isLoopInvariantExprInLoop(const Expr * expr,
+                                                BasicBlock * loopHeader,
+                                                const std::unordered_set<BasicBlock *> & loopBody,
+                                                std::unordered_set<const Expr *> & exprVisiting,
+                                                std::unordered_set<Value *> & valueVisiting)
+{
+    if (!expr || !loopHeader || !exprVisiting.insert(expr).second) {
+        return expr != nullptr;
+    }
+
+    switch (expr->getKind()) {
+    case ExprKind::Constant:
+        return true;
+    case ExprKind::Add: {
+        const auto * add = static_cast<const AddExpr *>(expr);
+        return isLoopInvariantExprInLoop(add->getLHS(), loopHeader, loopBody, exprVisiting, valueVisiting) &&
+               isLoopInvariantExprInLoop(add->getRHS(), loopHeader, loopBody, exprVisiting, valueVisiting);
+    }
+    case ExprKind::Multiply: {
+        const auto * mul = static_cast<const MultiplyExpr *>(expr);
+        return isLoopInvariantExprInLoop(mul->getLHS(), loopHeader, loopBody, exprVisiting, valueVisiting) &&
+               isLoopInvariantExprInLoop(mul->getRHS(), loopHeader, loopBody, exprVisiting, valueVisiting);
+    }
+    case ExprKind::AddRecurrence: {
+        const auto * recurrence = static_cast<const AddRecurrenceExpr *>(expr);
+        BasicBlock * recurrenceHeader = recurrence->getLoopHeader();
+        if (!recurrenceHeader || recurrenceHeader == loopHeader || loopBody.find(recurrenceHeader) != loopBody.end()) {
+            return false;
+        }
+
+        return isLoopInvariantExprInLoop(
+            recurrence->getStartExpr(), loopHeader, loopBody, exprVisiting, valueVisiting);
+    }
+    case ExprKind::Unknown:
+        return isLoopInvariantValueInLoop(
+            static_cast<const UnknownExpr *>(expr)->getValue(), loopHeader, loopBody, exprVisiting, valueVisiting);
+    }
+
+    return false;
+}
+
+bool ScalarEvolution::isLoopInvariantValueInLoop(Value * value,
+                                                 BasicBlock * loopHeader,
+                                                 const std::unordered_set<BasicBlock *> & loopBody,
+                                                 std::unordered_set<const Expr *> & exprVisiting,
+                                                 std::unordered_set<Value *> & valueVisiting)
+{
+    if (!value || !loopHeader || !valueVisiting.insert(value).second) {
+        return value != nullptr;
+    }
+
+    auto * inst = dynamic_cast<Instruction *>(value);
+    if (!inst) {
+        return true;
+    }
+
+    if (inst->getParentBlock() && loopBody.find(inst->getParentBlock()) != loopBody.end()) {
+        return false;
+    }
+
+    return isLoopInvariantExprInLoop(getSCEV(value), loopHeader, loopBody, exprVisiting, valueVisiting);
 }
 
 Value * ScalarEvolution::getRepresentativeValue(const Expr * expr) const
@@ -667,7 +759,7 @@ Value * ScalarEvolution::getRepresentativeValue(const Expr * expr) const
     case ExprKind::Unknown:
         return static_cast<const UnknownExpr *>(expr)->getValue();
     case ExprKind::AddRecurrence:
-        return static_cast<const AddRecurrenceExpr *>(expr)->getPhi();
+        return static_cast<const AddRecurrenceExpr *>(expr)->getRepresentativeValue();
     case ExprKind::Add:
     case ExprKind::Multiply:
         return nullptr;
