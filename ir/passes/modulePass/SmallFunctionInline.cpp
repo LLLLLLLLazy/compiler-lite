@@ -5,6 +5,7 @@
 /// 对满足体积和结构约束的 callee 进行内联展开：
 ///   - 叶子函数（不调用其他用户函数）：最多 4 个基本块、18 条指令
 ///   - 非叶子小函数（调用其他用户函数）：最多 8 个基本块、40 条指令
+///   - 循环内热点调用点上的单层叶子循环函数：要求无 alloca、调用点数量受限
 /// 内联后删除 call 指令，将 callee 体复制到 caller 中，
 /// 用 phi 节点合并多个返回值，使后续 mem2reg/LICM/SCCP 能跨函数体优化。
 ///
@@ -64,10 +65,25 @@ constexpr int32_t kHotLeafMaxInsts = 300;
 constexpr int32_t kHotSmallMaxBlocks = 32;
 /// @brief 循环内热点调用点允许的非叶子函数最大指令数
 constexpr int32_t kHotSmallMaxInsts = 180;
+/// @brief 循环内热点调用点允许的单层叶子循环函数最大基本块数
+constexpr int32_t kHotLoopLeafMaxBlocks = 12;
+/// @brief 循环内热点调用点允许的单层叶子循环函数最大指令数
+constexpr int32_t kHotLoopLeafMaxInsts = 64;
+/// @brief 循环内热点调用点允许的单层叶子循环函数最大循环体基本块数
+constexpr int32_t kHotLoopLeafMaxBodyBlocks = 8;
+/// @brief 循环内热点调用点允许的单层叶子循环函数最大直接调用点数
+constexpr int32_t kHotLoopLeafMaxCallSites = 8;
 /// @brief 被内联函数的 alloca 总字节数上限，防止栈帧膨胀
 constexpr int32_t kMaxAllocaBytes = 128;
 /// @brief 循环内热点调用点的 alloca 总字节数上限
 constexpr int32_t kHotMaxAllocaBytes = 256;
+
+/// @brief 自然循环摘要
+struct NaturalLoopSummary {
+    int32_t loopCount = 0;
+    int32_t maxDepth = 0;
+    int32_t maxLoopBodyBlocks = 0;
+};
 
 /// @brief 统计函数中的指令总数
 /// @param func 目标函数
@@ -128,26 +144,29 @@ bool hasNonSelfUserCall(Function * func)
     return false;
 }
 
-/// @brief 判断函数体内是否包含自然循环
-///
-/// 通过构建支配树和循环信息来判断函数是否包含循环。
-/// 包含循环的函数内联后可能导致代码膨胀且不利于后续优化，因此不予内联。
+/// @brief 分析函数中的自然循环规模与嵌套情况
 /// @param func 目标函数
-/// @return true 表示函数内存在循环
-bool containsNaturalLoop(Function * func)
+/// @return 自然循环摘要
+NaturalLoopSummary analyzeNaturalLoops(Function * func)
 {
+    NaturalLoopSummary summary;
     if (!func || func->getBlocks().empty()) {
-        return false;
+        return summary;
     }
 
     DominatorTree domTree(func);
     LoopInfo loopInfo(func, &domTree);
     for (auto * bb : func->getBlocks()) {
+        summary.maxDepth = std::max(summary.maxDepth, loopInfo.getLoopDepth(bb));
         if (loopInfo.isLoopHeader(bb)) {
-            return true;
+            ++summary.loopCount;
+            if (const auto * body = loopInfo.getLoopBody(bb)) {
+                summary.maxLoopBodyBlocks =
+                    std::max(summary.maxLoopBodyBlocks, static_cast<int32_t>(body->size()));
+            }
         }
     }
-    return false;
+    return summary;
 }
 
 /// @brief 统计模块中直接调用某个函数的调用点数量
@@ -178,6 +197,37 @@ int32_t countDirectCallSites(Module * mod, Function * callee)
         }
     }
     return count;
+}
+
+/// @brief 判断热点调用点上的单层叶子循环函数是否值得内联
+/// @param mod 所属模块
+/// @param callee 被调函数
+/// @param loopSummary 循环摘要
+/// @param allocaBytes alloca 总字节数
+/// @param blockCount 基本块数量
+/// @param instCount 指令数量
+/// @return true 表示允许在热点调用点内联
+bool isEligibleHotLoopLeafCallee(Module * mod,
+                                 Function * callee,
+                                 const NaturalLoopSummary & loopSummary,
+                                 int32_t allocaBytes,
+                                 int32_t blockCount,
+                                 int32_t instCount)
+{
+    if (!mod || !callee || loopSummary.loopCount != 1 || loopSummary.maxDepth > 1) {
+        return false;
+    }
+
+    if (allocaBytes != 0) {
+        return false;
+    }
+
+    if (countDirectCallSites(mod, callee) > kHotLoopLeafMaxCallSites) {
+        return false;
+    }
+
+    return blockCount <= kHotLoopLeafMaxBlocks && instCount <= kHotLoopLeafMaxInsts &&
+           loopSummary.maxLoopBodyBlocks <= kHotLoopLeafMaxBodyBlocks;
 }
 
 using SideEffectAnalyzer = FunctionSideEffectAnalysis;
@@ -294,6 +344,35 @@ bool isCacheableLoopCall(CallInst * call,
            operandsAreLoopInvariant(call, loopBody);
 }
 
+/// @brief 判断基本块是否会让 PureCallLoopCache 的跨迭代缓存失效
+/// @param bb 待检查的基本块
+/// @param ignoredCall 允许忽略的候选纯调用本身
+/// @param sideEffects 共享副作用分析器
+/// @return true 表示该块中存在 store 或非纯调用
+bool blockInvalidatesPureCallCache(BasicBlock * bb,
+                                   CallInst * ignoredCall,
+                                   SideEffectAnalyzer & sideEffects)
+{
+    if (!bb) {
+        return true;
+    }
+
+    for (auto * inst : bb->getInstructions()) {
+        if (!inst || inst->isDead() || inst == ignoredCall) {
+            continue;
+        }
+        if (dynamic_cast<StoreInst *>(inst)) {
+            return true;
+        }
+        if (auto * call = dynamic_cast<CallInst *>(inst)) {
+            if (!sideEffects.isSideEffectFree(call->getCallee())) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /// @brief 若调用正好是 PureCallLoopCache 可处理的 latch 纯调用，保留给缓存 pass。
 bool shouldPreserveForPureCallLoopCache(CallInst * call)
 {
@@ -335,7 +414,17 @@ bool shouldPreserveForPureCallLoopCache(CallInst * call)
         candidate = currentCall;
     }
 
-    return candidate == call;
+    if (candidate != call) {
+        return false;
+    }
+
+    for (auto * bb : *loopBody) {
+        if (blockInvalidatesPureCallCache(bb, bb == latch ? candidate : nullptr, sideEffects)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /// @brief 判断指令是否属于内联支持的指令类型
@@ -504,13 +593,10 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
     }
 
     const bool hotCallSite = callLoopDepth > 0;
+    const bool leafCallee = !hasNonSelfUserCall(callee);
     const int32_t maxAllocaBytes = hotCallSite ? kHotMaxAllocaBytes : kMaxAllocaBytes;
-    if (getAllocaBytes(callee) > maxAllocaBytes) {
-        return false;
-    }
-
-    // 包含循环的函数内联后可能导致代码膨胀，不予内联
-    if (containsNaturalLoop(callee)) {
+    const int32_t allocaBytes = getAllocaBytes(callee);
+    if (allocaBytes > maxAllocaBytes) {
         return false;
     }
 
@@ -524,9 +610,17 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
 
     int32_t blockCount = static_cast<int32_t>(callee->getBlocks().size());
     int32_t instCount = countInstructions(callee);
+    const NaturalLoopSummary loopSummary = analyzeNaturalLoops(callee);
+
+    if (loopSummary.loopCount > 0) {
+        if (!hotCallSite || !leafCallee) {
+            return false;
+        }
+        return isEligibleHotLoopLeafCallee(mod, callee, loopSummary, allocaBytes, blockCount, instCount);
+    }
 
     // 叶子函数：普通调用点保守，循环内热点调用点使用更宽松阈值。
-    if (!hasNonSelfUserCall(callee)) {
+    if (leafCallee) {
         const int32_t maxBlocks = hotCallSite ? kHotLeafMaxBlocks : kLeafMaxBlocks;
         const int32_t maxInsts = hotCallSite ? kHotLeafMaxInsts : kLeafMaxInsts;
         return blockCount <= maxBlocks && instCount <= maxInsts;

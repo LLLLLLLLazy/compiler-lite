@@ -10,9 +10,6 @@ tools/
 .arts
 .claude
 
-tests/2025_performance/
-tests/2025_function/
-
 passed_tests.md
 .vscode
 asm_analysis
