@@ -21,6 +21,7 @@
 #include "LoopInfo.h"
 #include "Module.h"
 #include "PhiInst.h"
+#include "ScalarEvolution.h"
 #include "Type.h"
 #include "Value.h"
 
@@ -83,84 +84,6 @@ BasicBlock * findUniqueLatch(BasicBlock * header, const std::unordered_set<Basic
     return latch;
 }
 
-ConstInteger * asConstInteger(Value * value)
-{
-    return dynamic_cast<ConstInteger *>(value);
-}
-
-bool matchInductionStep(Value * value, PhiInst * induction, int32_t & step)
-{
-    auto * binary = dynamic_cast<BinaryInst *>(value);
-    if (!binary || !induction) {
-        return false;
-    }
-
-    if (binary->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
-        if (binary->getLHS() == induction) {
-            auto * rhs = asConstInteger(binary->getRHS());
-            if (!rhs) {
-                return false;
-            }
-            step = rhs->getVal();
-            return step != 0;
-        }
-
-        if (binary->getRHS() == induction) {
-            auto * lhs = asConstInteger(binary->getLHS());
-            if (!lhs) {
-                return false;
-            }
-            step = lhs->getVal();
-            return step != 0;
-        }
-    }
-
-    if (binary->getOp() == IRInstOperator::IRINST_OP_SUB_I && binary->getLHS() == induction) {
-        auto * rhs = asConstInteger(binary->getRHS());
-        if (!rhs) {
-            return false;
-        }
-        step = -rhs->getVal();
-        return step != 0;
-    }
-
-    return false;
-}
-
-bool getInductionInfo(PhiInst * phi,
-                      BasicBlock * preheader,
-                      BasicBlock * latch,
-                      const std::unordered_set<BasicBlock *> & loopBody,
-                      Value *& initValue,
-                      int32_t & step)
-{
-    if (!phi || !phi->getType()->isInt32Type() || !preheader || !latch || phi->getIncomingCount() != 2) {
-        return false;
-    }
-
-    Value * backValue = nullptr;
-    initValue = nullptr;
-
-    for (int32_t index = 0; index < phi->getIncomingCount(); ++index) {
-        if (phi->getIncomingBlock(index) == preheader) {
-            initValue = phi->getIncomingValue(index);
-            continue;
-        }
-
-        if (phi->getIncomingBlock(index) == latch) {
-            backValue = phi->getIncomingValue(index);
-        }
-    }
-
-    auto * backInst = dynamic_cast<Instruction *>(backValue);
-    if (!initValue || !backInst || !backInst->getParentBlock() ||
-        loopBody.find(backInst->getParentBlock()) == loopBody.end()) {
-        return false;
-    }
-
-    return matchInductionStep(backValue, phi, step);
-}
-
 bool allUsesStayInLoop(Value * value, const std::unordered_set<BasicBlock *> & loopBody)
 {
     if (!value) {
@@ -208,6 +131,63 @@ void insertPhiAtHeader(BasicBlock * header, PhiInst * phi)
 
     phi->setParentBlock(header);
     insts.insert(insertPos, phi);
+}
+
+const ScalarEvolution::AddRecurrenceExpr * getLoopIndexRecurrence(GetElementPtrInst * gep,
+                                                                  BasicBlock * header,
+                                                                  BasicBlock * preheader,
+                                                                  BasicBlock * latch,
+                                                                  ScalarEvolution & scev)
+{
+    if (!gep || gep->isDead()) {
+        return nullptr;
+    }
+
+    const auto * recurrence = scev.getAddRecurrence(gep->getIndexOperand());
+    if (!recurrence || !recurrence->isIntegerRecurrence() || recurrence->getLoopHeader() != header ||
+        recurrence->getPreheader() != preheader || recurrence->getLatch() != latch) {
+        return nullptr;
+    }
+
+    return recurrence;
+}
+
+Value * materializeSCEVExpr(const ScalarEvolution::Expr * expr,
+                           Function * func,
+                           Module * mod,
+                           BasicBlock * insertBlock)
+{
+    if (!expr || !func || !mod || !insertBlock || !expr->getType()) {
+        return nullptr;
+    }
+
+    switch (expr->getKind()) {
+    case ScalarEvolution::ExprKind::Constant: {
+        const auto * constant = static_cast<const ScalarEvolution::ConstantExpr *>(expr);
+        return mod->newConstInteger(expr->getType(), constant->getIntValue());
+    }
+    case ScalarEvolution::ExprKind::Unknown:
+        return static_cast<const ScalarEvolution::UnknownExpr *>(expr)->getValue();
+    case ScalarEvolution::ExprKind::AddRecurrence:
+        return static_cast<const ScalarEvolution::AddRecurrenceExpr *>(expr)->getPhi();
+    case ScalarEvolution::ExprKind::Add:
+    case ScalarEvolution::ExprKind::Multiply: {
+        const auto * binary = static_cast<const ScalarEvolution::BinaryExpr *>(expr);
+        Value * lhs = materializeSCEVExpr(binary->getLHS(), func, mod, insertBlock);
+        Value * rhs = materializeSCEVExpr(binary->getRHS(), func, mod, insertBlock);
+        if (!lhs || !rhs) {
+            return nullptr;
+        }
+
+        IRInstOperator op = expr->getKind() == ScalarEvolution::ExprKind::Add ? IRInstOperator::IRINST_OP_ADD_I
+                                                                               : IRInstOperator::IRINST_OP_MUL_I;
+        auto * inst = new BinaryInst(func, op, lhs, rhs, expr->getType());
+        insertBeforeTerminator(insertBlock, inst);
+        return inst;
+    }
+    }
+
+    return nullptr;
 }
 
 } // namespace
@@ -263,6 +243,7 @@ bool LoopStrengthReduce::tryReduceHeader(BasicBlock * header)
 
     DominatorTree domTree(func);
     LoopInfo loopInfo(func, &domTree);
+    ScalarEvolution scev(func, &domTree, &loopInfo);
     const auto * bodyPtr = loopInfo.getLoopBody(header);
     if (!bodyPtr || bodyPtr->empty()) {
         return false;
@@ -275,35 +256,17 @@ bool LoopStrengthReduce::tryReduceHeader(BasicBlock * header)
         return false;
     }
 
-    for (auto * inst : header->getInstructions()) {
-        auto * phi = dynamic_cast<PhiInst *>(inst);
-        if (!phi) {
-            break;
-        }
-
-        Value * initValue = nullptr;
-        int32_t step = 0;
-        if (!getInductionInfo(phi, preheader, latch, loopBody, initValue, step)) {
-            continue;
-        }
-
-        if (reduceFirstCandidate(header, preheader, latch, phi, initValue, step, loopBody)) {
-            return true;
-        }
-    }
-
-    return false;
+    return reduceFirstCandidate(header, preheader, latch, scev, loopBody);
 }
 
 bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
                                               BasicBlock * preheader,
                                               BasicBlock * latch,
-                                              PhiInst * induction,
-                                              Value * initValue,
-                                              int32_t step,
+                                              ScalarEvolution & scev,
                                               const std::unordered_set<BasicBlock *> & loopBody)
 {
     GetElementPtrInst * seed = nullptr;
+    const ScalarEvolution::AddRecurrenceExpr * seedRecurrence = nullptr;
     for (auto * bb : func->getBlocks()) {
         if (loopBody.find(bb) == loopBody.end()) {
             continue;
@@ -311,12 +274,17 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
 
         for (auto * inst : bb->getInstructions()) {
             auto * gep = dynamic_cast<GetElementPtrInst *>(inst);
-            if (!gep || gep->isDead() || gep->getIndexOperand() != induction ||
-                !isLoopInvariantValue(gep->getBasePointer(), loopBody) || !allUsesStayInLoop(gep, loopBody)) {
+            if (!gep || !isLoopInvariantValue(gep->getBasePointer(), loopBody) || !allUsesStayInLoop(gep, loopBody)) {
+                continue;
+            }
+
+            const auto * recurrence = getLoopIndexRecurrence(gep, header, preheader, latch, scev);
+            if (!recurrence) {
                 continue;
             }
 
             seed = gep;
+            seedRecurrence = recurrence;
             break;
         }
 
@@ -329,9 +297,15 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
         return false;
     }
 
+    Value * initValue = materializeSCEVExpr(seedRecurrence->getStartExpr(), func, mod, preheader);
+    if (!initValue) {
+        return false;
+    }
+
     Value * base = seed->getBasePointer();
     Type * pointerType = seed->getType();
     const bool decayArray = seed->isArrayDecayGEP();
+    Value * seedIndex = seed->getIndexOperand();
 
     std::vector<GetElementPtrInst *> candidates;
     for (auto * bb : func->getBlocks()) {
@@ -345,7 +319,7 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
                 continue;
             }
 
-            if (gep->getBasePointer() == base && gep->getIndexOperand() == induction &&
+            if (gep->getBasePointer() == base && gep->getIndexOperand() == seedIndex &&
                 gep->getType() == pointerType && gep->isArrayDecayGEP() == decayArray &&
                 allUsesStayInLoop(gep, loopBody)) {
                 candidates.push_back(gep);
@@ -359,7 +333,7 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
 
     auto * initPtr = new GetElementPtrInst(func, base, initValue, pointerType, decayArray);
     auto * ptrPhi = new PhiInst(func, pointerType);
-    auto * stepValue = mod->newConstInt32(step);
+    auto * stepValue = mod->newConstInteger(seedIndex->getType(), seedRecurrence->getStep());
     auto * nextPtr = new GetElementPtrInst(func, ptrPhi, stepValue, pointerType, false);
 
     insertBeforeTerminator(preheader, initPtr);

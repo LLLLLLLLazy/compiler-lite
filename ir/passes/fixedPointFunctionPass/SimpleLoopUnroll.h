@@ -18,7 +18,7 @@ public:
     bool run();
 
 private:
-    bool tryUnrollHeader(class BasicBlock * header);
+    bool tryUnrollHeader(class BasicBlock * header, class ScalarEvolution & scev);
     Instruction * cloneInstruction(Instruction * inst);
 
     Function * func = nullptr;

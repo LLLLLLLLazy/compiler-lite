@@ -18,18 +18,17 @@ class LoopStrengthReduce {
 public:
     LoopStrengthReduce(Function * func, Module * mod);
 
-    /// @brief 将循环内 gep(base, i_phi) 改写为 pointer phi + ptr += stride
+    /// @brief 将循环内 gep(base, affine(i_phi)) 改写为 pointer phi + ptr += stride
     /// @return 若修改了 IR 则返回 true
     bool run();
 
 private:
     bool tryReduceHeader(BasicBlock * header);
+    /// @brief 选择一组共享同一 affine index 值的 GEP 并改写为 pointer recurrence
     bool reduceFirstCandidate(BasicBlock * header,
                               BasicBlock * preheader,
                               BasicBlock * latch,
-                              class PhiInst * induction,
-                              class Value * initValue,
-                              int32_t step,
+                              class ScalarEvolution & scev,
                               const std::unordered_set<BasicBlock *> & loopBody);
     bool sweepDeadInstructions() const;
 

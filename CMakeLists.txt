@@ -217,6 +217,8 @@ set(IR_SRCS
 	ir/analysis/PostDominatorTree.cpp
 	ir/analysis/PureFunctionAnalysis.h
 	ir/analysis/PureFunctionAnalysis.cpp
+	ir/analysis/ScalarEvolution.h
+	ir/analysis/ScalarEvolution.cpp
 	ir/passes/functionPass/ArrayScalarize.h
 	ir/passes/functionPass/ArrayScalarize.cpp
 	ir/passes/fixedPointFunctionPass/ConstProp.h
