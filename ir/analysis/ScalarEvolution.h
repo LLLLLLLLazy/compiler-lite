@@ -141,6 +141,7 @@ public:
     ///
     /// 对直接来自 phi 的递归，startValue/backEdgeValue 对应真实 IR 值；
     /// 对由 affine 变换提升出的派生递归，startValue/backEdgeValue 可能为空，
+    /// 但附加项必须在目标循环入口处就已可用并在整个循环执行期间保持不变。
     /// 此时应优先使用 startExpr 和 step 重新物化起始项。
     class AddRecurrenceExpr final : public Expr {
 
@@ -151,7 +152,8 @@ public:
         };
 
         AddRecurrenceExpr(PhiInst * phi,
-                          Value * startValue,
+                  Value * representativeValue,
+                  Value * startValue,
                           const Expr * startExpr,
                           Value * backEdgeValue,
                           int32_t step,
@@ -163,6 +165,11 @@ public:
         PhiInst * getPhi() const
         {
             return phi;
+        }
+
+        Value * getRepresentativeValue() const
+        {
+            return representativeValue;
         }
 
         Value * getStartValue() const
@@ -217,6 +224,7 @@ public:
 
     private:
         PhiInst * phi = nullptr;
+        Value * representativeValue = nullptr;
         Value * startValue = nullptr;
         const Expr * startExpr = nullptr;
         Value * backEdgeValue = nullptr;
@@ -279,9 +287,16 @@ private:
     const Expr * analyzeBinary(class BinaryInst * binary);
     const UnknownExpr * createUnknown(Value * value);
     const ConstantExpr * createConstant(Type * type, int32_t intValue, ConstInteger * sourceValue = nullptr);
-    const Expr * createAdd(Type * type, const Expr * lhs, const Expr * rhs);
-    const Expr * createMultiply(Type * type, const Expr * lhs, const Expr * rhs);
+    const Expr * createAdd(Type * type,
+                           const Expr * lhs,
+                           const Expr * rhs,
+                           Value * representativeValue = nullptr);
+    const Expr * createMultiply(Type * type,
+                                const Expr * lhs,
+                                const Expr * rhs,
+                                Value * representativeValue = nullptr);
     const AddRecurrenceExpr * createAddRecurrence(PhiInst * phi,
+                                                  Value * representativeValue,
                                                   Value * startValue,
                                                   const Expr * startExpr,
                                                   Value * backEdgeValue,
@@ -291,9 +306,15 @@ private:
                                                   BasicBlock * preheader,
                                                   BasicBlock * latch);
     /// @brief 尝试将 addrec 与循环不变量相加提升为新的 add recurrence
-    const Expr * tryCreateAffineAddRecurrenceForAdd(Type * type, const Expr * lhs, const Expr * rhs);
+    const Expr * tryCreateAffineAddRecurrenceForAdd(Type * type,
+                                                    const Expr * lhs,
+                                                    const Expr * rhs,
+                                                    Value * representativeValue);
     /// @brief 尝试将整数 addrec 按常量倍数缩放为新的 add recurrence
-    const Expr * tryCreateAffineAddRecurrenceForMultiply(Type * type, const Expr * lhs, const Expr * rhs);
+    const Expr * tryCreateAffineAddRecurrenceForMultiply(Type * type,
+                                                         const Expr * lhs,
+                                                         const Expr * rhs,
+                                                         Value * representativeValue);
 
     bool matchAddRecurrence(PhiInst * phi,
                             BasicBlock * loopHeader,
@@ -313,8 +334,18 @@ private:
                         int32_t & step,
                         AddRecurrenceExpr::StepKind & stepKind) const;
     bool hasSingleBranchTo(BasicBlock * bb, BasicBlock * target) const;
-    /// @brief 判断表达式是否不依赖指定循环的递推变量
+    /// @brief 判断表达式是否在指定循环入口处已可用且在整个循环执行期间保持不变
     bool isLoopInvariantExpr(const Expr * expr, BasicBlock * loopHeader);
+    bool isLoopInvariantExprInLoop(const Expr * expr,
+                                  BasicBlock * loopHeader,
+                                  const std::unordered_set<BasicBlock *> & loopBody,
+                                  std::unordered_set<const Expr *> & exprVisiting,
+                                  std::unordered_set<Value *> & valueVisiting);
+    bool isLoopInvariantValueInLoop(Value * value,
+                                    BasicBlock * loopHeader,
+                                    const std::unordered_set<BasicBlock *> & loopBody,
+                                    std::unordered_set<const Expr *> & exprVisiting,
+                                    std::unordered_set<Value *> & valueVisiting);
     bool tryEvaluateConstantInt(const Expr * expr, int32_t & constant) const;
     bool dependsOnLoopExpr(const Expr * expr,
                            BasicBlock * loopHeader,

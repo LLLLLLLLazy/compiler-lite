@@ -169,7 +169,7 @@ Value * materializeSCEVExpr(const ScalarEvolution::Expr * expr,
     case ScalarEvolution::ExprKind::Unknown:
         return static_cast<const ScalarEvolution::UnknownExpr *>(expr)->getValue();
     case ScalarEvolution::ExprKind::AddRecurrence:
-        return static_cast<const ScalarEvolution::AddRecurrenceExpr *>(expr)->getPhi();
+        return static_cast<const ScalarEvolution::AddRecurrenceExpr *>(expr)->getRepresentativeValue();
     case ScalarEvolution::ExprKind::Add:
     case ScalarEvolution::ExprKind::Multiply: {
         const auto * binary = static_cast<const ScalarEvolution::BinaryExpr *>(expr);
@@ -297,7 +297,10 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
         return false;
     }
 
-    Value * initValue = materializeSCEVExpr(seedRecurrence->getStartExpr(), func, mod, preheader);
+    Value * initValue = seedRecurrence->getStartValue();
+    if (!initValue) {
+        initValue = materializeSCEVExpr(seedRecurrence->getStartExpr(), func, mod, preheader);
+    }
     if (!initValue) {
         return false;
     }
