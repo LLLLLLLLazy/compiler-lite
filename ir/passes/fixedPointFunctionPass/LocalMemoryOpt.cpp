@@ -14,6 +14,7 @@
 #include "DominatorTree.h"
 #include "Function.h"
 #include "Instruction.h"
+#include "LocalMemoryAnalysis.h"
 #include "LoadInst.h"
 #include "MemoryLocation.h"
 #include "StoreInst.h"
@@ -23,10 +24,10 @@ namespace {
 
 using AvailableValueMap = std::unordered_map<MemoryLocation, Value *, MemoryLocationHash>;
 using PendingStoreMap = std::unordered_map<MemoryLocation, StoreInst *, MemoryLocationHash>;
-using LiveLocationSet = std::unordered_set<MemoryLocation, MemoryLocationHash>;
+using LiveMemoryKeySet = std::unordered_set<LocalMemoryKey, LocalMemoryKeyHash>;
 using ReachableBlockSet = std::unordered_set<BasicBlock *>;
 using BlockAvailableStateMap = std::unordered_map<BasicBlock *, AvailableValueMap>;
-using BlockLiveStateMap = std::unordered_map<BasicBlock *, LiveLocationSet>;
+using BlockLiveStateMap = std::unordered_map<BasicBlock *, LiveMemoryKeySet>;
 
 /// @brief 判断位点是否属于可跟踪的非逃逸局部对象
 /// @param location 待检查位点
@@ -38,33 +39,31 @@ bool isTrackableObject(const MemoryLocation & location,
     return location.object != nullptr && trackableAllocas.find(location.object) != trackableAllocas.end();
 }
 
-/// @brief 判断位点是否属于可做跨块 dead store 分析的精确槽位
-/// @param location 待检查位点
-/// @param preciseOnlyAllocas 没有任何不精确访问的对象集合
-/// @return true 表示该位点可以参与 whole-function DSE
-bool isWholeFunctionDSELocation(const MemoryLocation & location,
-                                const std::unordered_set<AllocaInst *> & preciseOnlyAllocas)
+/// @brief 删除状态表中与给定位点可能别名的全部条目
+/// @tparam MapT 以 MemoryLocation 为键的状态表类型
+/// @param state 待更新的状态表
+/// @param location 当前访问位点
+template <typename MapT>
+void eraseMayAliasEntries(MapT & state, const MemoryLocation & location)
 {
-    return location.isPrecise() && preciseOnlyAllocas.find(location.object) != preciseOnlyAllocas.end();
-}
+    if (!location.isKnownObject()) {
+        state.clear();
+        return;
+    }
 
-/// @brief 删除某个对象上的全部可用值缓存
-/// @param availableValues 当前已知可复用值
-/// @param object 目标对象
-void eraseAvailableValuesForObject(AvailableValueMap & availableValues, AllocaInst * object)
-{
-    for (auto it = availableValues.begin(); it != availableValues.end();) {
-        if (it->first.object == object) {
-            it = availableValues.erase(it);
+    for (auto it = state.begin(); it != state.end();) {
+        if (classifyMemoryAlias(location, it->first) == MemoryAliasResult::NoAlias) {
+            ++it;
             continue;
         }
-        ++it;
+
+        it = state.erase(it);
     }
 }
 
-/// @brief 删除某个对象上的全部待定 store
-/// @param pendingStores 当前候选 dead store 集合
+/// @brief 删除对象上全部待定 store 候选而不视为 dead
 /// @param object 目标对象
+/// @param pendingStores 当前候选 dead store 集合
 void erasePendingStoresForObject(PendingStoreMap & pendingStores, AllocaInst * object)
 {
     for (auto it = pendingStores.begin(); it != pendingStores.end();) {
@@ -96,11 +95,11 @@ bool isSameAvailableValueMap(const AvailableValueMap & lhs, const AvailableValue
     return true;
 }
 
-/// @brief 比较两个活跃槽位集合是否完全一致
+/// @brief 比较两个活跃内存键集合是否完全一致
 /// @param lhs 左集合
 /// @param rhs 右集合
 /// @return true 表示两者等价
-bool isSameLiveLocationSet(const LiveLocationSet & lhs, const LiveLocationSet & rhs)
+bool isSameLiveMemoryKeySet(const LiveMemoryKeySet & lhs, const LiveMemoryKeySet & rhs)
 {
     if (lhs.size() != rhs.size()) {
         return false;
@@ -115,21 +114,86 @@ bool isSameLiveLocationSet(const LiveLocationSet & lhs, const LiveLocationSet & 
     return true;
 }
 
-/// @brief 记录一次 local conservative DSE 视角下的内存读取
-/// @param location 被读取的位点
-/// @param pendingStores 当前候选 dead store 集合
-void observeLocalDeadStoreRead(const MemoryLocation & location, PendingStoreMap & pendingStores)
+/// @brief 判断对象上是否存在对象级不精确读取活跃摘要
+/// @param liveKeys 当前活跃内存键集合
+/// @param object 目标对象
+/// @return true 表示后续仍有不精确读取可能观测到该对象上的写入
+bool hasObjectReadSummary(const LiveMemoryKeySet & liveKeys, AllocaInst * object)
+{
+    return liveKeys.find(makeObjectReadSummaryLocalMemoryKey(object)) != liveKeys.end();
+}
+
+/// @brief 判断对象上是否存在任意精确槽位活跃读取
+/// @param liveKeys 当前活跃内存键集合
+/// @param object 目标对象
+/// @return true 表示后续仍有精确读取可能观测到该对象上的写入
+bool hasAnyPreciseLiveKeyForObject(const LiveMemoryKeySet & liveKeys, AllocaInst * object)
+{
+    for (const auto & key : liveKeys) {
+        if (key.kind == LocalMemoryKeyKind::PreciseLocation && localMemoryKeyBelongsToObject(key, object)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/// @brief 判断一次 store 在 whole-function DSE 中是否仍然活跃
+/// @param location 当前写入位点
+/// @param liveKeys 当前活跃内存键集合
+/// @return true 表示该 store 可能被后续读取观测到
+bool isWholeFunctionStoreLive(const MemoryLocation & location, const LiveMemoryKeySet & liveKeys)
+{
+    if (!location.isKnownObject()) {
+        return true;
+    }
+
+    if (hasObjectReadSummary(liveKeys, location.object)) {
+        return true;
+    }
+
+    if (!location.isPrecise()) {
+        return hasAnyPreciseLiveKeyForObject(liveKeys, location.object);
+    }
+
+    return liveKeys.find(makePreciseLocalMemoryKey(location)) != liveKeys.end();
+}
+
+/// @brief 将一次读取加入 whole-function DSE 的活跃集合
+/// @param location 被读取位点
+/// @param liveKeys 当前活跃内存键集合
+void observeWholeFunctionRead(const MemoryLocation & location, LiveMemoryKeySet & liveKeys)
 {
     if (!location.isKnownObject()) {
         return;
     }
 
     if (!location.isPrecise()) {
-        erasePendingStoresForObject(pendingStores, location.object);
+        liveKeys.insert(makeObjectReadSummaryLocalMemoryKey(location.object));
         return;
     }
 
-    pendingStores.erase(location);
+    liveKeys.insert(makePreciseLocalMemoryKey(location));
+}
+
+/// @brief 应用一次 store 对 whole-function DSE 活跃集合的 kill 影响
+/// @param location 当前写入位点
+/// @param liveKeys 当前活跃内存键集合
+void applyWholeFunctionStoreKill(const MemoryLocation & location, LiveMemoryKeySet & liveKeys)
+{
+    if (!location.isPrecise()) {
+        return;
+    }
+
+    liveKeys.erase(makePreciseLocalMemoryKey(location));
+}
+
+/// @brief 记录一次 local conservative DSE 视角下的内存读取
+/// @param location 被读取的位点
+/// @param pendingStores 当前候选 dead store 集合
+void observeLocalDeadStoreRead(const MemoryLocation & location, PendingStoreMap & pendingStores)
+{
+    eraseMayAliasEntries(pendingStores, location);
 }
 
 /// @brief 从函数中清扫已标记为 dead 的指令
@@ -277,63 +341,6 @@ ReachableBlockSet collectReachableBlocks(const DominatorTree & dt)
     return reachableBlocks;
 }
 
-/// @brief 收集可安全参与 whole-function DSE 的对象
-/// @param func 待分析函数
-/// @param trackableAllocas 非逃逸对象集合
-/// @return 没有任何不精确访问的对象集合
-std::unordered_set<AllocaInst *> collectPreciseOnlyAllocas(
-    Function * func,
-    const std::unordered_set<AllocaInst *> & trackableAllocas)
-{
-    std::unordered_set<AllocaInst *> preciseOnlyAllocas = trackableAllocas;
-    if (func == nullptr) {
-        return preciseOnlyAllocas;
-    }
-
-    for (auto * bb : func->getBlocks()) {
-        for (auto * inst : bb->getInstructions()) {
-            if (inst == nullptr || inst->isDead()) {
-                continue;
-            }
-
-            Value * pointerOperand = nullptr;
-            if (auto * load = dynamic_cast<LoadInst *>(inst)) {
-                pointerOperand = load->getPointerOperand();
-            } else if (auto * store = dynamic_cast<StoreInst *>(inst)) {
-                pointerOperand = store->getPointerOperand();
-            } else {
-                continue;
-            }
-
-            MemoryLocation location = normalizeMemoryLocation(pointerOperand);
-            if (!isTrackableObject(location, trackableAllocas) || location.isPrecise()) {
-                continue;
-            }
-
-            preciseOnlyAllocas.erase(location.object);
-        }
-    }
-
-    return preciseOnlyAllocas;
-}
-
-/// @brief 收集需要交给 local conservative DSE 的对象
-/// @param trackableAllocas 非逃逸对象集合
-/// @param preciseOnlyAllocas 可安全参与 whole-function DSE 的对象集合
-/// @return 仅能依赖 local DSE 的对象集合
-std::unordered_set<AllocaInst *> collectLocalDSEAllocas(
-    const std::unordered_set<AllocaInst *> & trackableAllocas,
-    const std::unordered_set<AllocaInst *> & preciseOnlyAllocas)
-{
-    std::unordered_set<AllocaInst *> localDSEAllocas;
-    for (auto * alloca : trackableAllocas) {
-        if (preciseOnlyAllocas.find(alloca) == preciseOnlyAllocas.end()) {
-            localDSEAllocas.insert(alloca);
-        }
-    }
-    return localDSEAllocas;
-}
-
 /// @brief 计算块入口的可用值状态 meet
 /// @param bb 目标基本块
 /// @param outStates 前驱块出口状态
@@ -412,8 +419,8 @@ void applyAvailableValueTransfer(BasicBlock * bb,
                 continue;
             }
 
+            eraseMayAliasEntries(availableValues, location);
             if (!location.isPrecise()) {
-                eraseAvailableValuesForObject(availableValues, location.object);
                 continue;
             }
 
@@ -534,8 +541,8 @@ bool rewriteLoadsFromAvailableValues(Function * func,
                     continue;
                 }
 
+                eraseMayAliasEntries(availableValues, location);
                 if (!location.isPrecise()) {
-                    eraseAvailableValuesForObject(availableValues, location.object);
                     continue;
                 }
 
@@ -592,16 +599,17 @@ bool eliminateSameValueStores(Function * func,
                     continue;
                 }
 
-                if (!location.isPrecise()) {
-                    eraseAvailableValuesForObject(availableValues, location.object);
-                    continue;
-                }
-
                 auto availableIt = availableValues.find(location);
-                if (availableIt != availableValues.end() && availableIt->second == store->getValueOperand()) {
+                if (location.isPrecise() && availableIt != availableValues.end() &&
+                    availableIt->second == store->getValueOperand()) {
                     store->clearOperands();
                     store->setDead(true);
                     changed = true;
+                    continue;
+                }
+
+                eraseMayAliasEntries(availableValues, location);
+                if (!location.isPrecise()) {
                     continue;
                 }
 
@@ -615,10 +623,10 @@ bool eliminateSameValueStores(Function * func,
 
 /// @brief 块内 conservative dead store 消除
 /// @param func 待优化函数
-/// @param localDSEAllocas 仅能依赖 local DSE 的对象集合
+/// @param trackableAllocas 非逃逸对象集合
 /// @return true 表示至少删除了一条 store
 bool eliminateLocalConservativeDeadStores(Function * func,
-                                          const std::unordered_set<AllocaInst *> & localDSEAllocas)
+                                          const std::unordered_set<AllocaInst *> & trackableAllocas)
 {
     if (func == nullptr) {
         return false;
@@ -635,7 +643,7 @@ bool eliminateLocalConservativeDeadStores(Function * func,
 
             if (auto * load = dynamic_cast<LoadInst *>(inst)) {
                 MemoryLocation location = normalizeMemoryLocation(load->getPointerOperand());
-                if (!isTrackableObject(location, localDSEAllocas)) {
+                if (!isTrackableObject(location, trackableAllocas)) {
                     continue;
                 }
 
@@ -645,7 +653,7 @@ bool eliminateLocalConservativeDeadStores(Function * func,
 
             if (auto * store = dynamic_cast<StoreInst *>(inst)) {
                 MemoryLocation location = normalizeMemoryLocation(store->getPointerOperand());
-                if (!isTrackableObject(location, localDSEAllocas)) {
+                if (!isTrackableObject(location, trackableAllocas)) {
                     continue;
                 }
 
@@ -669,16 +677,16 @@ bool eliminateLocalConservativeDeadStores(Function * func,
     return changed;
 }
 
-/// @brief 计算块出口的活跃精确槽位并集
+/// @brief 计算块出口的活跃内存键并集
 /// @param bb 目标基本块
 /// @param reachableBlocks 可达块集合
-/// @param liveInStates 后继块入口活跃集合
+/// @param liveInStates 后继块入口活跃键集合
 /// @return 块出口活跃集合
-LiveLocationSet computeLiveOutAtBlock(BasicBlock * bb,
-                                      const ReachableBlockSet & reachableBlocks,
-                                      const BlockLiveStateMap & liveInStates)
+LiveMemoryKeySet computeLiveOutAtBlock(BasicBlock * bb,
+                                       const ReachableBlockSet & reachableBlocks,
+                                       const BlockLiveStateMap & liveInStates)
 {
-    LiveLocationSet liveOut;
+    LiveMemoryKeySet liveOut;
     for (auto * succ : bb->getSuccessors()) {
         if (reachableBlocks.find(succ) == reachableBlocks.end()) {
             continue;
@@ -695,13 +703,13 @@ LiveLocationSet computeLiveOutAtBlock(BasicBlock * bb,
     return liveOut;
 }
 
-/// @brief 对一个基本块应用逆向活跃槽位 transfer
+/// @brief 对一个基本块应用逆向活跃内存键 transfer
 /// @param bb 目标基本块
-/// @param preciseOnlyAllocas 可做 whole-function DSE 的对象集合
-/// @param liveLocations 出口活跃集合，返回时为入口活跃集合
-void applyLiveLocationTransfer(BasicBlock * bb,
-                               const std::unordered_set<AllocaInst *> & preciseOnlyAllocas,
-                               LiveLocationSet & liveLocations)
+/// @param trackableAllocas 可做 whole-function DSE 的对象集合
+/// @param liveKeys 出口活跃集合，返回时为入口活跃集合
+void applyLiveMemoryTransfer(BasicBlock * bb,
+                             const std::unordered_set<AllocaInst *> & trackableAllocas,
+                             LiveMemoryKeySet & liveKeys)
 {
     auto & insts = bb->getInstructions();
     for (auto it = insts.rbegin(); it != insts.rend(); ++it) {
@@ -712,21 +720,21 @@ void applyLiveLocationTransfer(BasicBlock * bb,
 
         if (auto * load = dynamic_cast<LoadInst *>(inst)) {
             MemoryLocation location = normalizeMemoryLocation(load->getPointerOperand());
-            if (!isWholeFunctionDSELocation(location, preciseOnlyAllocas)) {
+            if (!isTrackableObject(location, trackableAllocas)) {
                 continue;
             }
 
-            liveLocations.insert(location);
+            observeWholeFunctionRead(location, liveKeys);
             continue;
         }
 
         if (auto * store = dynamic_cast<StoreInst *>(inst)) {
             MemoryLocation location = normalizeMemoryLocation(store->getPointerOperand());
-            if (!isWholeFunctionDSELocation(location, preciseOnlyAllocas)) {
+            if (!isTrackableObject(location, trackableAllocas)) {
                 continue;
             }
 
-            liveLocations.erase(location);
+            applyWholeFunctionStoreKill(location, liveKeys);
         }
     }
 }
@@ -734,14 +742,14 @@ void applyLiveLocationTransfer(BasicBlock * bb,
 /// @brief 计算 whole-function dead store 所需的逆向活跃集合
 /// @param rpo CFG 逆后序列表
 /// @param reachableBlocks 可达块集合
-/// @param preciseOnlyAllocas 可做 whole-function DSE 的对象集合
+/// @param trackableAllocas 可做 whole-function DSE 的对象集合
 /// @param liveInStates 输出块入口活跃集合
 /// @param liveOutStates 输出块出口活跃集合
-void solveLiveLocationDataflow(const std::vector<BasicBlock *> & rpo,
-                               const ReachableBlockSet & reachableBlocks,
-                               const std::unordered_set<AllocaInst *> & preciseOnlyAllocas,
-                               BlockLiveStateMap & liveInStates,
-                               BlockLiveStateMap & liveOutStates)
+void solveLiveMemoryDataflow(const std::vector<BasicBlock *> & rpo,
+                             const ReachableBlockSet & reachableBlocks,
+                             const std::unordered_set<AllocaInst *> & trackableAllocas,
+                             BlockLiveStateMap & liveInStates,
+                             BlockLiveStateMap & liveOutStates)
 {
     bool changed = false;
     do {
@@ -749,18 +757,18 @@ void solveLiveLocationDataflow(const std::vector<BasicBlock *> & rpo,
 
         for (auto it = rpo.rbegin(); it != rpo.rend(); ++it) {
             BasicBlock * bb = *it;
-            LiveLocationSet liveOut = computeLiveOutAtBlock(bb, reachableBlocks, liveInStates);
-            LiveLocationSet liveIn = liveOut;
-            applyLiveLocationTransfer(bb, preciseOnlyAllocas, liveIn);
+            LiveMemoryKeySet liveOut = computeLiveOutAtBlock(bb, reachableBlocks, liveInStates);
+            LiveMemoryKeySet liveIn = liveOut;
+            applyLiveMemoryTransfer(bb, trackableAllocas, liveIn);
 
             auto outIt = liveOutStates.find(bb);
-            if (outIt == liveOutStates.end() || !isSameLiveLocationSet(outIt->second, liveOut)) {
+            if (outIt == liveOutStates.end() || !isSameLiveMemoryKeySet(outIt->second, liveOut)) {
                 liveOutStates[bb] = liveOut;
                 changed = true;
             }
 
             auto inIt = liveInStates.find(bb);
-            if (inIt == liveInStates.end() || !isSameLiveLocationSet(inIt->second, liveIn)) {
+            if (inIt == liveInStates.end() || !isSameLiveMemoryKeySet(inIt->second, liveIn)) {
                 liveInStates[bb] = liveIn;
                 changed = true;
             }
@@ -768,15 +776,15 @@ void solveLiveLocationDataflow(const std::vector<BasicBlock *> & rpo,
     } while (changed);
 }
 
-/// @brief 依据 whole-function 活跃集合删除 precise dead store
+/// @brief 依据 whole-function 活跃集合删除跟踪对象上的 dead store
 /// @param func 待优化函数
 /// @param reachableBlocks 可达块集合
-/// @param preciseOnlyAllocas 可做 whole-function DSE 的对象集合
+/// @param trackableAllocas 可做 whole-function DSE 的对象集合
 /// @param liveOutStates 每个基本块的出口活跃集合
 /// @return true 表示至少删除了一条 store
-bool eliminateGlobalPreciseDeadStores(Function * func,
+bool eliminateWholeFunctionDeadStores(Function * func,
                                       const ReachableBlockSet & reachableBlocks,
-                                      const std::unordered_set<AllocaInst *> & preciseOnlyAllocas,
+                                      const std::unordered_set<AllocaInst *> & trackableAllocas,
                                       const BlockLiveStateMap & liveOutStates)
 {
     if (func == nullptr) {
@@ -789,10 +797,10 @@ bool eliminateGlobalPreciseDeadStores(Function * func,
             continue;
         }
 
-        LiveLocationSet liveLocations;
+        LiveMemoryKeySet liveKeys;
         auto outIt = liveOutStates.find(bb);
         if (outIt != liveOutStates.end()) {
-            liveLocations = outIt->second;
+            liveKeys = outIt->second;
         }
 
         auto & insts = bb->getInstructions();
@@ -804,28 +812,28 @@ bool eliminateGlobalPreciseDeadStores(Function * func,
 
             if (auto * load = dynamic_cast<LoadInst *>(inst)) {
                 MemoryLocation location = normalizeMemoryLocation(load->getPointerOperand());
-                if (!isWholeFunctionDSELocation(location, preciseOnlyAllocas)) {
+                if (!isTrackableObject(location, trackableAllocas)) {
                     continue;
                 }
 
-                liveLocations.insert(location);
+                observeWholeFunctionRead(location, liveKeys);
                 continue;
             }
 
             if (auto * store = dynamic_cast<StoreInst *>(inst)) {
                 MemoryLocation location = normalizeMemoryLocation(store->getPointerOperand());
-                if (!isWholeFunctionDSELocation(location, preciseOnlyAllocas)) {
+                if (!isTrackableObject(location, trackableAllocas)) {
                     continue;
                 }
 
-                if (liveLocations.find(location) == liveLocations.end()) {
+                if (!isWholeFunctionStoreLive(location, liveKeys)) {
                     store->clearOperands();
                     store->setDead(true);
                     changed = true;
                     continue;
                 }
 
-                liveLocations.erase(location);
+                applyWholeFunctionStoreKill(location, liveKeys);
             }
         }
     }
@@ -858,29 +866,25 @@ bool runAvailableValueOptimizations(Function * func,
 /// @param func 待优化函数
 /// @param rpo CFG 逆后序列表
 /// @param reachableBlocks 可达块集合
-/// @param localDSEAllocas 仅能依赖 local DSE 的对象集合
-/// @param preciseOnlyAllocas 可安全参与 whole-function DSE 的对象集合
+/// @param trackableAllocas 可安全参与 local/global DSE 的对象集合
 /// @return true 表示至少删除了一条 store
 bool eliminateDeadStores(Function * func,
                          const std::vector<BasicBlock *> & rpo,
                          const ReachableBlockSet & reachableBlocks,
-                         const std::unordered_set<AllocaInst *> & localDSEAllocas,
-                         const std::unordered_set<AllocaInst *> & preciseOnlyAllocas)
+                         const std::unordered_set<AllocaInst *> & trackableAllocas)
 {
     bool changed = false;
 
-    if (!localDSEAllocas.empty()) {
-        changed = eliminateLocalConservativeDeadStores(func, localDSEAllocas) || changed;
-    }
-
-    if (preciseOnlyAllocas.empty()) {
+    if (trackableAllocas.empty()) {
         return changed;
     }
 
+    changed = eliminateLocalConservativeDeadStores(func, trackableAllocas) || changed;
+
     BlockLiveStateMap liveInStates;
     BlockLiveStateMap liveOutStates;
-    solveLiveLocationDataflow(rpo, reachableBlocks, preciseOnlyAllocas, liveInStates, liveOutStates);
-    changed = eliminateGlobalPreciseDeadStores(func, reachableBlocks, preciseOnlyAllocas, liveOutStates)
+    solveLiveMemoryDataflow(rpo, reachableBlocks, trackableAllocas, liveInStates, liveOutStates);
+    changed = eliminateWholeFunctionDeadStores(func, reachableBlocks, trackableAllocas, liveOutStates)
               || changed;
     return changed;
 }
@@ -891,28 +895,6 @@ bool eliminateDeadStores(Function * func,
 /// @param _func 待优化函数
 LocalMemoryOpt::LocalMemoryOpt(Function * _func) : func(_func)
 {}
-
-/// @brief 收集可参与局部内存优化的非逃逸 alloca
-/// @return 非逃逸局部对象集合
-std::unordered_set<AllocaInst *> LocalMemoryOpt::collectTrackableAllocas() const
-{
-    std::unordered_set<AllocaInst *> trackableAllocas;
-    if (!func) {
-        return trackableAllocas;
-    }
-
-    for (auto * bb : func->getBlocks()) {
-        for (auto * inst : bb->getInstructions()) {
-            auto * alloca = dynamic_cast<AllocaInst *>(inst);
-            if (alloca == nullptr || doesPointerEscape(alloca)) {
-                continue;
-            }
-            trackableAllocas.insert(alloca);
-        }
-    }
-
-    return trackableAllocas;
-}
 
 /// @brief 清扫已标记为 dead 的 load/store
 /// @return true 表示至少删除了一条指令
@@ -929,7 +911,8 @@ bool LocalMemoryOpt::run()
         return false;
     }
 
-    const auto trackableAllocas = collectTrackableAllocas();
+    LocalMemoryAnalysis localMemory(func);
+    const auto & trackableAllocas = localMemory.getTrackableAllocas();
     if (trackableAllocas.empty()) {
         return false;
     }
@@ -937,15 +920,12 @@ bool LocalMemoryOpt::run()
     DominatorTree dt(func);
     const auto & rpo = dt.getRPO();
     const ReachableBlockSet reachableBlocks = collectReachableBlocks(dt);
-    const auto preciseOnlyAllocas = collectPreciseOnlyAllocas(func, trackableAllocas);
-    const auto localDSEAllocas = collectLocalDSEAllocas(trackableAllocas, preciseOnlyAllocas);
-
     bool changed = false;
     // 先提升只有一次入口 store 的 alloca，覆盖 mem2reg 不处理的指针临时槽
     changed = promoteSingleEntryStoreAllocas(func, trackableAllocas) || changed;
 
     changed = runAvailableValueOptimizations(func, rpo, reachableBlocks, trackableAllocas) || changed;
-    changed = eliminateDeadStores(func, rpo, reachableBlocks, localDSEAllocas, preciseOnlyAllocas) || changed;
+    changed = eliminateDeadStores(func, rpo, reachableBlocks, trackableAllocas) || changed;
 
     return sweepDeadInstructions() || changed;
 }

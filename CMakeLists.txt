@@ -205,10 +205,18 @@ set(IR_SRCS
 	ir/analysis/DominatorTree.cpp
 	ir/analysis/DominanceFrontier.h
 	ir/analysis/DominanceFrontier.cpp
+	ir/analysis/FunctionSideEffectAnalysis.h
+	ir/analysis/FunctionSideEffectAnalysis.cpp
+	ir/analysis/LocalMemoryAnalysis.h
+	ir/analysis/LocalMemoryAnalysis.cpp
+	ir/analysis/MemoryAccess.h
+	ir/analysis/MemoryAccess.cpp
 	ir/analysis/MemoryLocation.h
 	ir/analysis/MemoryLocation.cpp
 	ir/analysis/PostDominatorTree.h
 	ir/analysis/PostDominatorTree.cpp
+	ir/analysis/PureFunctionAnalysis.h
+	ir/analysis/PureFunctionAnalysis.cpp
 	ir/passes/functionPass/ArrayScalarize.h
 	ir/passes/functionPass/ArrayScalarize.cpp
 	ir/passes/fixedPointFunctionPass/ConstProp.h
