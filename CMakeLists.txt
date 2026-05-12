@@ -211,6 +211,8 @@ set(IR_SRCS
 	ir/analysis/PostDominatorTree.cpp
 	ir/passes/functionPass/ArrayScalarize.h
 	ir/passes/functionPass/ArrayScalarize.cpp
+	ir/passes/functionPass/LoopParallelize.h
+	ir/passes/functionPass/LoopParallelize.cpp
 	ir/passes/fixedPointFunctionPass/ConstProp.h
 	ir/passes/fixedPointFunctionPass/ConstProp.cpp
 	ir/passes/modulePass/InterproceduralConstProp.h
@@ -223,9 +225,6 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/GVN.cpp
 	ir/passes/fixedPointFunctionPass/LoopTiling.h
 	ir/passes/fixedPointFunctionPass/LoopTiling.cpp
-	# 循环并行 pass：将安全的大粒度 tile 循环改写为多路并行执行
-	ir/passes/fixedPointFunctionPass/LoopParallelize.h
-	ir/passes/fixedPointFunctionPass/LoopParallelize.cpp
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.h
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.cpp
 	ir/passes/fixedPointFunctionPass/SimpleLoopUnroll.h

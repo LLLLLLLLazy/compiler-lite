@@ -2,6 +2,9 @@
 /// @file PassManager.cpp
 /// @brief pass 注册与执行管理器实现
 ///
+/// 注意 fixedPointFunctionPass 和 functionPass 的区别：
+/// 前者是从 '模块设计上' 需要多次迭代运行；
+/// 后者是从 '模块设计上' 仅运行一次，但是其内部可能包含多轮迭代。
 
 #include "PassManager.h"
 #include "Function.h"
@@ -18,8 +21,8 @@
 #include "fixedPointFunctionPass/SimpleLoopUnroll.h"
 #include "fixedPointFunctionPass/UnreachableBlockElim.h"
 #include "fixedPointFunctionPass/PureCallLoopCache.h"
-#include "fixedPointFunctionPass/LoopParallelize.h"
 #include "functionPass/ArrayScalarize.h"
+#include "functionPass/LoopParallelize.h"
 #include "functionPass/Mem2Reg.h"
 #include "functionPass/PhiLowering.h"
 #include "functionPass/PureCallCSE.h"
@@ -122,6 +125,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return pass.run();
     });
 
+    registerFunctionPass([this](Function * func) {
+        LoopParallelize pass(func, module);
+        return pass.run();
+    });
+
     registerLateModulePass([](Module * currentModule) {
         SmallFunctionInline pass(currentModule);
         bool changed = pass.run();
@@ -183,11 +191,6 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
 
     registerFixedPointFunctionPass([this](Function * func) {
         PureCallLoopCache pass(func, module);
-        return pass.run();
-    });
-
-    registerFixedPointFunctionPass([this](Function * func) {
-        LoopParallelize pass(func, module);
         return pass.run();
     });
 
