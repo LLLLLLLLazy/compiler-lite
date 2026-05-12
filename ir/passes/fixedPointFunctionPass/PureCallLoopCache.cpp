@@ -34,6 +34,7 @@
 #include "ConstFloat.h"
 #include "ConstInteger.h"
 #include "DominatorTree.h"
+#include "FunctionSideEffectAnalysis.h"
 #include "Function.h"
 #include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
@@ -41,175 +42,28 @@
 #include "IntegerType.h"
 #include "LoadInst.h"
 #include "LoopInfo.h"
+#include "MemoryAccess.h"
 #include "MemoryLocation.h"
 #include "Module.h"
 #include "PhiInst.h"
+#include "PureFunctionAnalysis.h"
 #include "StoreInst.h"
 #include "Type.h"
 #include "Value.h"
 
 namespace {
 
-/// @brief 沿 GEP 链找到指针根对象。
-Value * getPointerRoot(Value * value)
-{
-    Value * current = value;
-    std::unordered_set<Value *> visited;
-    while (current && visited.insert(current).second) {
-        auto * gep = dynamic_cast<GetElementPtrInst *>(current);
-        if (!gep) {
-            break;
-        }
-        current = gep->getBasePointer();
-    }
-    return current;
-}
-
-/// @brief store 只写入非逃逸局部 alloca 时，不构成函数外可见副作用。
-bool isNonEscapingLocalStore(StoreInst * store)
-{
-    if (!store) {
-        return false;
-    }
-
-    auto * alloca = dynamic_cast<AllocaInst *>(getPointerRoot(store->getPointerOperand()));
-    return alloca != nullptr && !doesPointerEscape(alloca);
-}
-
-/// @brief 函数纯度分析状态枚举
-enum class PurityState {
-    Unknown,   ///< 尚未分析
-    Visiting,  ///< 正在访问（用于检测递归）
-    Pure,      ///< 纯函数：无副作用，相同输入始终返回相同结果
-    Impure,    ///< 非纯函数：有副作用或依赖外部状态
-};
-
-/// @brief 函数纯度分析器
-///
-/// 通过递归分析函数体中的指令来判断函数是否为纯函数。
-/// 纯函数的判定条件：没有函数外可见写入，局部非逃逸 alloca 的 store
-/// 可作为临时变量使用，所有调用也都满足同样条件。
-class PurityAnalyzer {
-public:
-    /// @brief 判断函数是否为纯函数
-    /// @param function 待分析的函数
-    /// @return true 表示该函数是纯函数
-    bool isPure(Function * function)
-    {
-        if (!function || function->isBuiltin() || function->getBlocks().empty()) {
-            return false;
-        }
-
-        auto it = states.find(function);
-        if (it != states.end()) {
-            return it->second == PurityState::Pure;
-        }
-
-        states[function] = PurityState::Visiting;
-        bool pure = true;
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                if (!isAllowed(inst)) {
-                    pure = false;
-                    break;
-                }
-            }
-            if (!pure) {
-                break;
-            }
-        }
-
-        states[function] = pure ? PurityState::Pure : PurityState::Impure;
-        return pure;
-    }
-
-private:
-    /// @brief 判断单条指令是否允许出现在纯函数中
-    /// @param inst 待检查的指令
-    /// @return true 表示该指令不破坏纯性
-    bool isAllowed(Instruction * inst)
-    {
-        if (!inst || inst->isDead() || inst->isTerminator()) {
-            return true;
-        }
-
-        if (dynamic_cast<AllocaInst *>(inst) || dynamic_cast<LoadInst *>(inst)) {
-            return true;
-        }
-
-        if (auto * store = dynamic_cast<StoreInst *>(inst)) {
-            return isNonEscapingLocalStore(store);
-        }
-
-        if (auto * call = dynamic_cast<CallInst *>(inst)) {
-            auto it = states.find(call->getCallee());
-            if (it != states.end() && it->second == PurityState::Visiting) {
-                return false;
-            }
-            return isPure(call->getCallee());
-        }
-
-        return !inst->mayHaveSideEffects();
-    }
-
-    std::unordered_map<Function *, PurityState> states;  ///< 函数到纯度状态的映射
-};
-
-bool storeMayAliasLocation(StoreInst * store, const MemoryLocation & location)
-{
-    if (!store || !location.isPrecise()) {
-        return true;
-    }
-
-    MemoryLocation storeLocation = normalizeMemoryLocation(store->getPointerOperand());
-    if (!storeLocation.isKnownObject()) {
-        return true;
-    }
-
-    return classifyMemoryAlias(location, storeLocation) != MemoryAliasResult::NoAlias;
-}
+using PurityAnalyzer = PureFunctionAnalysis;
 
 /// @brief 判断 loop 内是否可能改写某个可识别 load 的地址。
 bool loopMayClobberLoad(Value * pointer, const std::unordered_set<BasicBlock *> & loopBody)
 {
-    MemoryLocation location = normalizeMemoryLocation(pointer);
-    if (location.isPrecise() && !doesPointerEscape(location.object)) {
-        for (auto * bb : loopBody) {
-            for (auto * inst : bb->getInstructions()) {
-                auto * store = dynamic_cast<StoreInst *>(inst);
-                if (store && storeMayAliasLocation(store, location)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    auto * global = dynamic_cast<GlobalVariable *>(getPointerRoot(pointer));
-    if (!global) {
-        return true;
-    }
-
-    PurityAnalyzer purity;
-    for (auto * bb : loopBody) {
-        for (auto * inst : bb->getInstructions()) {
-            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
-                Value * storeRoot = getPointerRoot(store->getPointerOperand());
-                if (storeRoot == global || (!dynamic_cast<AllocaInst *>(storeRoot) &&
-                                            !dynamic_cast<GlobalVariable *>(storeRoot))) {
-                    return true;
-                }
-                continue;
-            }
-
-            auto * call = dynamic_cast<CallInst *>(inst);
-            if (call && !purity.isPure(call->getCallee())) {
-                return true;
-            }
-        }
-    }
-
-    return false;
+    FunctionSideEffectAnalysis sideEffects;
+    return blocksMayClobberLoad(pointer,
+                                loopBody,
+                                [&sideEffects](CallInst * call) {
+                                    return call != nullptr && !sideEffects.isSideEffectFree(call->getCallee());
+                                });
 }
 
 bool valueIsLoopInvariant(Value * value,
@@ -306,8 +160,8 @@ bool blockInvalidatesCache(BasicBlock * bb)
         }
         auto * call = dynamic_cast<CallInst *>(inst);
         if (call) {
-            PurityAnalyzer purity;
-            if (!purity.isPure(call->getCallee())) {
+            FunctionSideEffectAnalysis sideEffects;
+            if (!sideEffects.isSideEffectFree(call->getCallee())) {
                 return true;
             }
         }
@@ -603,7 +457,7 @@ bool PureCallLoopCache::run()
 
     DominatorTree domTree(func);
     LoopInfo loopInfo(func, &domTree);
-    PurityAnalyzer purity;
+    PurityAnalyzer purity(mod);
 
     std::vector<BasicBlock *> headers;
     for (auto * bb : func->getBlocks()) {

@@ -22,6 +22,7 @@
 #include "Instruction.h"
 #include "LoadInst.h"
 #include "LoopInfo.h"
+#include "MemoryAccess.h"
 #include "MemoryLocation.h"
 #include "Module.h"
 #include "PhiInst.h"
@@ -195,105 +196,6 @@ bool loopMayWriteMemory(const std::unordered_set<BasicBlock *> & loopBody)
             }
         }
     }
-    return false;
-}
-
-/// @brief 沿 GEP 链找到指针根对象
-Value * getPointerRoot(Value * value)
-{
-    Value * current = value;
-    std::unordered_set<Value *> visited;
-    while (current && visited.insert(current).second) {
-        auto * gep = dynamic_cast<GetElementPtrInst *>(current);
-        if (!gep) {
-            break;
-        }
-        current = gep->getBasePointer();
-    }
-    return current;
-}
-
-/// @brief 判断全局变量是否在模块中没有任何直接或 GEP 派生 store
-bool isReadOnlyGlobal(Module * mod, GlobalVariable * global)
-{
-    if (!mod || !global) {
-        return false;
-    }
-
-    for (auto * function : mod->getFunctionList()) {
-        if (!function || function->isBuiltin()) {
-            continue;
-        }
-
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                auto * store = dynamic_cast<StoreInst *>(inst);
-                if (store && getPointerRoot(store->getPointerOperand()) == global) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    return true;
-}
-
-/// @brief 判断 store/call 是否可能改写非局部可见内存
-bool instructionMayClobberNonLocalMemory(Instruction * inst)
-{
-    if (!inst || inst->isDead()) {
-        return false;
-    }
-
-    if (auto * store = dynamic_cast<StoreInst *>(inst)) {
-        auto * rootAlloca = dynamic_cast<AllocaInst *>(getPointerRoot(store->getPointerOperand()));
-        return rootAlloca == nullptr || doesPointerEscape(rootAlloca);
-    }
-
-    auto * call = dynamic_cast<CallInst *>(inst);
-    return call != nullptr && !isPureCall(call);
-}
-
-bool loopMayClobberNonLocalMemory(const std::unordered_set<BasicBlock *> & loopBody)
-{
-    for (auto * bb : loopBody) {
-        for (auto * inst : bb->getInstructions()) {
-            if (instructionMayClobberNonLocalMemory(inst)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool loopMayClobberLocalLocation(const MemoryLocation & loadLocation,
-                                 const std::unordered_set<BasicBlock *> & loopBody)
-{
-    if (!loadLocation.isPrecise() || doesPointerEscape(loadLocation.object)) {
-        return true;
-    }
-
-    for (auto * bb : loopBody) {
-        for (auto * inst : bb->getInstructions()) {
-            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
-                MemoryLocation storeLocation = normalizeMemoryLocation(store->getPointerOperand());
-                if (!storeLocation.isKnownObject()) {
-                    continue;
-                }
-
-                if (classifyMemoryAlias(loadLocation, storeLocation) != MemoryAliasResult::NoAlias) {
-                    return true;
-                }
-                continue;
-            }
-
-            auto * call = dynamic_cast<CallInst *>(inst);
-            if (call && !isPureCall(call) && doesPointerEscape(loadLocation.object)) {
-                return true;
-            }
-        }
-    }
-
     return false;
 }
 
@@ -692,12 +594,17 @@ bool LICM::isSafeLoadToHoist(Instruction * inst, const std::unordered_set<BasicB
 
     Value * pointer = load->getPointerOperand();
     if (auto * global = dynamic_cast<GlobalVariable *>(getPointerRoot(pointer))) {
-        return isReadOnlyGlobal(mod, global) && !loopMayClobberNonLocalMemory(loopBody);
+        return isReadOnlyGlobal(mod, global) &&
+               !blocksMayClobberLoad(pointer,
+                                     loopBody,
+                                     [](CallInst * call) { return call != nullptr && !isPureCall(call); });
     }
 
     MemoryLocation location = normalizeMemoryLocation(pointer);
     if (location.isPrecise() && !doesPointerEscape(location.object)) {
-        return !loopMayClobberLocalLocation(location, loopBody);
+        return !blocksMayClobberLoad(pointer,
+                                     loopBody,
+                                     [](CallInst * call) { return call != nullptr && !isPureCall(call); });
     }
 
     return false;

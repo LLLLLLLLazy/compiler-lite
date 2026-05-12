@@ -33,8 +33,10 @@
 #include "ICmpInst.h"
 #include "Instruction.h"
 #include "LoadInst.h"
+#include "MemoryAccess.h"
 #include "Module.h"
 #include "FPToSIInst.h"
+#include "PureFunctionAnalysis.h"
 #include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "Type.h"
@@ -58,200 +60,6 @@ std::string ptrKey(const void * ptr)
     os << reinterpret_cast<std::uintptr_t>(ptr);
     return os.str();
 }
-
-/// @brief 判断全局变量是否在整个模块中未被 store（即只读）
-/// @param mod 所属模块
-/// @param global 待检查的全局变量
-/// @return true 表示该全局变量是只读的
-bool isReadOnlyGlobal(Module * mod, GlobalVariable * global)
-{
-    if (!mod || !global) {
-        return false;
-    }
-
-    for (auto * function : mod->getFunctionList()) {
-        if (!function || function->isBuiltin()) {
-            continue;
-        }
-
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                auto * store = dynamic_cast<StoreInst *>(inst);
-                if (store && store->getPointerOperand() == global) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    return true;
-}
-
-/// @brief 沿 GEP 链回溯找到指针的根对象（alloca/全局变量/形参等）
-Value * getPointerRoot(Value * value)
-{
-    Value * current = value;
-    std::unordered_set<Value *> visited;
-    while (current && visited.insert(current).second) {
-        auto * gep = dynamic_cast<GetElementPtrInst *>(current);
-        if (!gep) {
-            break;
-        }
-        current = gep->getBasePointer();
-    }
-    return current;
-}
-
-/// @brief 判断指针是否指向局部内存（alloca 分配的栈对象）
-bool isLocalMemory(Value * ptr)
-{
-    return dynamic_cast<AllocaInst *>(getPointerRoot(ptr)) != nullptr;
-}
-
-/// @brief 判断指针是否为允许纯函数读取的地址（局部内存、形参、只读全局变量）
-bool isAllowedReadPointer(Module * mod, Value * ptr)
-{
-    Value * root = getPointerRoot(ptr);
-    if (dynamic_cast<AllocaInst *>(root) != nullptr || dynamic_cast<FormalParam *>(root) != nullptr) {
-        return true;
-    }
-
-    auto * global = dynamic_cast<GlobalVariable *>(root);
-    return global != nullptr && isReadOnlyGlobal(mod, global);
-}
-
-/// @brief 函数纯度分析器：递归判断函数是否为纯函数（无副作用）
-///
-/// 纯函数的条件：
-///   - 只包含允许的指令（无副作用指令、只读 load、局部 store、调用纯函数）
-///   - 不存在递归调用环（Visiting 状态检测）
-class PurityAnalyzer {
-public:
-    explicit PurityAnalyzer(Module * module) : mod(module)
-    {}
-
-    /// @brief 判断函数是否为纯函数
-    /// @param function 待分析的函数
-    /// @return true 表示该函数是纯函数
-    bool isPure(Function * function)
-    {
-        if (!function || function->isBuiltin() || function->getBlocks().empty()) {
-            return false;
-        }
-
-        auto it = states.find(function);
-        if (it != states.end()) {
-            return it->second == PurityState::Pure;
-        }
-
-        states[function] = PurityState::Visiting;
-        bool pure = true;
-
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                if (!isInstructionAllowed(inst)) {
-                    pure = false;
-                    break;
-                }
-            }
-            if (!pure) {
-                break;
-            }
-        }
-
-        states[function] = pure ? PurityState::Pure : PurityState::Impure;
-        return pure;
-    }
-
-    /// @brief 判断纯函数是否不读取调用者可见内存。
-    ///
-    /// 允许函数内部的 alloca/load/store 作为局部临时变量；若 load 的根对象
-    /// 是形参或全局变量，则调用结果可能随内存状态变化，不能跨基本块复用。
-    bool isMemoryIndependent(Function * function)
-    {
-        if (!isPure(function)) {
-            return false;
-        }
-
-        auto cached = memoryIndependent.find(function);
-        if (cached != memoryIndependent.end()) {
-            return cached->second;
-        }
-
-        bool independent = true;
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                auto * load = dynamic_cast<LoadInst *>(inst);
-                if (!load) {
-                    continue;
-                }
-
-                if (dynamic_cast<AllocaInst *>(getPointerRoot(load->getPointerOperand())) == nullptr) {
-                    independent = false;
-                    break;
-                }
-            }
-
-            for (auto * inst : bb->getInstructions()) {
-                auto * call = dynamic_cast<CallInst *>(inst);
-                if (!call) {
-                    continue;
-                }
-
-                if (!isMemoryIndependent(call->getCallee())) {
-                    independent = false;
-                    break;
-                }
-            }
-            if (!independent) {
-                break;
-            }
-        }
-
-        memoryIndependent[function] = independent;
-        return independent;
-    }
-
-private:
-    /// @brief 判断指令是否为纯函数内允许的指令
-    bool isInstructionAllowed(Instruction * inst)
-    {
-        if (!inst || inst->isDead()) {
-            return true;
-        }
-
-        if (inst->isTerminator()) {
-            return true;
-        }
-
-        if (dynamic_cast<AllocaInst *>(inst) != nullptr) {
-            return true;
-        }
-
-        if (auto * load = dynamic_cast<LoadInst *>(inst)) {
-            return isAllowedReadPointer(mod, load->getPointerOperand());
-        }
-
-        if (auto * store = dynamic_cast<StoreInst *>(inst)) {
-            return isLocalMemory(store->getPointerOperand());
-        }
-
-        if (auto * call = dynamic_cast<CallInst *>(inst)) {
-            Function * callee = call->getCallee();
-            auto it = states.find(callee);
-            if (it != states.end() && it->second == PurityState::Visiting) {
-                return false;
-            }
-            return isPure(callee);
-        }
-
-        return !inst->mayHaveSideEffects();
-    }
-
-    Module * mod = nullptr;
-    std::unordered_map<Function *, PurityState> states;
-    std::unordered_map<Function *, bool> memoryIndependent;
-};
 
 /// @brief 纯调用的签名键：callee + 各实参的规范化字符串表示
 struct CallKey {
@@ -283,7 +91,7 @@ struct CallKeyHash {
 /// 确保跨 store 时不会误匹配。
 class BlockCSE {
 public:
-    explicit BlockCSE(PurityAnalyzer & analyzer) : purity(analyzer)
+    explicit BlockCSE(PureFunctionAnalysis & analyzer) : purity(analyzer)
     {}
 
     /// @brief 对单个基本块执行纯调用 CSE
@@ -470,7 +278,7 @@ private:
         return "";
     }
 
-    PurityAnalyzer & purity;
+    PureFunctionAnalysis & purity;
     std::unordered_map<CallKey, CallInst *, CallKeyHash> availableCalls;
     std::unordered_map<std::string, Instruction *> availableExprs;
     std::unordered_map<std::string, LoadInst *> availableLoads;
@@ -485,7 +293,7 @@ private:
 /// 可能读取数组/全局内存的调用结果。
 class DominatingCallCSE {
 public:
-    DominatingCallCSE(Function * function, PurityAnalyzer & analyzer)
+    DominatingCallCSE(Function * function, PureFunctionAnalysis & analyzer)
         : func(function), purity(analyzer), domTree(function)
     {}
 
@@ -587,7 +395,7 @@ private:
     }
 
     Function * func = nullptr;
-    PurityAnalyzer & purity;
+    PureFunctionAnalysis & purity;
     DominatorTree domTree;
 };
 
@@ -634,7 +442,7 @@ bool PureCallCSE::run()
         return false;
     }
 
-    PurityAnalyzer purity(mod);
+    PureFunctionAnalysis purity(mod);
     BlockCSE blockCSE(purity);
     bool changed = false;
 

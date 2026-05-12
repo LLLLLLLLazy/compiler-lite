@@ -5,13 +5,11 @@
 /// 仅对可规范化为非逃逸局部对象槽位的 load/store 做保守优化：
 ///   1. 同址 store-to-load forwarding
 ///   2. 冗余 load 消除
-///   3. 精确槽位的 dead store elimination
+///   3. 基于精确槽位与对象摘要的 dead store elimination
 ///
-/// 判断'同值'靠的是同一个 SSA Value (?)，而不是更强的值等价分析，所以不是 GVN 那种级别的冗余识别
-/// 下一步要引入 alias analysis 那套东西：
-/// mustAlias
-/// mayAlias
-/// notAlias
+/// DLE 语义主要体现在 load forwarding 和 redundant load elimination
+/// DSE 语义主要体现在同值 store 删除、块内 conservative DSE 和跨块 mixed precise/object-summary DSE
+/// 读写冲突判定统一基于 MemoryLocation 的 MustAlias / MayAlias / NoAlias
 
 #pragma once
 
@@ -31,9 +29,6 @@ public:
     bool run();
 
 private:
-    /// @brief 收集可参与局部内存优化的非逃逸 alloca
-    std::unordered_set<AllocaInst *> collectTrackableAllocas() const;
-
     /// @brief 清扫已标记为 dead 的 load/store
     bool sweepDeadInstructions() const;
 
