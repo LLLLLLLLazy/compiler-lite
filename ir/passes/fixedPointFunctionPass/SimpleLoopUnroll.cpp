@@ -16,14 +16,17 @@
 #include "CallInst.h"
 #include "CondBranchInst.h"
 #include "ConstInteger.h"
+#include "DominatorTree.h"
 #include "FCmpInst.h"
 #include "FPToSIInst.h"
 #include "Function.h"
 #include "GetElementPtrInst.h"
 #include "ICmpInst.h"
 #include "LoadInst.h"
+#include "LoopInfo.h"
 #include "Module.h"
 #include "PhiInst.h"
+#include "ScalarEvolution.h"
 #include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "Value.h"
@@ -33,27 +36,6 @@ namespace {
 
 constexpr int32_t kMaxUnrollTripCount = 16;
 constexpr int32_t kMaxBodyInsts = 32;
-
-ConstInteger * asConstInt(Value * value)
-{
-    return dynamic_cast<ConstInteger *>(value);
-}
-
-bool isAddOne(Instruction * inst, Value * induction)
-{
-    auto * binary = dynamic_cast<BinaryInst *>(inst);
-    if (!binary || binary->getOp() != IRInstOperator::IRINST_OP_ADD_I) {
-        return false;
-    }
-
-    auto * rhsConst = asConstInt(binary->getRHS());
-    if (binary->getLHS() == induction && rhsConst && rhsConst->getVal() == 1) {
-        return true;
-    }
-
-    auto * lhsConst = asConstInt(binary->getLHS());
-    return binary->getRHS() == induction && lhsConst && lhsConst->getVal() == 1;
-}
 
 bool hasSingleBranchTo(BasicBlock * bb, BasicBlock * target)
 {
@@ -92,9 +74,12 @@ bool SimpleLoopUnroll::run()
     bool changed = false;
     while (true) {
         bool localChanged = false;
+        DominatorTree domTree(func);
+        LoopInfo loopInfo(func, &domTree);
+        ScalarEvolution scev(func, &domTree, &loopInfo);
         std::vector<BasicBlock *> blocks = func->getBlocks();
         for (auto * bb : blocks) {
-            if (tryUnrollHeader(bb)) {
+            if (tryUnrollHeader(bb, scev)) {
                 localChanged = true;
                 changed = true;
                 break;
@@ -108,31 +93,21 @@ bool SimpleLoopUnroll::run()
     return changed;
 }
 
-bool SimpleLoopUnroll::tryUnrollHeader(BasicBlock * header)
+bool SimpleLoopUnroll::tryUnrollHeader(BasicBlock * header, ScalarEvolution & scev)
 {
     if (!header) {
         return false;
     }
 
-    auto * condBr = dynamic_cast<CondBranchInst *>(header->getTerminator());
-    if (!condBr) {
+    ScalarEvolution::CanonicalLoop loop;
+    if (!scev.matchCanonicalLoop(header, loop) || !loop.hasConstInitialValue || !loop.recurrence ||
+        loop.recurrence->getStep() != 1) {
         return false;
     }
 
-    auto * cmp = dynamic_cast<ICmpInst *>(condBr->getCondition());
-    if (!cmp || cmp->getParentBlock() != header || cmp->getOp() != IRInstOperator::IRINST_OP_LT_I) {
-        return false;
-    }
-
-    auto * induction = dynamic_cast<PhiInst *>(cmp->getLHS());
-    auto * bound = asConstInt(cmp->getRHS());
-    if (!induction || induction->getParentBlock() != header || !bound) {
-        return false;
-    }
-
-    BasicBlock * body = condBr->getTrueDest();
-    BasicBlock * exit = condBr->getFalseDest();
-    if (!body || !exit || body == header || exit == header || !hasSingleBranchTo(body, header)) {
+    BasicBlock * body = loop.body;
+    BasicBlock * exit = loop.exit;
+    if (!body || !exit || body == header || exit == header || loop.latch != body || !hasSingleBranchTo(body, header)) {
         return false;
     }
 
@@ -153,30 +128,15 @@ bool SimpleLoopUnroll::tryUnrollHeader(BasicBlock * header)
         return false;
     }
 
-    BasicBlock * preheader = nullptr;
     BasicBlock * latch = body;
-    Value * inductionInit = nullptr;
-    Instruction * inductionNext = nullptr;
-    for (int32_t i = 0; i < induction->getIncomingCount(); ++i) {
-        BasicBlock * incomingBlock = induction->getIncomingBlock(i);
-        Value * incomingValue = induction->getIncomingValue(i);
-        if (incomingBlock == latch) {
-            inductionNext = dynamic_cast<Instruction *>(incomingValue);
-        } else {
-            preheader = incomingBlock;
-            inductionInit = incomingValue;
-        }
-    }
-
-    auto * initConst = asConstInt(inductionInit);
-    if (!preheader || !initConst || !inductionNext || inductionNext->getParentBlock() != body ||
-        !isAddOne(inductionNext, induction)) {
+    BasicBlock * preheader = loop.preheader;
+    PhiInst * induction = loop.induction;
+    if (!preheader || !induction) {
         return false;
     }
 
-    const int32_t start = initConst->getVal();
-    const int32_t end = bound->getVal();
-    const int32_t tripCount = end - start;
+    const int32_t start = loop.initialIntValue;
+    const int32_t tripCount = loop.tripCount;
     if (tripCount <= 0 || tripCount > kMaxUnrollTripCount) {
         return false;
     }

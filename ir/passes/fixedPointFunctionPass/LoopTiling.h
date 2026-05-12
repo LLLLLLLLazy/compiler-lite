@@ -21,7 +21,7 @@ public:
     bool run();
 
 private:
-    bool tryTileHeader(BasicBlock * header, class LoopInfo & loopInfo);
+    bool tryTileHeader(BasicBlock * header, class LoopInfo & loopInfo, class ScalarEvolution & scev);
 
     Function * func = nullptr;
     Module * mod = nullptr;
