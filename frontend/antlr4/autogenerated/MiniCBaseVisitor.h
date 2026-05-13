@@ -63,6 +63,14 @@ public:
     return visitChildren(ctx);
   }
 
+  virtual std::any visitConstDeclNoSemi(MiniCParser::ConstDeclNoSemiContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
+  virtual std::any visitVarDeclNoSemi(MiniCParser::VarDeclNoSemiContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
   virtual std::any visitConstDef(MiniCParser::ConstDefContext *ctx) override {
     return visitChildren(ctx);
   }
@@ -99,6 +107,10 @@ public:
     return visitChildren(ctx);
   }
 
+  virtual std::any visitForStatement(MiniCParser::ForStatementContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
   virtual std::any visitBreakStatement(MiniCParser::BreakStatementContext *ctx) override {
     return visitChildren(ctx);
   }
@@ -112,6 +124,14 @@ public:
   }
 
   virtual std::any visitExpressionStatement(MiniCParser::ExpressionStatementContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
+  virtual std::any visitForInit(MiniCParser::ForInitContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
+  virtual std::any visitForStep(MiniCParser::ForStepContext *ctx) override {
     return visitChildren(ctx);
   }
 

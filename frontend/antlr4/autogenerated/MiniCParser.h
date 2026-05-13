@@ -16,22 +16,24 @@ public:
     T_L_BRACE = 6, T_R_BRACE = 7, T_COMMA = 8, T_ASSIGN = 9, T_EQ = 10, 
     T_NE = 11, T_LE = 12, T_GE = 13, T_LT = 14, T_GT = 15, T_ADD = 16, T_SUB = 17, 
     T_MUL = 18, T_DIV = 19, T_MOD = 20, T_NOT = 21, T_LAND = 22, T_LOR = 23, 
-    T_IF = 24, T_ELSE = 25, T_WHILE = 26, T_BREAK = 27, T_CONTINUE = 28, 
-    T_RETURN = 29, T_CONST = 30, T_INT = 31, T_FLOAT = 32, T_VOID = 33, 
-    T_ID = 34, T_STRING_LITERAL = 35, T_FLOAT_LITERAL = 36, T_DIGIT = 37, 
-    LINE_COMMENT = 38, BLOCK_COMMENT = 39, WS = 40
+    T_INC = 24, T_DEC = 25, T_IF = 26, T_ELSE = 27, T_WHILE = 28, T_FOR = 29, 
+    T_BREAK = 30, T_CONTINUE = 31, T_RETURN = 32, T_CONST = 33, T_STATIC = 34, 
+    T_INT = 35, T_FLOAT = 36, T_VOID = 37, T_ID = 38, T_STRING_LITERAL = 39, 
+    T_FLOAT_LITERAL = 40, T_DIGIT = 41, LINE_COMMENT = 42, BLOCK_COMMENT = 43, 
+    WS = 44
   };
 
   enum {
     RuleCompileUnit = 0, RuleDecl = 1, RuleFuncDef = 2, RuleFuncType = 3, 
     RuleFormalParamList = 4, RuleFormalParam = 5, RuleFormalParamDims = 6, 
     RuleBlock = 7, RuleBlockItemList = 8, RuleBlockItem = 9, RuleConstDecl = 10, 
-    RuleVarDecl = 11, RuleConstDef = 12, RuleBasicType = 13, RuleVarDef = 14, 
-    RuleArrayDefDims = 15, RuleInitVal = 16, RuleStatement = 17, RuleExpr = 18, 
-    RuleCond = 19, RuleLOrExp = 20, RuleLAndExp = 21, RuleEqExp = 22, RuleEqOp = 23, 
-    RuleRelExp = 24, RuleRelOp = 25, RuleAddExp = 26, RuleAddOp = 27, RuleMulExp = 28, 
-    RuleMulOp = 29, RuleUnaryExp = 30, RuleUnaryOp = 31, RulePrimaryExp = 32, 
-    RuleRealParam = 33, RuleRealParamList = 34, RuleLVal = 35
+    RuleVarDecl = 11, RuleConstDeclNoSemi = 12, RuleVarDeclNoSemi = 13, 
+    RuleConstDef = 14, RuleBasicType = 15, RuleVarDef = 16, RuleArrayDefDims = 17, 
+    RuleInitVal = 18, RuleStatement = 19, RuleForInit = 20, RuleForStep = 21, 
+    RuleExpr = 22, RuleCond = 23, RuleLOrExp = 24, RuleLAndExp = 25, RuleEqExp = 26, 
+    RuleEqOp = 27, RuleRelExp = 28, RuleRelOp = 29, RuleAddExp = 30, RuleAddOp = 31, 
+    RuleMulExp = 32, RuleMulOp = 33, RuleUnaryExp = 34, RuleUnaryOp = 35, 
+    RulePrimaryExp = 36, RuleRealParam = 37, RuleRealParamList = 38, RuleLVal = 39
   };
 
   explicit MiniCParser(antlr4::TokenStream *input);
@@ -63,12 +65,16 @@ public:
   class BlockItemContext;
   class ConstDeclContext;
   class VarDeclContext;
+  class ConstDeclNoSemiContext;
+  class VarDeclNoSemiContext;
   class ConstDefContext;
   class BasicTypeContext;
   class VarDefContext;
   class ArrayDefDimsContext;
   class InitValContext;
   class StatementContext;
+  class ForInitContext;
+  class ForStepContext;
   class ExprContext;
   class CondContext;
   class LOrExpContext;
@@ -248,13 +254,8 @@ public:
   public:
     ConstDeclContext(antlr4::ParserRuleContext *parent, size_t invokingState);
     virtual size_t getRuleIndex() const override;
-    antlr4::tree::TerminalNode *T_CONST();
-    BasicTypeContext *basicType();
-    std::vector<ConstDefContext *> constDef();
-    ConstDefContext* constDef(size_t i);
+    ConstDeclNoSemiContext *constDeclNoSemi();
     antlr4::tree::TerminalNode *T_SEMICOLON();
-    std::vector<antlr4::tree::TerminalNode *> T_COMMA();
-    antlr4::tree::TerminalNode* T_COMMA(size_t i);
 
 
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
@@ -267,10 +268,25 @@ public:
   public:
     VarDeclContext(antlr4::ParserRuleContext *parent, size_t invokingState);
     virtual size_t getRuleIndex() const override;
-    BasicTypeContext *basicType();
-    std::vector<VarDefContext *> varDef();
-    VarDefContext* varDef(size_t i);
+    VarDeclNoSemiContext *varDeclNoSemi();
     antlr4::tree::TerminalNode *T_SEMICOLON();
+
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+   
+  };
+
+  VarDeclContext* varDecl();
+
+  class  ConstDeclNoSemiContext : public antlr4::ParserRuleContext {
+  public:
+    ConstDeclNoSemiContext(antlr4::ParserRuleContext *parent, size_t invokingState);
+    virtual size_t getRuleIndex() const override;
+    antlr4::tree::TerminalNode *T_CONST();
+    BasicTypeContext *basicType();
+    std::vector<ConstDefContext *> constDef();
+    ConstDefContext* constDef(size_t i);
+    antlr4::tree::TerminalNode *T_STATIC();
     std::vector<antlr4::tree::TerminalNode *> T_COMMA();
     antlr4::tree::TerminalNode* T_COMMA(size_t i);
 
@@ -279,7 +295,25 @@ public:
    
   };
 
-  VarDeclContext* varDecl();
+  ConstDeclNoSemiContext* constDeclNoSemi();
+
+  class  VarDeclNoSemiContext : public antlr4::ParserRuleContext {
+  public:
+    VarDeclNoSemiContext(antlr4::ParserRuleContext *parent, size_t invokingState);
+    virtual size_t getRuleIndex() const override;
+    BasicTypeContext *basicType();
+    std::vector<VarDefContext *> varDef();
+    VarDefContext* varDef(size_t i);
+    antlr4::tree::TerminalNode *T_STATIC();
+    std::vector<antlr4::tree::TerminalNode *> T_COMMA();
+    antlr4::tree::TerminalNode* T_COMMA(size_t i);
+
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+   
+  };
+
+  VarDeclNoSemiContext* varDeclNoSemi();
 
   class  ConstDefContext : public antlr4::ParserRuleContext {
   public:
@@ -411,6 +445,23 @@ public:
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
+  class  ForStatementContext : public StatementContext {
+  public:
+    ForStatementContext(StatementContext *ctx);
+
+    antlr4::tree::TerminalNode *T_FOR();
+    antlr4::tree::TerminalNode *T_L_PAREN();
+    std::vector<antlr4::tree::TerminalNode *> T_SEMICOLON();
+    antlr4::tree::TerminalNode* T_SEMICOLON(size_t i);
+    antlr4::tree::TerminalNode *T_R_PAREN();
+    StatementContext *statement();
+    ForInitContext *forInit();
+    CondContext *cond();
+    ForStepContext *forStep();
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+  };
+
   class  BreakStatementContext : public StatementContext {
   public:
     BreakStatementContext(StatementContext *ctx);
@@ -468,6 +519,38 @@ public:
   };
 
   StatementContext* statement();
+
+  class  ForInitContext : public antlr4::ParserRuleContext {
+  public:
+    ForInitContext(antlr4::ParserRuleContext *parent, size_t invokingState);
+    virtual size_t getRuleIndex() const override;
+    ConstDeclNoSemiContext *constDeclNoSemi();
+    VarDeclNoSemiContext *varDeclNoSemi();
+    LValContext *lVal();
+    antlr4::tree::TerminalNode *T_ASSIGN();
+    ExprContext *expr();
+
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+   
+  };
+
+  ForInitContext* forInit();
+
+  class  ForStepContext : public antlr4::ParserRuleContext {
+  public:
+    ForStepContext(antlr4::ParserRuleContext *parent, size_t invokingState);
+    virtual size_t getRuleIndex() const override;
+    LValContext *lVal();
+    antlr4::tree::TerminalNode *T_ASSIGN();
+    ExprContext *expr();
+
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+   
+  };
+
+  ForStepContext* forStep();
 
   class  ExprContext : public antlr4::ParserRuleContext {
   public:
@@ -661,6 +744,9 @@ public:
     RealParamListContext *realParamList();
     UnaryOpContext *unaryOp();
     UnaryExpContext *unaryExp();
+    LValContext *lVal();
+    antlr4::tree::TerminalNode *T_INC();
+    antlr4::tree::TerminalNode *T_DEC();
 
 
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;

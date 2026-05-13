@@ -83,6 +83,9 @@ protected:
 	/// @brief 常量声明的遍历
 	std::any visitConstDecl(MiniCParser::ConstDeclContext * ctx) override;
 
+	/// @brief 不带分号的常量声明遍历
+	std::any visitConstDeclNoSemi(MiniCParser::ConstDeclNoSemiContext * ctx) override;
+
 	/// @brief 常量定义的遍历
 	std::any visitConstDef(MiniCParser::ConstDefContext * ctx) override;
 
@@ -101,6 +104,15 @@ protected:
 
 	/// @brief while 语句的遍历
 	std::any visitWhileStatement(MiniCParser::WhileStatementContext * ctx) override;
+
+	/// @brief for 语句的遍历
+	std::any visitForStatement(MiniCParser::ForStatementContext * ctx) override;
+
+	/// @brief for 初始化子句的遍历
+	std::any visitForInit(MiniCParser::ForInitContext * ctx) override;
+
+	/// @brief for 步进子句的遍历
+	std::any visitForStep(MiniCParser::ForStepContext * ctx) override;
 
 	/// @brief 条件表达式的遍历
 	std::any visitCond(MiniCParser::CondContext * ctx) override;
@@ -219,6 +231,9 @@ protected:
 	/// @return std::any AST的节点
 	///
 	std::any visitVarDecl(MiniCParser::VarDeclContext * ctx) override;
+
+	/// @brief 不带分号的变量声明遍历
+	std::any visitVarDeclNoSemi(MiniCParser::VarDeclNoSemiContext * ctx) override;
 
 	///
 	/// @brief 非终结符VarDecl的分析

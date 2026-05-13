@@ -43,6 +43,10 @@ public:
 
     virtual std::any visitVarDecl(MiniCParser::VarDeclContext *context) = 0;
 
+    virtual std::any visitConstDeclNoSemi(MiniCParser::ConstDeclNoSemiContext *context) = 0;
+
+    virtual std::any visitVarDeclNoSemi(MiniCParser::VarDeclNoSemiContext *context) = 0;
+
     virtual std::any visitConstDef(MiniCParser::ConstDefContext *context) = 0;
 
     virtual std::any visitBasicType(MiniCParser::BasicTypeContext *context) = 0;
@@ -61,6 +65,8 @@ public:
 
     virtual std::any visitWhileStatement(MiniCParser::WhileStatementContext *context) = 0;
 
+    virtual std::any visitForStatement(MiniCParser::ForStatementContext *context) = 0;
+
     virtual std::any visitBreakStatement(MiniCParser::BreakStatementContext *context) = 0;
 
     virtual std::any visitContinueStatement(MiniCParser::ContinueStatementContext *context) = 0;
@@ -68,6 +74,10 @@ public:
     virtual std::any visitBlockStatement(MiniCParser::BlockStatementContext *context) = 0;
 
     virtual std::any visitExpressionStatement(MiniCParser::ExpressionStatementContext *context) = 0;
+
+    virtual std::any visitForInit(MiniCParser::ForInitContext *context) = 0;
+
+    virtual std::any visitForStep(MiniCParser::ForStepContext *context) = 0;
 
     virtual std::any visitExpr(MiniCParser::ExprContext *context) = 0;
 

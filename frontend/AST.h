@@ -81,6 +81,9 @@ enum class ast_operator_type : int {
 	/// @brief while 语句运算符
 	AST_OP_WHILE,
 
+	/// @brief for 语句运算符
+	AST_OP_FOR,
+
 	/// @brief break 语句运算符
 	AST_OP_BREAK,
 
@@ -149,6 +152,18 @@ enum class ast_operator_type : int {
 
 	/// @brief 单目运算符! (逻辑非)
 	AST_OP_NOT,
+
+	/// @brief 前置自增运算符++
+	AST_OP_PRE_INC,
+
+	/// @brief 前置自减运算符--
+	AST_OP_PRE_DEC,
+
+	/// @brief 后置自增运算符++
+	AST_OP_POST_INC,
+
+	/// @brief 后置自减运算符--
+	AST_OP_POST_DEC,
 
 	/// @brief 最大标识符，表示非法运算符
 	AST_OP_MAX,
@@ -371,6 +386,9 @@ public:
 
 	/// @brief 当前声明是否为 const 声明
 	bool isConst = false;
+
+	/// @brief 当前声明是否为 static 声明
+	bool isStatic = false;
 
 	/// @brief 数组形参是否省略了第一维
 	bool firstDimOmitted = false;

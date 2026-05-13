@@ -304,6 +304,8 @@ bool IRGenerator::visitStatement(ast_node * node)
             return visitIf(node);
         case ast_operator_type::AST_OP_WHILE:
             return visitWhile(node);
+        case ast_operator_type::AST_OP_FOR:
+            return visitFor(node);
         case ast_operator_type::AST_OP_BREAK:
             return visitBreak(node);
         case ast_operator_type::AST_OP_CONTINUE:
@@ -340,6 +342,7 @@ bool IRGenerator::visitFuncDef(ast_node * node)
 
     // 重置当前函数的块级 IR 生成状态
     varAllocaMap.clear();
+    staticLocalMap.clear();
     breakTargets.clear();
     continueTargets.clear();
 
@@ -584,6 +587,94 @@ bool IRGenerator::visitWhile(ast_node * node)
     return true;
 }
 
+/// @brief 生成 for 循环对应的 IR
+/// @param node for 语句节点，孩子依次为 init、cond、step、body，前三者可省略
+/// @return true 表示生成成功，false 表示生成失败
+bool IRGenerator::visitFor(ast_node * node)
+{
+    Function * func = currentFunction();
+
+    module->enterScope();
+    constBindings.emplace_back();
+    floatConstBindings.emplace_back();
+
+    auto leaveForScope = [&]() {
+        constBindings.pop_back();
+        floatConstBindings.pop_back();
+        module->leaveScope();
+    };
+
+    ast_node * initNode = node->sons.size() > 0 ? node->sons[0] : nullptr;
+    ast_node * condNode = node->sons.size() > 1 ? node->sons[1] : nullptr;
+    ast_node * stepNode = node->sons.size() > 2 ? node->sons[2] : nullptr;
+    ast_node * bodyNode = node->sons.size() > 3 ? node->sons[3] : nullptr;
+
+    if (initNode && !visitStatement(initNode)) {
+        leaveForScope();
+        return false;
+    }
+
+    BasicBlock * condBB = newBlock();
+    BasicBlock * bodyBB = newBlock();
+    BasicBlock * stepBB = newBlock();
+    BasicBlock * exitBB = newBlock();
+
+    BasicBlock * fromBB = currentBlock;
+    emitToBlock(new BranchInst(func, condBB));
+    fromBB->linkSuccessor(condBB);
+
+    switchToBlock(condBB);
+    if (condNode) {
+        Value * condValue = visitExpr(condNode);
+        if (!condValue) {
+            leaveForScope();
+            return false;
+        }
+        Value * condBool = emitBoolize(condValue);
+        emitToBlock(new CondBranchInst(func, condBool, bodyBB, exitBB));
+        condBB->linkSuccessor(exitBB);
+    } else {
+        emitToBlock(new BranchInst(func, bodyBB));
+    }
+    condBB->linkSuccessor(bodyBB);
+
+    breakTargets.push_back(exitBB);
+    continueTargets.push_back(stepBB);
+
+    switchToBlock(bodyBB);
+    if (!visitStatement(bodyNode)) {
+        breakTargets.pop_back();
+        continueTargets.pop_back();
+        leaveForScope();
+        return false;
+    }
+    if (!isTerminated()) {
+        BasicBlock * bodyEnd = currentBlock;
+        emitToBlock(new BranchInst(func, stepBB));
+        bodyEnd->linkSuccessor(stepBB);
+    }
+
+    switchToBlock(stepBB);
+    if (stepNode && !visitStatement(stepNode)) {
+        breakTargets.pop_back();
+        continueTargets.pop_back();
+        leaveForScope();
+        return false;
+    }
+    if (!isTerminated()) {
+        BasicBlock * stepEnd = currentBlock;
+        emitToBlock(new BranchInst(func, condBB));
+        stepEnd->linkSuccessor(condBB);
+    }
+
+    breakTargets.pop_back();
+    continueTargets.pop_back();
+    leaveForScope();
+
+    switchToBlock(exitBB);
+    return true;
+}
+
 /// @brief 生成 break 语句对应的 IR
 /// @param node break 语句节点
 /// @return true 表示生成成功，false 表示生成失败
@@ -679,6 +770,10 @@ bool IRGenerator::visitVarDecl(ast_node * node)
     ast_node * initNode = getDeclInitNode(node);
 
     if (module->getCurrentFunction()) {
+        if (node->isStatic) {
+            return visitStaticLocalVarDecl(node);
+        }
+
         Value * varValue = module->newVarValue(declType, varName);
         if (!varValue) {
             return false;
@@ -786,6 +881,90 @@ bool IRGenerator::visitVarDecl(ast_node * node)
     return true;
 }
 
+bool IRGenerator::visitStaticLocalVarDecl(ast_node * node)
+{
+    Type * declType = buildDeclaredType(node, false);
+    if (!declType) {
+        return false;
+    }
+
+    std::string varName = node->sons[1]->name;
+    ast_node * initNode = getDeclInitNode(node);
+
+    Value * localAlias = module->newVarValue(declType, varName);
+    if (!localAlias) {
+        return false;
+    }
+
+    if (node->isConst && !initNode) {
+        minic_log(LOG_ERROR, "static const 变量(%s)必须初始化", varName.c_str());
+        return false;
+    }
+
+    if (initNode && !isConstInitializer(declType, initNode)) {
+        minic_log(LOG_ERROR, "static 变量(%s)只支持常量初始化", varName.c_str());
+        return false;
+    }
+
+    GlobalVariable * globalVar = nullptr;
+    while (globalVar == nullptr) {
+        std::string globalName = "__static_" + currentFunction()->getName() + "_" + varName + "_" +
+                                 std::to_string(nextStaticLocalId++);
+        globalVar = module->newSyntheticGlobalVariable(declType, globalName);
+    }
+    staticLocalMap[localAlias] = globalVar;
+
+    if (declType->isArrayType()) {
+        if (initNode && initNode->node_type == ast_operator_type::AST_OP_INIT_LIST && !initNode->sons.empty()) {
+            std::vector<int32_t> intVals;
+            std::vector<float> floatVals;
+            if (!collectGlobalArrayInitScalars(declType, initNode->sons, 0, initNode->sons.size(),
+                                               intVals, floatVals)) {
+                minic_log(LOG_ERROR, "static 数组(%s)初始化表达式不是编译期常量", varName.c_str());
+                return false;
+            }
+            if (!floatVals.empty()) {
+                globalVar->setInitFloatArray(floatVals);
+            } else {
+                globalVar->setInitIntArray(intVals);
+            }
+        }
+        return true;
+    }
+
+    if (initNode) {
+        if (declType->isFloatType()) {
+            double initValue = 0.0;
+            if (!evaluateConstNumberExpr(initNode, initValue)) {
+                minic_log(LOG_ERROR, "static 变量(%s)只支持常量初始化", varName.c_str());
+                return false;
+            }
+            globalVar->setInitFloatValue(static_cast<float>(initValue));
+        } else {
+            int32_t initValue = 0;
+            if (!evaluateConstIntInitializerExpr(initNode, initValue)) {
+                minic_log(LOG_ERROR, "static 变量(%s)只支持常量初始化", varName.c_str());
+                return false;
+            }
+            globalVar->setInitIntValue(initValue);
+        }
+    }
+
+    if (node->isConst && declType->isInt32Type()) {
+        int32_t constValue = 0;
+        if (evaluateConstIntInitializerExpr(initNode, constValue)) {
+            constBindings.back()[varName] = constValue;
+        }
+    } else if (node->isConst && declType->isFloatType()) {
+        double constValue = 0.0;
+        if (evaluateConstNumberExpr(initNode, constValue)) {
+            floatConstBindings.back()[varName] = constValue;
+        }
+    }
+
+    return true;
+}
+
 /// @brief 校验初始化器中的表达式是否满足编译期常量约束
 /// @param type 被初始化对象的类型
 /// @param initNode 初始化器节点
@@ -856,6 +1035,11 @@ Value * IRGenerator::getAddressOfVariable(Value * var)
 {
     if (auto * globalVar = dynamic_cast<GlobalVariable *>(var)) {
         return globalVar;
+    }
+
+    auto staticIt = staticLocalMap.find(var);
+    if (staticIt != staticLocalMap.end()) {
+        return staticIt->second;
     }
 
     return getOrCreateVarSlot(var);
@@ -1586,6 +1770,14 @@ Value * IRGenerator::visitExpr(ast_node * node)
             return emitNeg(node);
         case ast_operator_type::AST_OP_NOT:
             return emitNot(node);
+        case ast_operator_type::AST_OP_PRE_INC:
+            return emitIncDec(node, true, true);
+        case ast_operator_type::AST_OP_PRE_DEC:
+            return emitIncDec(node, false, true);
+        case ast_operator_type::AST_OP_POST_INC:
+            return emitIncDec(node, true, false);
+        case ast_operator_type::AST_OP_POST_DEC:
+            return emitIncDec(node, false, false);
 
         case ast_operator_type::AST_OP_LAND: {
             Function * func = currentFunction();
@@ -1997,6 +2189,51 @@ Value * IRGenerator::emitNot(ast_node * node)
     }
 
     return emitIntNot(operand);
+}
+
+Value * IRGenerator::emitIncDec(ast_node * node, bool increment, bool prefix)
+{
+    if (!node || node->sons.empty()) {
+        return nullptr;
+    }
+
+    Value * addr = visitLValueAddress(node->sons[0]);
+    if (!addr) {
+        return nullptr;
+    }
+
+    Type * valueType = getAddressPointeeType(addr);
+    if (valueType == nullptr || valueType->isArrayType()) {
+        minic_log(LOG_ERROR, "自增/自减操作数必须是标量左值");
+        return nullptr;
+    }
+
+    auto * oldValue = new LoadInst(currentFunction(), addr, valueType);
+    emitToBlock(oldValue);
+
+    Value * newValue = nullptr;
+    if (valueType->isFloatType()) {
+        auto op = increment ? IRInstOperator::IRINST_OP_ADD_F : IRInstOperator::IRINST_OP_SUB_F;
+        newValue = new BinaryInst(currentFunction(), op, oldValue, module->newConstFloat(1.0f), valueType);
+    } else {
+        Value * oldI32 = normalizeIntegerOperand(oldValue);
+        if (!oldI32) {
+            return nullptr;
+        }
+        auto op = increment ? IRInstOperator::IRINST_OP_ADD_I : IRInstOperator::IRINST_OP_SUB_I;
+        newValue = new BinaryInst(currentFunction(), op, oldI32, module->newConstInt32(1), IntegerType::getTypeInt32());
+        if (valueType != IntegerType::getTypeInt32()) {
+            newValue = convertValueToType(newValue, valueType);
+            if (!newValue) {
+                return nullptr;
+            }
+        }
+    }
+
+    emitToBlock(dynamic_cast<Instruction *>(newValue));
+    emitToBlock(new StoreInst(currentFunction(), newValue, addr));
+
+    return prefix ? newValue : oldValue;
 }
 
 Value * IRGenerator::emitIntNot(Value * operand)
