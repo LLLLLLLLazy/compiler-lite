@@ -1225,21 +1225,39 @@ bool LoopParallelize::run()
 /// @return 若成功并行化则返回true
 bool LoopParallelize::tryParallelizeHeader(BasicBlock * header, LoopInfo & loopInfo)
 {
+    // 清除并行安全元数据的辅助lambda，在并行化成功或失败时均需调用
+    auto clearHeaderMetadata = [header]() {
+        if (header && header->hasLoopParallelSafeMetadata()) {
+            header->clearLoopParallelMetadata();
+        }
+    };
+    // 检查当前循环头是否由分块pass标记为并行安全
+    const bool tilingParallelSafe = header && header->isLoopParallelSafeFromTiling();
+
     if (tryParallelizeReductionHeader(header, loopInfo)) {
+        clearHeaderMetadata();
         return true;
     }
 
     if (loopInfo.getLoopDepth(header) != 1) {
+        clearHeaderMetadata();
         return false;
     }
 
     CanonicalLoop loop;
     if (!matchCanonicalLoop(header, loop) || !headerPhisAreAdjustable(loop)) {
+        clearHeaderMetadata();
         return false;
     }
 
     const auto * body = loopInfo.getLoopBody(loop.header);
-    if (!body || !hasSingleLoopExitEdge(*body, loop.exit, loop.header) || !isDependenceSafe(loop, *body)) {
+    if (!body || !hasSingleLoopExitEdge(*body, loop.exit, loop.header)) {
+        clearHeaderMetadata();
+        return false;
+    }
+
+    // 若分块pass已保证并行安全则跳过依赖分析；否则需检查依赖安全性
+    if (!tilingParallelSafe && !isDependenceSafe(loop, *body)) {
         return false;
     }
 
@@ -1248,6 +1266,7 @@ bool LoopParallelize::tryParallelizeHeader(BasicBlock * header, LoopInfo & loopI
     Function * mtThreadCount4 = getOrCreateMtThreadCount4(mod);
     Function * mtEnd4 = getOrCreateMtEnd4(mod);
     if (!mtStart4 || !mtThreadCount4 || !mtEnd4) {
+        clearHeaderMetadata();
         return false;
     }
 
@@ -1279,6 +1298,7 @@ bool LoopParallelize::tryParallelizeHeader(BasicBlock * header, LoopInfo & loopI
     Value * chunkEnd = createAlignedChunkBoundary(func, mod, loop.preheader, rawEnd, loop);
 
     if (!retargetHeaderPhiInitialValues(func, loop, chunkStart, loop.preheader)) {
+        clearHeaderMetadata();
         return false;
     }
     loop.cmp->setOperand(1, chunkEnd);
@@ -1297,6 +1317,7 @@ bool LoopParallelize::tryParallelizeHeader(BasicBlock * header, LoopInfo & loopI
     loop.exit->removePredecessor(loop.header);
     mtEndBlock->addPredecessor(loop.header);
     rewritePhiIncomingBlock(loop.exit, loop.header, mtEndBlock);
+    clearHeaderMetadata();
 
     return true;
 }

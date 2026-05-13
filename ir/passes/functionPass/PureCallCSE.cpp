@@ -481,7 +481,7 @@ private:
 /// @brief 跨基本块的纯调用 CSE。
 ///
 /// 仅处理不读取调用者可见内存的纯函数，且要求已有调用支配当前调用点。
-/// 这覆盖 min/max/getNumPos/exp 这类纯计算函数，同时避免跨 store 复用
+/// 这覆盖 min/max/exp 等纯计算函数，同时避免跨 store 复用
 /// 可能读取数组/全局内存的调用结果。
 class DominatingCallCSE {
 public:

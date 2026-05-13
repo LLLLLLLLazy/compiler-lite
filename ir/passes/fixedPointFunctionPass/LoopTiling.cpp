@@ -1254,5 +1254,11 @@ bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo)
     outer.cmp->setOperand(1, rowLimit);
     inner.cmp->setOperand(1, colLimit);
 
+    // 分块后外层行循环可安全并行，标记其并行安全来源为Tiling；
+    // 内外层分块循环本身不应被并行化，清除其元数据
+    rowHeader->markLoopParallelSafeFromTiling();
+    outer.header->clearLoopParallelMetadata();
+    inner.header->clearLoopParallelMetadata();
+
     return true;
 }

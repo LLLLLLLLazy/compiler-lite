@@ -125,11 +125,6 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return pass.run();
     });
 
-    registerFunctionPass([this](Function * func) {
-        LoopParallelize pass(func, module);
-        return pass.run();
-    });
-
     registerLateModulePass([](Module * currentModule) {
         SmallFunctionInline pass(currentModule);
         bool changed = pass.run();
@@ -223,6 +218,12 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         CFGSimplify pass(func);
         return pass.run();
     });
+
+    // 循环并行化pass放在定点迭代之后执行，确保分块等变换已稳定
+    registerPostFixedPointFunctionPass([this](Function * func) {
+        LoopParallelize pass(func, module);
+        return pass.run();
+    });
 }
 
 /// @brief 注册后端前置的 phi 降级流水线
@@ -257,16 +258,18 @@ void PassManager::run()
         runner(module);
     }
 
-    if (fixedPointFunctionPasses.empty()) {
-        return;
+    // 执行定点迭代pass组：反复运行直到IR不再变化或达到最大迭代轮数
+    if (!fixedPointFunctionPasses.empty()) {
+        bool changed = false;
+        int32_t round = 0;
+        do {
+            changed = runFunctionPassGroup(fixedPointFunctionPasses);
+            ++round;
+        } while (changed && round < maxFixedPointRounds);
     }
 
-    bool changed = false;
-    int32_t round = 0;
-    do {
-        changed = runFunctionPassGroup(fixedPointFunctionPasses);
-        ++round;
-    } while (changed && round < maxFixedPointRounds);
+    // 定点迭代收敛后，单次执行后置pass组（如循环并行化）
+    runFunctionPassGroup(postFixedPointFunctionPasses);
 }
 
 /// @brief 清空当前已注册的所有 pass
@@ -276,6 +279,7 @@ void PassManager::clear()
     lateModulePasses.clear();
     functionPasses.clear();
     fixedPointFunctionPasses.clear();
+    postFixedPointFunctionPasses.clear();
     maxFixedPointRounds = 0;
 }
 
@@ -305,6 +309,13 @@ void PassManager::registerFunctionPass(FunctionPassRunner runner)
 void PassManager::registerFixedPointFunctionPass(FunctionPassRunner runner)
 {
     fixedPointFunctionPasses.push_back(std::move(runner));
+}
+
+/// @brief 注册定点迭代结束后单次执行的函数级 pass
+/// @param runner pass 执行器
+void PassManager::registerPostFixedPointFunctionPass(FunctionPassRunner runner)
+{
+    postFixedPointFunctionPasses.push_back(std::move(runner));
 }
 
 /// @brief 执行一组函数级 pass

@@ -51,6 +51,10 @@ private:
     /// @param runner pass 执行器
     void registerFixedPointFunctionPass(FunctionPassRunner runner);
 
+    /// @brief 注册定点迭代结束后单次执行的函数级 pass
+    /// @param runner pass 执行器
+    void registerPostFixedPointFunctionPass(FunctionPassRunner runner);
+
     /// @brief 执行一组函数级 pass
     /// @param runners pass 执行器列表
     /// @return true 表示至少有一个 pass 修改了 IR
@@ -66,5 +70,6 @@ private:
     std::vector<ModulePassRunner> lateModulePasses;
     std::vector<FunctionPassRunner> functionPasses;
     std::vector<FunctionPassRunner> fixedPointFunctionPasses;
+    std::vector<FunctionPassRunner> postFixedPointFunctionPasses;
     int32_t maxFixedPointRounds = 0;
 };
