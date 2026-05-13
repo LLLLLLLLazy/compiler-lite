@@ -167,9 +167,9 @@ private:
 	void translate_fbinary(Instruction * inst, const std::string & op);
 	/// @brief 尝试将乘以2的幂转换为移位
 	bool tryTranslateMulByPowerOfTwo(Instruction * inst);
-	/// @brief 尝试将除以2/16转换为有符号截断语义的移位序列
+	/// @brief 尝试将除以2的幂转换为有符号截断语义的移位序列
 	bool tryTranslateDivBySmallPowerOfTwo(Instruction * inst);
-	/// @brief 尝试将模2/16转换为基于优化除法的余数序列
+	/// @brief 尝试将模2的幂转换为基于优化除法的余数序列
 	bool tryTranslateModBySmallPowerOfTwo(Instruction * inst);
 	/// @brief 尝试将常量除法转换为signed magic number序列
 	bool tryTranslateDivByConstant(Instruction * inst);
@@ -177,6 +177,8 @@ private:
 	bool tryTranslateModByConstant(Instruction * inst);
 	/// @brief 生成常量除法商到指定寄存器
 	void emitSignedConstDivQuotient(Instruction * inst, Value * dividend, int32_t divisor, int dstReg);
+	/// @brief 尝试将重复除以2的幂再取模的纯函数调用降为短指令序列
+	bool tryTranslateRepeatedPowerOfTwoDivRemCall(class CallInst * call);
 	/// @brief 判断比较指令是否只被条件分支使用
 	bool isCompareOnlyUsedByCondBranch(class ICmpInst * icmp) const;
 	/// @brief 将单用途整数比较直接翻译为条件分支
