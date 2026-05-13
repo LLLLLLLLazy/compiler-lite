@@ -193,6 +193,9 @@ private:
     /// @brief 将数值转换为 float 值
     Value * convertToFloat(Value * value);
 
+    /// @brief 将数组指针按目标指针类型执行必要的首元素退化
+    Value * decayArrayPointerToType(Value * value, Type * targetType);
+
     /// @brief 按目标类型执行必要的数值转换
     Value * convertValueToType(Value * value, Type * targetType);
 
