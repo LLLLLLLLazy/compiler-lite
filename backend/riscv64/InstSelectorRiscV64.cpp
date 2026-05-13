@@ -170,6 +170,261 @@ bool isFloatValue(Value * value)
 	return value != nullptr && value->getType() != nullptr && value->getType()->isFloatType();
 }
 
+/// @brief 判断值是否为指定期望值的常量整数
+/// @param value 待判断的值
+/// @param expected 期望的整数值
+/// @return 若value是常量整数且等于expected则返回true
+bool isConstIntValue(Value * value, int32_t expected)
+{
+	auto * constant = dynamic_cast<ConstInteger *>(value);
+	return constant != nullptr && constant->getVal() == expected;
+}
+
+/// @brief 判断值是否为int32类型
+/// @param value 待判断的值
+/// @return 若value非空且类型为int32则返回true
+bool isInt32Value(Value * value)
+{
+	return value != nullptr && value->getType() != nullptr && value->getType()->isInt32Type();
+}
+
+/// @brief 在基本块中查找满足指定操作码、左操作数和右操作数常量值的二元指令
+/// @param bb 基本块
+/// @param op 二元操作码
+/// @param lhs 左操作数
+/// @param rhs 右操作数的期望常量值
+/// @return 找到的二元指令，未找到则返回nullptr
+BinaryInst * findBinary(BasicBlock * bb, IRInstOperator op, Value * lhs, int32_t rhs)
+{
+	if (!bb || !lhs) {
+		return nullptr;
+	}
+
+	for (auto * inst : bb->getInstructions()) {
+		auto * binary = dynamic_cast<BinaryInst *>(inst);
+		if (binary != nullptr && binary->getOp() == op && binary->getLHS() == lhs &&
+		    isConstIntValue(binary->getRHS(), rhs)) {
+			return binary;
+		}
+	}
+
+	return nullptr;
+}
+
+/// @brief "重复除以2的幂再取模"惯用法的识别结果
+struct RepeatedPowerOfTwoDivRemIdiom {
+	Value * dividendSource = nullptr;	///< 被除数的来源（函数形参或常量）
+	Value * countSource = nullptr;		///< 循环次数的来源（函数形参或常量）
+	int32_t divisor = 0;				///< 除数（正的2的幂）
+	int divisorShift = 0;				///< 除数的以2为底的对数，即移位量
+};
+
+/// @brief 计算正的2的幂除数的移位量
+/// @param divisor 除数
+/// @param shift 输出移位量（log2(divisor)）
+/// @return 若divisor是2~2^30之间的2的幂则返回true
+bool positivePowerOfTwoDivisorShift(int32_t divisor, int & shift)
+{
+	if (divisor < 2 || divisor > (int32_t{1} << 30)) {
+		return false;
+	}
+
+	const uint32_t unsignedDivisor = static_cast<uint32_t>(divisor);
+	if (!isPowerOfTwo(unsignedDivisor)) {
+		return false;
+	}
+
+	shift = log2PowerOfTwo(unsignedDivisor);
+	return shift > 0 && shift <= 30;
+}
+
+/// @brief 获取值在函数形参列表中的下标
+/// @param function 函数
+/// @param value 待查找的值
+/// @return 形参下标，未找到则返回-1
+int formalParamIndex(Function * function, Value * value)
+{
+	if (function == nullptr || value == nullptr) {
+		return -1;
+	}
+
+	auto & params = function->getParams();
+	for (std::size_t i = 0; i < params.size(); ++i) {
+		if (params[i] == value) {
+			return static_cast<int>(i);
+		}
+	}
+
+	return -1;
+}
+
+/// @brief 判断值是否为"可解析的int32来源"（常量整数或函数形参）
+/// @param function 当前函数
+/// @param value 待判断的值
+/// @return 若value是int32类型的常量或形参则返回true
+bool isResolvableIntSource(Function * function, Value * value)
+{
+	if (!isInt32Value(value)) {
+		return false;
+	}
+
+	return dynamic_cast<ConstInteger *>(value) != nullptr || formalParamIndex(function, value) >= 0;
+}
+
+/// @brief 将被调函数的形参来源映射到调用点的实参
+/// @param callee 被调函数
+/// @param call 调用指令
+/// @param source 被调函数内的值（常量或形参）
+/// @return 映射到调用点的值，无法解析则返回nullptr
+Value * resolveCallSource(Function * callee, CallInst * call, Value * source)
+{
+	if (dynamic_cast<ConstInteger *>(source) != nullptr) {
+		return source;
+	}
+
+	const int paramIndex = formalParamIndex(callee, source);
+	if (paramIndex < 0 || call == nullptr || paramIndex >= call->getArgCount()) {
+		return nullptr;
+	}
+
+	return call->getArg(paramIndex);
+}
+
+/// @brief 识别 phi 降级后的重复除以2的幂再对同一除数取模的纯函数。
+///
+/// 匹配的源级形态等价于：
+///   while (i < count) { value = value / D; i = i + 1; }
+///   return value % D;
+///
+/// D 必须是正的 2 的幂。该识别只依赖函数体结构和算术语义，不依赖函数名、
+/// 实参数量、调用点上下文或输入数据。
+bool matchRepeatedPowerOfTwoDivRemIdiom(Function * function, RepeatedPowerOfTwoDivRemIdiom & idiom)
+{
+	if (function == nullptr || function->isBuiltin() || function->getReturnType() == nullptr ||
+	    !function->getReturnType()->isInt32Type() || function->isVarArg() || function->getBlocks().size() != 4) {
+		return false;
+	}
+
+	BasicBlock * entry = function->getEntryBlock();
+	auto * entryBranch = entry != nullptr ? dynamic_cast<BranchInst *>(entry->getTerminator()) : nullptr;
+	BasicBlock * header = entryBranch != nullptr ? entryBranch->getTarget() : nullptr;
+	if (header == nullptr || header == entry) {
+		return false;
+	}
+
+	auto * condBranch = dynamic_cast<CondBranchInst *>(header->getTerminator());
+	auto * cmp = condBranch != nullptr ? dynamic_cast<ICmpInst *>(condBranch->getCondition()) : nullptr;
+	if (cmp == nullptr || cmp->getOp() != IRInstOperator::IRINST_OP_LT_I ||
+	    !isResolvableIntSource(function, cmp->getRHS())) {
+		return false;
+	}
+
+	Value * indexValue = cmp->getLHS();
+	Value * countSource = cmp->getRHS();
+	BasicBlock * body = condBranch->getTrueDest();
+	BasicBlock * exit = condBranch->getFalseDest();
+	if (body == nullptr || exit == nullptr || body == header || exit == header || body == exit) {
+		return false;
+	}
+
+	auto * bodyBranch = dynamic_cast<BranchInst *>(body->getTerminator());
+	if (bodyBranch == nullptr || bodyBranch->getTarget() != header) {
+		return false;
+	}
+
+	ReturnInst * ret = nullptr;
+	for (auto * inst : exit->getInstructions()) {
+		auto * current = dynamic_cast<ReturnInst *>(inst);
+		if (current != nullptr) {
+			ret = current;
+			break;
+		}
+	}
+
+	auto * mod = ret != nullptr ? dynamic_cast<BinaryInst *>(ret->getReturnValue()) : nullptr;
+	auto * divisorConst = mod != nullptr ? asConstInteger(mod->getRHS()) : nullptr;
+	int divisorShift = 0;
+	if (mod == nullptr || mod->getParentBlock() != exit || mod->getOp() != IRInstOperator::IRINST_OP_MOD_I ||
+	    divisorConst == nullptr || !positivePowerOfTwoDivisorShift(divisorConst->getVal(), divisorShift)) {
+		return false;
+	}
+
+	Value * numValue = mod->getLHS();
+	const int32_t divisor = divisorConst->getVal();
+	auto * div = findBinary(body, IRInstOperator::IRINST_OP_DIV_I, numValue, divisor);
+	auto * inc = findBinary(body, IRInstOperator::IRINST_OP_ADD_I, indexValue, 1);
+	if (div == nullptr || inc == nullptr || !isInt32Value(numValue) || !isInt32Value(indexValue) ||
+	    numValue == indexValue) {
+		return false;
+	}
+
+	Value * dividendSource = nullptr;
+	bool sawDividendInit = false;
+	bool sawIndexInit = false;
+	for (auto * inst : entry->getInstructions()) {
+		if (inst == entryBranch) {
+			continue;
+		}
+		auto * copy = dynamic_cast<CopyInst *>(inst);
+		if (copy != nullptr && copy->getDst() == numValue && !sawDividendInit &&
+		    isResolvableIntSource(function, copy->getSource())) {
+			dividendSource = copy->getSource();
+			sawDividendInit = true;
+			continue;
+		}
+		if (copy != nullptr && copy->getDst() == indexValue && !sawIndexInit &&
+		    isConstIntValue(copy->getSource(), 0)) {
+			sawIndexInit = true;
+			continue;
+		}
+		return false;
+	}
+	if (!sawDividendInit || !sawIndexInit) {
+		return false;
+	}
+
+	for (auto * inst : header->getInstructions()) {
+		if (inst != cmp && inst != condBranch) {
+			return false;
+		}
+	}
+
+	int bodyCopies = 0;
+	for (auto * inst : body->getInstructions()) {
+		if (inst == div || inst == inc || inst == bodyBranch) {
+			continue;
+		}
+		auto * copy = dynamic_cast<CopyInst *>(inst);
+		if (copy != nullptr && copy->getDst() == numValue && copy->getSource() == div) {
+			++bodyCopies;
+			continue;
+		}
+		if (copy != nullptr && copy->getDst() == indexValue && copy->getSource() == inc) {
+			++bodyCopies;
+			continue;
+		}
+		return false;
+	}
+	if (bodyCopies != 2) {
+		return false;
+	}
+
+	for (auto * inst : exit->getInstructions()) {
+		if (inst != mod && inst != ret) {
+			return false;
+		}
+	}
+
+	idiom.dividendSource = dividendSource;
+	idiom.countSource = countSource;
+	idiom.divisor = divisor;
+	idiom.divisorShift = divisorShift;
+	return true;
+}
+
+/// @brief 计算int32的绝对值（无符号结果），安全处理INT_MIN
+/// @param value 输入值
+/// @return |value|的无符号表示
 uint32_t absUnsigned(int32_t value)
 {
 	if (value == std::numeric_limits<int32_t>::min()) {
@@ -178,6 +433,9 @@ uint32_t absUnsigned(int32_t value)
 	return static_cast<uint32_t>(value < 0 ? -static_cast<int64_t>(value) : value);
 }
 
+/// @brief 计算有符号常量除法的magic number（乘数与移位量）
+/// @param divisor 除数（非0、非±1、非INT_MIN）
+/// @return SignedMagic结构，包含乘数和额外移位量
 SignedMagic computeSignedMagic(int32_t divisor)
 {
 	// Algorithm 10-2 from Hacker's Delight. 调用方已排除0、±1和INT_MIN等特例。
@@ -1410,6 +1668,10 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 		return;
 	}
 
+	if (tryTranslateRepeatedPowerOfTwoDivRemCall(call)) {
+		return;
+	}
+
 	// RISC-V ABI：整数参数和浮点参数使用独立的寄存器计数器
 	// 整数类型参数依次占用 a0-a7，浮点参数依次占用 fa0-fa7
 	// 超出对应寄存器的参数通过栈传递（每个栈槽 8 字节对齐）
@@ -1555,6 +1817,132 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 		}
 		storeResult(call, RISCV64_A0_REG_NO, inst);
 	}
+}
+
+bool InstSelectorRiscV64::tryTranslateRepeatedPowerOfTwoDivRemCall(CallInst * call)
+{
+	// 尝试匹配被调函数为"重复除以2的幂再取模"惯用法
+	RepeatedPowerOfTwoDivRemIdiom idiom;
+	if (call == nullptr || call->getCallee() == nullptr || !call->hasResultValue() || call->getType() == nullptr ||
+	    !call->getType()->isInt32Type() || !matchRepeatedPowerOfTwoDivRemIdiom(call->getCallee(), idiom)) {
+		return false;
+	}
+
+	// 将惯用法中的形参来源映射到调用点的实参
+	Value * dividendArg = resolveCallSource(call->getCallee(), call, idiom.dividendSource);
+	Value * countArg = resolveCallSource(call->getCallee(), call, idiom.countSource);
+	if (!isInt32Value(dividendArg) || !isInt32Value(countArg)) {
+		return false;
+	}
+
+	// 获取或分配结果寄存器
+	int dstReg = getResultReg(call);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(call);
+		dstReg = dstLease.reg();
+	}
+
+	// 加载循环次数到寄存器，若与结果寄存器冲突则复制一份
+	OperandReg count = loadOperand(countArg, call);
+	if (count.reg == dstReg) {
+		auto countCopy = tempMgr.borrowExcluding(call, {dstReg});
+		iloc.mov_reg(countCopy.reg(), count.reg);
+		releaseOperand(count);
+		count = OperandReg(std::move(countCopy));
+	}
+
+	// 加载被除数到结果寄存器
+	OperandReg dividend = loadOperand(dividendArg, call, dstReg);
+	if (dividend.reg != dstReg) {
+		iloc.mov_reg(dstReg, dividend.reg);
+	}
+	releaseOperand(dividend);
+
+	// 分配临时寄存器：shift（移位量）、mask（掩码）、sign（符号位）
+	std::set<int> excluded = {dstReg, count.reg};
+	auto shift = tempMgr.borrowExcluding(call, excluded);
+	excluded.insert(shift.reg());
+	auto mask = tempMgr.borrowExcluding(call, excluded);
+	excluded.insert(mask.reg());
+	auto sign = tempMgr.borrowExcluding(call, excluded);
+
+	// 构造各标签和寄存器名称
+	const std::string dstName = PlatformRiscV64::regName[dstReg];
+	const std::string countName = PlatformRiscV64::regName[count.reg];
+	const std::string shiftName = PlatformRiscV64::regName[shift.reg()];
+	const std::string maskName = PlatformRiscV64::regName[mask.reg()];
+	const std::string signName = PlatformRiscV64::regName[sign.reg()];
+	const std::string labelBase = ".L_" + func->getName() + "_pow2_divrem_" +
+	                              std::to_string(iloc.getMachineInstCount());
+	const std::string divLabel = labelBase + "_div";
+	const std::string modLabel = labelBase + "_mod";
+	const std::string modDoneLabel = labelBase + "_mod_done";
+	const std::string zeroLabel = labelBase + "_zero";
+	const std::string doneLabel = labelBase + "_done";
+	// 当count超过此阈值时，连续右移必然归零
+	const int zeroThreshold = 31 / idiom.divisorShift + 1;
+
+	// 若count <= 0，跳过除法直接进入取模
+	iloc.inst("bge", "zero", countName, modLabel);
+	// 若count超过阈值，结果必为0
+	iloc.load_imm(shift.reg(), zeroThreshold);
+	iloc.inst("bge", countName, shiftName, zeroLabel);
+	// 计算实际移位量 = count * divisorShift
+	if (idiom.divisorShift == 1) {
+		iloc.mov_reg(shift.reg(), count.reg);
+	} else if (isPowerOfTwo(static_cast<uint64_t>(idiom.divisorShift))) {
+		iloc.inst("slliw", shiftName, countName,
+		          std::to_string(log2PowerOfTwo(static_cast<uint64_t>(idiom.divisorShift))));
+	} else {
+		iloc.load_imm(sign.reg(), idiom.divisorShift);
+		iloc.inst("mulw", shiftName, countName, signName);
+	}
+	// 提取符号位，若被除数非负则直接做算术右移
+	iloc.inst("sraiw", signName, dstName, "31");
+	iloc.inst("beq", signName, "zero", divLabel);
+	// 被除数为负时，先加上 (1<<shift)-1 再右移，实现向零截断语义
+	iloc.load_imm(mask.reg(), 1);
+	iloc.inst("sllw", maskName, maskName, shiftName);
+	iloc.inst("addiw", maskName, maskName, "-1");
+	iloc.inst("addw", dstName, dstName, maskName);
+	iloc.label(divLabel);
+	// 算术右移完成除法
+	iloc.inst("sraw", dstName, dstName, shiftName);
+	iloc.label(modLabel);
+	// 取模：用低位掩码获取余数
+	const int32_t remMask = idiom.divisor - 1;
+	if (PlatformRiscV64::constExpr(remMask)) {
+		iloc.inst("andi", shiftName, dstName, std::to_string(remMask));
+	} else {
+		iloc.load_imm(mask.reg(), remMask);
+		iloc.inst("and", shiftName, dstName, maskName);
+	}
+	// 修正负数的余数：若被除数非负或余数已为0则无需修正
+	iloc.inst("bge", dstName, "zero", modDoneLabel);
+	iloc.inst("beq", shiftName, "zero", modDoneLabel);
+	// 余数为负时加上除数使其为正
+	if (PlatformRiscV64::constExpr(-idiom.divisor)) {
+		iloc.inst("addiw", shiftName, shiftName, std::to_string(-idiom.divisor));
+	} else {
+		iloc.load_imm(mask.reg(), idiom.divisor);
+		iloc.inst("subw", shiftName, shiftName, maskName);
+	}
+	iloc.label(modDoneLabel);
+	iloc.mov_reg(dstReg, shift.reg());
+	iloc.jump(doneLabel);
+	// count超过阈值时结果为0
+	iloc.label(zeroLabel);
+	iloc.load_imm(dstReg, 0);
+	iloc.label(doneLabel);
+
+	sign.release();
+	mask.release();
+	shift.release();
+	releaseOperand(count);
+
+	storeResult(call, dstReg, call);
+	return true;
 }
 
 /// @brief 翻译phi指令（φ节点）
