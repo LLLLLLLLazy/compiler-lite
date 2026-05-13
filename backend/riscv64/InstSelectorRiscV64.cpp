@@ -549,10 +549,17 @@ void InstSelectorRiscV64::translate_store(Instruction * inst)
 	if (storeInst->getValueOperand()->getType()->isFloatType()) {
 		FloatOperandReg value = loadFloatOperand(storeInst->getValueOperand(), inst);
 		Value * ptrOp = storeInst->getPointerOperand();
-		auto addrTmp = tempMgr.borrow(inst);
 		if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
-			iloc.store_float_var(value.reg, ptrOp, addrTmp.reg());
+			RegAllocInfo ptrInfo = getAllocInfo(ptrOp, inst);
+			if (dynamic_cast<GlobalVariable *>(ptrOp) == nullptr && ptrInfo.hasStackSlot &&
+			    PlatformRiscV64::isDisp(ptrInfo.offset)) {
+				iloc.store_float_base(value.reg, ptrInfo.baseRegId, ptrInfo.offset, value.reg);
+			} else {
+				auto addrTmp = tempMgr.borrow(inst);
+				iloc.store_float_var(value.reg, ptrOp, addrTmp.reg());
+			}
 		} else {
+			auto addrTmp = tempMgr.borrow(inst);
 			OperandReg ptr = loadOperand(ptrOp, inst, addrTmp.reg());
 			iloc.inst("fsw", PlatformRiscV64::fpRegName[value.reg], "0(" + PlatformRiscV64::regName[ptr.reg] + ")");
 			releaseOperand(ptr);
@@ -564,8 +571,15 @@ void InstSelectorRiscV64::translate_store(Instruction * inst)
 	OperandReg value = loadOperand(storeInst->getValueOperand(), inst);
 	Value * ptrOp = storeInst->getPointerOperand();
 	if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
-		auto tmp = tempMgr.borrowAfterUses(inst, value.reg);
-		iloc.store_var(value.reg, ptrOp, tmp.reg());
+		RegAllocInfo ptrInfo = getAllocInfo(ptrOp, inst);
+		if (dynamic_cast<GlobalVariable *>(ptrOp) == nullptr && ptrInfo.hasStackSlot &&
+		    PlatformRiscV64::isDisp(ptrInfo.offset)) {
+			iloc.store_base(value.reg, ptrInfo.baseRegId, ptrInfo.offset, value.reg,
+			                storeInst->getValueOperand()->getType()->isPointerType());
+		} else {
+			auto tmp = tempMgr.borrowAfterUses(inst, value.reg);
+			iloc.store_var(value.reg, ptrOp, tmp.reg());
+		}
 	} else {
 		OperandReg ptr = loadOperand(ptrOp, inst, value.reg);
 		iloc.inst(storeInst->getValueOperand()->getType()->isPointerType() ? "sd" : "sw",
@@ -600,9 +614,6 @@ void InstSelectorRiscV64::translate_gep(Instruction * inst)
 		releaseOperand(base);
 	}
 
-	auto idxTmp = tempMgr.borrow(inst, dstReg);
-	loadValueToReg(idxTmp.reg(), gepInst->getIndexOperand(), inst);
-
 	auto * basePtrType = dynamic_cast<const PointerType *>(basePtr->getType());
 	Type * stepType = const_cast<Type *>(basePtrType->getPointeeType());
 	if (gepInst->isArrayDecayGEP()) {
@@ -635,6 +646,9 @@ void InstSelectorRiscV64::translate_gep(Instruction * inst)
 		return;
 	}
 
+	auto idxTmp = tempMgr.borrow(inst, dstReg);
+	loadValueToReg(idxTmp.reg(), gepInst->getIndexOperand(), inst);
+
 	if (elemSize != 1) {
 		if (isPowerOfTwo(static_cast<uint64_t>(elemSize))) {
 			iloc.inst("slli", PlatformRiscV64::regName[idxTmp.reg()], PlatformRiscV64::regName[idxTmp.reg()],
@@ -649,6 +663,7 @@ void InstSelectorRiscV64::translate_gep(Instruction * inst)
 
 	iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
 	          PlatformRiscV64::regName[idxTmp.reg()]);
+	idxTmp.release();
 	storeResult(inst, dstReg, inst);
 }
 
@@ -2029,6 +2044,10 @@ void InstSelectorRiscV64::storeResult(Value * val, int srcReg, Instruction * ins
 		}
 		return;
 	}
+	if (info.hasStackSlot && PlatformRiscV64::isDisp(info.offset)) {
+		iloc.store_base(srcReg, info.baseRegId, info.offset, srcReg, val->getType()->isPointerType());
+		return;
+	}
 
 	auto tmp = tempMgr.borrowAfterUses(inst, srcReg);
 	iloc.store_var(srcReg, val, tmp.reg(), info);
@@ -2045,6 +2064,10 @@ void InstSelectorRiscV64::storeFloatResult(Value * val, int srcReg, Instruction 
 		if (srcReg != info.regId) {
 			iloc.fmov_reg(info.regId, srcReg);
 		}
+		return;
+	}
+	if (info.hasStackSlot && PlatformRiscV64::isDisp(info.offset)) {
+		iloc.store_float_base(srcReg, info.baseRegId, info.offset, srcReg);
 		return;
 	}
 

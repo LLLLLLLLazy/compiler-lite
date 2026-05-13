@@ -18,7 +18,8 @@
 
 class Antlr4Executor : public FrontEndExecutor {
 public:
-	Antlr4Executor(std::string filename) : FrontEndExecutor(filename)
+	Antlr4Executor(std::string filename, bool extendedGrammar = false)
+	    : FrontEndExecutor(filename), extendedGrammar(extendedGrammar)
 	{}
 	virtual ~Antlr4Executor()
 	{}
@@ -26,4 +27,7 @@ public:
 	/// @brief 前端词法与语法解析生成AST
 	/// @return true: 成功 false：错误
 	bool run() override;
+
+private:
+	bool extendedGrammar;
 };

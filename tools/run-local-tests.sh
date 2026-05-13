@@ -270,16 +270,16 @@ run_asm_check() {
     fi
 
     if ! timeout --foreground "${TEST_TIMEOUT}" \
-        "${RISCV64_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${TEST_ROOT}/std.c" >/dev/null 2>&1; then
+        "${RISCV64_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${RUNTIME_SOURCE}" >/dev/null 2>&1; then
         echo "${source_name} link NG [asm]"
         return 1
     fi
 
     if [[ -f "${infile}" ]]; then
-        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2>&1
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
         exit_code=$?
     else
-        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" > "${output_file}" 2>&1
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
         exit_code=$?
     fi
 

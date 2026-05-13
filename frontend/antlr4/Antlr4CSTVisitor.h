@@ -24,7 +24,7 @@ class MiniCCSTVisitor : public MiniCBaseVisitor {
 
 public:
 	/// @brief 构造函数
-	MiniCCSTVisitor();
+	explicit MiniCCSTVisitor(bool extendedGrammar = false);
 
 	/// @brief 析构函数
 	virtual ~MiniCCSTVisitor();
@@ -133,6 +133,15 @@ protected:
 
 	/// @brief 非终结符RelOp的分析
 	std::any visitRelOp(MiniCParser::RelOpContext * ctx) override;
+
+	/// @brief 按指定模式遍历表达式
+	std::any visitExprWithMode(MiniCParser::ExprContext * ctx, bool allowLogicalExpression);
+
+	/// @brief 判断表达式是否保持旧文法Exp->AddExp的形状
+	bool isAddExpOnly(MiniCParser::LOrExpContext * ctx) const;
+	bool isAddExpOnly(MiniCParser::LAndExpContext * ctx) const;
+	bool isAddExpOnly(MiniCParser::EqExpContext * ctx) const;
+	bool isAddExpOnly(MiniCParser::RelExpContext * ctx) const;
 
 	///
 	/// @brief 内部产生的非终结符assignStatement的分析
@@ -246,4 +255,7 @@ protected:
 	/// @return std::any AST的节点
 	///
 	std::any visitExpressionStatement(MiniCParser::ExpressionStatementContext * context) override;
+
+private:
+	bool extendedGrammar;
 };
