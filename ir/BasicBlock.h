@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <list>
 #include <string>
 #include <vector>
@@ -16,6 +17,12 @@
 
 class Function;
 class Instruction;
+
+/// @brief 循环并行安全的来源标记
+enum class LoopParallelSource : std::uint8_t {
+    None,   ///< 无并行安全标记
+    Tiling, ///< 由循环分块（LoopTiling）pass标记为并行安全
+};
 
 class BasicBlock : public Value {
 
@@ -80,6 +87,38 @@ public:
     int getLoopDepth() const { return loopDepth; }
     void setLoopDepth(int d) { loopDepth = d; }
 
+    /// @brief 标记此基本块对应的循环由分块pass保证并行安全
+    void markLoopParallelSafeFromTiling()
+    {
+        loopParallelSafe = true;
+        loopParallelSource = LoopParallelSource::Tiling;
+    }
+
+    /// @brief 查询是否携带有效的循环并行安全元数据
+    bool hasLoopParallelSafeMetadata() const
+    {
+        return loopParallelSafe && loopParallelSource != LoopParallelSource::None;
+    }
+
+    /// @brief 查询是否由分块pass标记为并行安全
+    bool isLoopParallelSafeFromTiling() const
+    {
+        return loopParallelSafe && loopParallelSource == LoopParallelSource::Tiling;
+    }
+
+    /// @brief 获取循环并行安全的来源
+    LoopParallelSource getLoopParallelSource() const
+    {
+        return loopParallelSource;
+    }
+
+    /// @brief 清除循环并行安全元数据
+    void clearLoopParallelMetadata()
+    {
+        loopParallelSafe = false;
+        loopParallelSource = LoopParallelSource::None;
+    }
+
     void toString(std::string & str);
 
 private:
@@ -88,4 +127,6 @@ private:
     std::vector<BasicBlock *> preds;
     std::vector<BasicBlock *> succs;
     int loopDepth = 0;
+    bool loopParallelSafe = false;                     ///< 是否标记为循环并行安全
+    LoopParallelSource loopParallelSource = LoopParallelSource::None; ///< 并行安全来源
 };
