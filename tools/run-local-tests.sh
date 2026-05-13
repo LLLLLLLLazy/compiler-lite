@@ -46,6 +46,7 @@ Suites:
   2026              -> tests/2026_function
   2026_perf         -> tests/2026_performance
   2026_performance  -> tests/2026_performance
+  for_loop          -> tests/for_loop
   all               -> all suites above
 
 Environment:
@@ -135,6 +136,9 @@ suite_dir_from_key() {
         2026_perf|2026_performance)
             echo "2026_performance"
             ;;
+        for_loop)
+            echo "for_loop"
+            ;;
         *)
             return 1
             ;;
@@ -160,6 +164,9 @@ infer_suite_from_testcase() {
             ;;
         2026_perf_*)
             echo "2026_performance"
+            ;;
+        for_loop_*)
+            echo "for_loop"
             ;;
         *)
             return 1
@@ -489,6 +496,7 @@ elif [[ "${suite_key}" == "all" ]]; then
     run_suite "2025_performance"
     run_suite "2026_function"
     run_suite "2026_performance"
+    run_suite "for_loop"
 else
     suite_dir=$(suite_dir_from_key "${suite_key}") || \
         fail_with_usage "Unknown suite: ${suite_key}"
