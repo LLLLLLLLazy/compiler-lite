@@ -9,6 +9,7 @@ tools/
 .cache/
 .arts
 .claude
+.tmp/
 
 passed_tests.md
 .vscode

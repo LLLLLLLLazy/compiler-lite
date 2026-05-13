@@ -181,7 +181,20 @@ LocalTempManager::Lease LocalTempManager::borrowExcluding(
 		return Lease(this, reg);
 	}
 
-	std::fprintf(stderr, "LocalTempManager: 无可用的临时寄存器！\n");
+	std::fprintf(stderr, "LocalTempManager: 无可用的临时寄存器！inst=%p instNum=%d excludeRegs={",
+	             static_cast<void *>(inst), instNum);
+	for (int reg : excludeRegs) {
+		std::fprintf(stderr, "%d,", reg);
+	}
+	std::fprintf(stderr, "} borrowed={");
+	for (int reg : borrowed) {
+		std::fprintf(stderr, "%d,", reg);
+	}
+	std::fprintf(stderr, "} pool={");
+	for (int reg : pool) {
+		std::fprintf(stderr, "%d,", reg);
+	}
+	std::fprintf(stderr, "}\n");
 	std::abort();
 }
 
@@ -218,7 +231,16 @@ int LocalTempManager::borrowImpl(Instruction * inst, int excludeReg, bool afterU
 		return reg;
 	}
 
-	std::fprintf(stderr, "LocalTempManager: 无可用的临时寄存器！\n");
+	std::fprintf(stderr, "LocalTempManager: 无可用的临时寄存器！inst=%p instNum=%d excludeReg=%d afterUses=%d borrowed={",
+	             static_cast<void *>(inst), instNum, excludeReg, afterUses ? 1 : 0);
+	for (int reg : borrowed) {
+		std::fprintf(stderr, "%d,", reg);
+	}
+	std::fprintf(stderr, "} pool={");
+	for (int reg : pool) {
+		std::fprintf(stderr, "%d,", reg);
+	}
+	std::fprintf(stderr, "}\n");
 	std::abort();
 }
 

@@ -60,7 +60,7 @@ bool Antlr4Executor::run()
 	}
 
 	/// 新建遍历器对具体语法树进行分析，产生抽象语法树
-	MiniCCSTVisitor visitor;
+	MiniCCSTVisitor visitor(extendedGrammar);
 
 	try {
 		// 遍历产生抽象语法树

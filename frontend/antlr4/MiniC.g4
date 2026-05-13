@@ -72,11 +72,11 @@ statement:
 	| block								# blockStatement
 	| expr? T_SEMICOLON					# expressionStatement;
 
-// 普通表达式文法 Exp : AddExp
-expr: addExp;
+// 普通表达式文法 Exp : LOrExp
+expr: lOrExp;
 
-// 条件表达式文法 Cond : LOrExp
-cond: lOrExp;
+// 条件表达式文法 Cond : Exp
+cond: expr;
 
 // 逻辑或表达式
 lOrExp: lAndExp (T_LOR lAndExp)*;

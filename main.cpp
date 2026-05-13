@@ -108,6 +108,11 @@ static bool gRACoalesce = true;
 static bool gRASplit = true;
 
 ///
+/// @brief 启用竞赛扩展文法
+///
+static bool gExtendedGrammar = false;
+
+///
 /// @brief 输入源文件
 ///
 static std::string gInputFile;
@@ -124,6 +129,7 @@ static struct option long_options[] = {
 	{"ast", no_argument, nullptr, 'T'},
 	{"ir", no_argument, nullptr, 'I'},
 	{"llvmir", no_argument, nullptr, 'L'},
+	{"extended-grammar", no_argument, nullptr, 'e'},
 	{"antlr4", no_argument, nullptr, 'A'},
 	{"recursive-descent", no_argument, nullptr, 'D'},
 	{"optimize", required_argument, nullptr, 'O'},
@@ -147,6 +153,7 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -T, --ast                  Output abstract syntax tree\n";
 	std::cout << "  -I, --ir                   Output structured IR\n";
 	std::cout << "  -L, --llvmir               Output LLVM IR (.ll)\n";
+	std::cout << "  -e, --extended-grammar     Enable extended grammar: Exp -> LOrExp, Cond -> Exp\n";
 	std::cout << "  -A, --antlr4               Deprecated, now always use Antlr4\n";
 	std::cout << "  -D, --recursive-descent    Deprecated, now always use Antlr4\n";
 	std::cout << "  -O, --optimize=LEVEL       Set optimization level (0: off, 1: on)\n";
@@ -174,7 +181,7 @@ static int ArgsAnalysis(int argc, char * argv[])
 	// -O要求必须带有附加参数，仅支持0(关闭优化)和1(开启优化)
 	// -t要求必须带有目标CPU，指明目标CPU的汇编
 	// -c选项在输出汇编时有效，附带输出IR指令内容
-	const char options[] = "ho:STIADLO:t:cmFCP";
+	const char options[] = "ho:STIADLO:t:cmFCPe";
 	int option_index = 0;
 
 	opterr = 1;
@@ -201,6 +208,10 @@ lb_check:
 			case 'L':
 				// 产生LLVM IR
 				gShowLLVMIR = true;
+				break;
+			case 'e':
+				// 启用竞赛扩展文法
+				gExtendedGrammar = true;
 				break;
 			case 'A':
 				// 选用antlr4
@@ -326,7 +337,7 @@ static int compile(std::string inputFile, std::string outputFile)
 
 	do {
 		// 创建词法语法分析器
-		FrontEndExecutor * frontEndExecutor = new Antlr4Executor(inputFile);
+		FrontEndExecutor * frontEndExecutor = new Antlr4Executor(inputFile, gExtendedGrammar);
 
 		// 前端执行：词法分析、语法分析后产生抽象语法树
 		subResult = frontEndExecutor->run();
