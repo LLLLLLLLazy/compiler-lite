@@ -2139,6 +2139,49 @@ Value * IRGenerator::convertToFloat(Value * value)
     return castInt32ToFloat(value);
 }
 
+/// @brief 将数组指针按目标指针类型执行必要的首元素退化
+///
+/// 当源类型为 T(*)[N][M]... 而目标类型为 T* 时，通过逐层 GEP(0) 将
+/// 多维数组指针退化为指向首元素的指针，以匹配C语言的数组到指针退化语义。
+/// @param value 源值
+/// @param targetType 目标指针类型
+/// @return 退化后的值，若无法退化则原样返回
+Value * IRGenerator::decayArrayPointerToType(Value * value, Type * targetType)
+{
+    // 类型相同或为空则无需转换
+    if (value == nullptr || targetType == nullptr || value->getType() == targetType) {
+        return value;
+    }
+
+    // 仅处理指针到指针的退化
+    if (!value->getType()->isPointerType() || !targetType->isPointerType()) {
+        return value;
+    }
+
+    // 检查逐层剥离数组后能否到达目标指针所指类型
+    Type * candidatePointee = getAddressPointeeType(value);
+    bool canReachTarget = false;
+    while (auto * arrayType = dynamic_cast<ArrayType *>(candidatePointee)) {
+        candidatePointee = arrayType->getElementType();
+        if (PointerType::get(candidatePointee) == targetType) {
+            canReachTarget = true;
+            break;
+        }
+    }
+
+    if (!canReachTarget) {
+        return value;
+    }
+
+    // 逐层执行 GEP(0) 完成数组到指针的退化
+    Value * current = value;
+    while (current != nullptr && current->getType() != targetType) {
+        current = emitGEP(current, module->newConstInt32(0), true);
+    }
+
+    return current;
+}
+
 Value * IRGenerator::convertValueToType(Value * value, Type * targetType)
 {
     if (value == nullptr || targetType == nullptr) {
@@ -2147,6 +2190,14 @@ Value * IRGenerator::convertValueToType(Value * value, Type * targetType)
 
     if (value->getType() == targetType) {
         return value;
+    }
+
+    // 若目标为指针类型，先尝试数组指针退化
+    if (targetType->isPointerType()) {
+        value = decayArrayPointerToType(value, targetType);
+        if (value == nullptr || value->getType() == targetType) {
+            return value;
+        }
     }
 
     if (targetType->isFloatType()) {
