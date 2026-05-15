@@ -35,6 +35,16 @@ class Value;
 class ScalarEvolution {
 
 public:
+    enum class CompareKind {
+        Unknown,
+        Equal,
+        NotEqual,
+        LessThan,
+        LessEqual,
+        GreaterThan,
+        GreaterEqual,
+    };
+
     enum class ExprKind {
         Constant,
         Unknown,
@@ -246,11 +256,17 @@ public:
         const AddRecurrenceExpr * recurrence = nullptr;
         ICmpInst * cmp = nullptr;
         CondBranchInst * branch = nullptr;
+        CompareKind compareKind = CompareKind::Unknown;
         ConstInteger * bound = nullptr;
+        Value * boundValue = nullptr;
+        const Expr * boundExpr = nullptr;
+        int32_t boundIntValue = 0;
+        bool hasConstBoundValue = false;
         Value * initialValue = nullptr;
         int32_t initialIntValue = 0;
         bool hasConstInitialValue = false;
         int32_t tripCount = 0;
+        bool hasConstTripCount = false;
     };
 
     /// @brief 构造时绑定函数及所需循环分析依赖
@@ -324,15 +340,19 @@ private:
                             int32_t & step,
                             AddRecurrenceExpr::StepKind & stepKind,
                             BasicBlock *& preheader,
-                            BasicBlock *& latch) const;
+                            BasicBlock *& latch);
     bool findUniqueLoopEntryAndLatch(BasicBlock * loopHeader,
                                      const std::unordered_set<BasicBlock *> & loopBody,
                                      BasicBlock *& preheader,
                                      BasicBlock *& latch) const;
+    bool normalizeCanonicalCompare(class ICmpInst * cmp,
+                                   PhiInst *& induction,
+                                   Value *& boundValue,
+                                   CompareKind & compareKind) const;
     bool matchConstStep(Value * value,
                         PhiInst * phi,
                         int32_t & step,
-                        AddRecurrenceExpr::StepKind & stepKind) const;
+                        AddRecurrenceExpr::StepKind & stepKind);
     bool hasSingleBranchTo(BasicBlock * bb, BasicBlock * target) const;
     /// @brief 判断表达式是否在指定循环入口处已可用且在整个循环执行期间保持不变
     bool isLoopInvariantExpr(const Expr * expr, BasicBlock * loopHeader);
@@ -357,7 +377,11 @@ private:
                             std::unordered_set<Value *> & valueVisiting);
     /// @brief 返回表达式可直接复用的现有 SSA 值 若不存在则返回 nullptr
     Value * getRepresentativeValue(const Expr * expr) const;
-    int32_t computeTripCount(int32_t initialValue, int32_t bound, int32_t step) const;
+    bool computeTripCount(CompareKind compareKind,
+                          int32_t initialValue,
+                          int32_t bound,
+                          int32_t step,
+                          int32_t & tripCount) const;
 
     Function * func = nullptr;
     DominatorTree * domTree = nullptr;
