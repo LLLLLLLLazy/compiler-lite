@@ -10,10 +10,13 @@
 
 #include "AllocaInst.h"
 #include "BasicBlock.h"
+#include "CallInst.h"
 #include "ConstFloat.h"
+#include "FunctionSideEffectAnalysis.h"
 #include "Function.h"
 #include "GlobalVariable.h"
 #include "Instruction.h"
+#include "LoadInst.h"
 #include "Module.h"
 #include "StoreInst.h"
 #include "Type.h"
@@ -74,6 +77,81 @@ Value * buildScalarInitializer(Module * module, GlobalVariable * global)
     return nullptr;
 }
 
+bool isSupportedScalarGlobal(GlobalVariable * global)
+{
+    if (global == nullptr) {
+        return false;
+    }
+
+    Type * valueType = global->getValueType();
+    return valueType != nullptr && (valueType->isInt32Type() || valueType->isFloatType());
+}
+
+bool functionHasOnlySideEffectFreeCalls(Function * func)
+{
+    if (func == nullptr) {
+        return false;
+    }
+
+    FunctionSideEffectAnalysis sideEffects;
+    for (auto * bb : func->getBlocks()) {
+        for (auto * inst : bb->getInstructions()) {
+            auto * call = dynamic_cast<CallInst *>(inst);
+            if (call != nullptr && !sideEffects.isSideEffectFree(call->getCallee())) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool collectDirectGlobalLoads(Function * func, GlobalVariable * global, std::vector<LoadInst *> & loads)
+{
+    if (func == nullptr || global == nullptr) {
+        return false;
+    }
+
+    for (auto * use : global->getUseList()) {
+        auto * userInst = dynamic_cast<Instruction *>(use->getUser());
+        if (userInst == nullptr || userInst->getFunction() != func) {
+            continue;
+        }
+
+        auto * load = dynamic_cast<LoadInst *>(userInst);
+        if (load == nullptr || load->getPointerOperand() != global) {
+            return false;
+        }
+
+        loads.push_back(load);
+    }
+
+    return !loads.empty();
+}
+
+bool materializeGlobalEntryLoad(Function * func, GlobalVariable * global, AllocaInst * slot)
+{
+    if (func == nullptr || global == nullptr || slot == nullptr) {
+        return false;
+    }
+
+    BasicBlock * entry = func->getEntryBlock();
+    if (entry == nullptr) {
+        return false;
+    }
+
+    auto & insts = entry->getInstructions();
+    auto insertIt = findEntryInitInsertPoint(entry);
+    auto * initLoad = new LoadInst(func, global, global->getValueType());
+    initLoad->setParentBlock(entry);
+    insertIt = insts.insert(insertIt, initLoad);
+
+    auto * initStore = new StoreInst(func, initLoad, slot);
+    initStore->setParentBlock(entry);
+    insts.insert(std::next(insertIt), initStore);
+    return true;
+}
+
 } // namespace
 
 /// @brief 构造全局转局部 pass
@@ -107,8 +185,7 @@ bool GlobalToLocal::canInternalizeToMain(GlobalVariable * global, Function * mai
         return false;
     }
 
-    Type * valueType = global->getValueType();
-    if (valueType == nullptr || (!valueType->isInt32Type() && !valueType->isFloatType())) {
+    if (!isSupportedScalarGlobal(global)) {
         return false;
     }
 
@@ -183,25 +260,54 @@ bool GlobalToLocal::materializeScalarInitializer(Function * func, GlobalVariable
 bool GlobalToLocal::run()
 {
     Function * mainFunc = getMainFunction();
-    if (mainFunc == nullptr) {
-        return false;
-    }
-
     std::vector<GlobalVariable *> globals(module->getGlobalVariables().begin(), module->getGlobalVariables().end());
     bool changed = false;
 
-    for (auto * global : globals) {
-        if (!canInternalizeToMain(global, mainFunc)) {
+    if (mainFunc != nullptr) {
+        for (auto * global : globals) {
+            if (!canInternalizeToMain(global, mainFunc)) {
+                continue;
+            }
+
+            AllocaInst * slot = createEntrySlot(mainFunc, global);
+            if (slot == nullptr || !materializeScalarInitializer(mainFunc, global, slot)) {
+                continue;
+            }
+
+            global->replaceAllUseWith(slot);
+            changed = module->removeGlobalVariable(global) || changed;
+        }
+    }
+
+    globals.assign(module->getGlobalVariables().begin(), module->getGlobalVariables().end());
+    for (auto * func : module->getFunctionList()) {
+        if (func == nullptr || func->isBuiltin() || func->getBlocks().empty() ||
+            !functionHasOnlySideEffectFreeCalls(func)) {
             continue;
         }
 
-        AllocaInst * slot = createEntrySlot(mainFunc, global);
-        if (slot == nullptr || !materializeScalarInitializer(mainFunc, global, slot)) {
-            continue;
-        }
+        for (auto * global : globals) {
+            if (!isSupportedScalarGlobal(global)) {
+                continue;
+            }
 
-        global->replaceAllUseWith(slot);
-        changed = module->removeGlobalVariable(global) || changed;
+            std::vector<LoadInst *> loads;
+            if (!collectDirectGlobalLoads(func, global, loads) || loads.size() < 2) {
+                continue;
+            }
+
+            AllocaInst * slot = createEntrySlot(func, global);
+            if (slot == nullptr || !materializeGlobalEntryLoad(func, global, slot)) {
+                continue;
+            }
+
+            for (auto * load : loads) {
+                if (load->getPointerOperand() != static_cast<Value *>(slot)) {
+                    load->setOperand(0, slot);
+                }
+            }
+            changed = true;
+        }
     }
 
     return changed;
