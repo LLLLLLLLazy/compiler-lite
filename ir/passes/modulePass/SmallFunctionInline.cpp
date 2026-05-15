@@ -5,6 +5,7 @@
 /// 对满足体积和结构约束的 callee 进行内联展开：
 ///   - 叶子函数（不调用其他用户函数）：最多 4 个基本块、18 条指令
 ///   - 非叶子小函数（调用其他用户函数）：最多 8 个基本块、40 条指令
+///   - 循环内热点调用点上的单层叶子循环函数：要求无 alloca、调用点数量受限
 /// 内联后删除 call 指令，将 callee 体复制到 caller 中，
 /// 用 phi 节点合并多个返回值，使后续 mem2reg/LICM/SCCP 能跨函数体优化。
 ///
@@ -28,12 +29,14 @@
 #include "DominatorTree.h"
 #include "FCmpInst.h"
 #include "FPToSIInst.h"
+#include "FunctionSideEffectAnalysis.h"
 #include "Function.h"
 #include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "ICmpInst.h"
 #include "LoadInst.h"
 #include "LoopInfo.h"
+#include "MemoryAccess.h"
 #include "MemoryLocation.h"
 #include "Module.h"
 #include "PhiInst.h"
@@ -62,10 +65,25 @@ constexpr int32_t kHotLeafMaxInsts = 300;
 constexpr int32_t kHotSmallMaxBlocks = 32;
 /// @brief 循环内热点调用点允许的非叶子函数最大指令数
 constexpr int32_t kHotSmallMaxInsts = 180;
+/// @brief 循环内热点调用点允许的单层叶子循环函数最大基本块数
+constexpr int32_t kHotLoopLeafMaxBlocks = 12;
+/// @brief 循环内热点调用点允许的单层叶子循环函数最大指令数
+constexpr int32_t kHotLoopLeafMaxInsts = 64;
+/// @brief 循环内热点调用点允许的单层叶子循环函数最大循环体基本块数
+constexpr int32_t kHotLoopLeafMaxBodyBlocks = 8;
+/// @brief 循环内热点调用点允许的单层叶子循环函数最大直接调用点数
+constexpr int32_t kHotLoopLeafMaxCallSites = 8;
 /// @brief 被内联函数的 alloca 总字节数上限，防止栈帧膨胀
 constexpr int32_t kMaxAllocaBytes = 128;
 /// @brief 循环内热点调用点的 alloca 总字节数上限
 constexpr int32_t kHotMaxAllocaBytes = 256;
+
+/// @brief 自然循环摘要
+struct NaturalLoopSummary {
+    int32_t loopCount = 0;
+    int32_t maxDepth = 0;
+    int32_t maxLoopBodyBlocks = 0;
+};
 
 /// @brief 统计函数中的指令总数
 /// @param func 目标函数
@@ -126,6 +144,31 @@ bool hasNonSelfUserCall(Function * func)
     return false;
 }
 
+/// @brief 分析函数中的自然循环规模与嵌套情况
+/// @param func 目标函数
+/// @return 自然循环摘要
+NaturalLoopSummary analyzeNaturalLoops(Function * func)
+{
+    NaturalLoopSummary summary;
+    if (!func || func->getBlocks().empty()) {
+        return summary;
+    }
+
+    DominatorTree domTree(func);
+    LoopInfo loopInfo(func, &domTree);
+    for (auto * bb : func->getBlocks()) {
+        summary.maxDepth = std::max(summary.maxDepth, loopInfo.getLoopDepth(bb));
+        if (loopInfo.isLoopHeader(bb)) {
+            ++summary.loopCount;
+            if (const auto * body = loopInfo.getLoopBody(bb)) {
+                summary.maxLoopBodyBlocks =
+                    std::max(summary.maxLoopBodyBlocks, static_cast<int32_t>(body->size()));
+            }
+        }
+    }
+    return summary;
+}
+
 /// @brief 统计模块中直接调用某个函数的调用点数量
 ///
 /// 遍历模块中所有非内置函数，统计直接调用 callee 的调用点个数。
@@ -156,156 +199,48 @@ int32_t countDirectCallSites(Module * mod, Function * callee)
     return count;
 }
 
-/// @brief 函数副作用分析状态。
-enum class SideEffectState {
-    Unknown,
-    Visiting,
-    SideEffectFree,
-    HasSideEffect,
-};
-
-/// @brief 沿 GEP 链找到指针根对象。
-Value * getPointerRoot(Value * value)
+/// @brief 判断热点调用点上的单层叶子循环函数是否值得内联
+/// @param mod 所属模块
+/// @param callee 被调函数
+/// @param loopSummary 循环摘要
+/// @param allocaBytes alloca 总字节数
+/// @param blockCount 基本块数量
+/// @param instCount 指令数量
+/// @return true 表示允许在热点调用点内联
+bool isEligibleHotLoopLeafCallee(Module * mod,
+                                 Function * callee,
+                                 const NaturalLoopSummary & loopSummary,
+                                 int32_t allocaBytes,
+                                 int32_t blockCount,
+                                 int32_t instCount)
 {
-    Value * current = value;
-    std::unordered_set<Value *> visited;
-    while (current && visited.insert(current).second) {
-        auto * gep = dynamic_cast<GetElementPtrInst *>(current);
-        if (!gep) {
-            break;
-        }
-        current = gep->getBasePointer();
-    }
-    return current;
-}
-
-/// @brief store 只写入非逃逸局部 alloca 时，不构成函数外可见副作用。
-bool isNonEscapingLocalStore(StoreInst * store)
-{
-    if (!store) {
+    if (!mod || !callee || loopSummary.loopCount != 1 || loopSummary.maxDepth > 1) {
         return false;
     }
 
-    auto * alloca = dynamic_cast<AllocaInst *>(getPointerRoot(store->getPointerOperand()));
-    return alloca != nullptr && !doesPointerEscape(alloca);
+    if (allocaBytes != 0) {
+        return false;
+    }
+
+    if (countDirectCallSites(mod, callee) > kHotLoopLeafMaxCallSites) {
+        return false;
+    }
+
+    return blockCount <= kHotLoopLeafMaxBlocks && instCount <= kHotLoopLeafMaxInsts &&
+           loopSummary.maxLoopBodyBlocks <= kHotLoopLeafMaxBodyBlocks;
 }
 
-/// @brief 判断 callee 是否无函数外可见副作用。
-class SideEffectAnalyzer {
-public:
-    bool isSideEffectFree(Function * function)
-    {
-        if (!function || function->isBuiltin() || function->getBlocks().empty()) {
-            return false;
-        }
-
-        auto it = states.find(function);
-        if (it != states.end()) {
-            return it->second == SideEffectState::SideEffectFree;
-        }
-
-        states[function] = SideEffectState::Visiting;
-        bool sideEffectFree = true;
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                if (!isInstructionAllowed(inst)) {
-                    sideEffectFree = false;
-                    break;
-                }
-            }
-            if (!sideEffectFree) {
-                break;
-            }
-        }
-
-        states[function] = sideEffectFree ? SideEffectState::SideEffectFree : SideEffectState::HasSideEffect;
-        return sideEffectFree;
-    }
-
-private:
-    bool isInstructionAllowed(Instruction * inst)
-    {
-        if (!inst || inst->isDead() || inst->isTerminator()) {
-            return true;
-        }
-
-        if (dynamic_cast<AllocaInst *>(inst) || dynamic_cast<LoadInst *>(inst)) {
-            return true;
-        }
-
-        if (auto * store = dynamic_cast<StoreInst *>(inst)) {
-            return isNonEscapingLocalStore(store);
-        }
-
-        if (auto * call = dynamic_cast<CallInst *>(inst)) {
-            auto it = states.find(call->getCallee());
-            if (it != states.end() && it->second == SideEffectState::Visiting) {
-                return false;
-            }
-            return isSideEffectFree(call->getCallee());
-        }
-
-        return !inst->mayHaveSideEffects();
-    }
-
-    std::unordered_map<Function *, SideEffectState> states;
-};
-
-bool storeMayAliasLocation(StoreInst * store, const MemoryLocation & location)
-{
-    if (!store || !location.isPrecise()) {
-        return true;
-    }
-
-    MemoryLocation storeLocation = normalizeMemoryLocation(store->getPointerOperand());
-    if (!storeLocation.isKnownObject()) {
-        return true;
-    }
-
-    return classifyMemoryAlias(location, storeLocation) != MemoryAliasResult::NoAlias;
-}
+using SideEffectAnalyzer = FunctionSideEffectAnalysis;
 
 /// @brief 判断 loop 内是否可能改写某个可识别 load 的地址。
 bool loopMayClobberLoad(Value * pointer, const std::unordered_set<BasicBlock *> & loopBody)
 {
-    MemoryLocation location = normalizeMemoryLocation(pointer);
-    if (location.isPrecise() && !doesPointerEscape(location.object)) {
-        for (auto * bb : loopBody) {
-            for (auto * inst : bb->getInstructions()) {
-                auto * store = dynamic_cast<StoreInst *>(inst);
-                if (store && storeMayAliasLocation(store, location)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    auto * global = dynamic_cast<GlobalVariable *>(getPointerRoot(pointer));
-    if (!global) {
-        return true;
-    }
-
     SideEffectAnalyzer sideEffects;
-    for (auto * bb : loopBody) {
-        for (auto * inst : bb->getInstructions()) {
-            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
-                Value * storeRoot = getPointerRoot(store->getPointerOperand());
-                if (storeRoot == global || (!dynamic_cast<AllocaInst *>(storeRoot) &&
-                                            !dynamic_cast<GlobalVariable *>(storeRoot))) {
-                    return true;
-                }
-                continue;
-            }
-
-            auto * call = dynamic_cast<CallInst *>(inst);
-            if (call && !sideEffects.isSideEffectFree(call->getCallee())) {
-                return true;
-            }
-        }
-    }
-
-    return false;
+    return blocksMayClobberLoad(pointer,
+                                loopBody,
+                                [&sideEffects](CallInst * call) {
+                                    return call != nullptr && !sideEffects.isSideEffectFree(call->getCallee());
+                                });
 }
 
 bool valueIsLoopInvariant(Value * value,
@@ -409,6 +344,35 @@ bool isCacheableLoopCall(CallInst * call,
            operandsAreLoopInvariant(call, loopBody);
 }
 
+/// @brief 判断基本块是否会让 PureCallLoopCache 的跨迭代缓存失效
+/// @param bb 待检查的基本块
+/// @param ignoredCall 允许忽略的候选纯调用本身
+/// @param sideEffects 共享副作用分析器
+/// @return true 表示该块中存在 store 或非纯调用
+bool blockInvalidatesPureCallCache(BasicBlock * bb,
+                                   CallInst * ignoredCall,
+                                   SideEffectAnalyzer & sideEffects)
+{
+    if (!bb) {
+        return true;
+    }
+
+    for (auto * inst : bb->getInstructions()) {
+        if (!inst || inst->isDead() || inst == ignoredCall) {
+            continue;
+        }
+        if (dynamic_cast<StoreInst *>(inst)) {
+            return true;
+        }
+        if (auto * call = dynamic_cast<CallInst *>(inst)) {
+            if (!sideEffects.isSideEffectFree(call->getCallee())) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /// @brief 若调用正好是 PureCallLoopCache 可处理的 latch 纯调用，保留给缓存 pass。
 bool shouldPreserveForPureCallLoopCache(CallInst * call)
 {
@@ -450,7 +414,17 @@ bool shouldPreserveForPureCallLoopCache(CallInst * call)
         candidate = currentCall;
     }
 
-    return candidate == call;
+    if (candidate != call) {
+        return false;
+    }
+
+    for (auto * bb : *loopBody) {
+        if (blockInvalidatesPureCallCache(bb, bb == latch ? candidate : nullptr, sideEffects)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /// @brief 判断调用点是否位于自然循环内。
@@ -659,13 +633,10 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
     }
 
     const bool hotCallSite = callLoopDepth > 0;
+    const bool leafCallee = !hasNonSelfUserCall(callee);
     const int32_t maxAllocaBytes = hotCallSite ? kHotMaxAllocaBytes : kMaxAllocaBytes;
-    if (getAllocaBytes(callee) > maxAllocaBytes) {
-        return false;
-    }
-
-    // 包含循环的函数内联后可能导致代码膨胀，不予内联
-    if (containsNaturalLoop(callee)) {
+    const int32_t allocaBytes = getAllocaBytes(callee);
+    if (allocaBytes > maxAllocaBytes) {
         return false;
     }
 
@@ -679,16 +650,17 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
 
     int32_t blockCount = static_cast<int32_t>(callee->getBlocks().size());
     int32_t instCount = countInstructions(callee);
-    // 循环密集型热点调用：若被调用函数包含循环且体积超过叶子函数阈值，
-    // 则拒绝内联，避免在循环内展开另一个大循环导致性能退化
-    const bool loopHeavyHotCall = hotCallSite && containsNaturalLoop(callee) &&
-                                  (blockCount > kLeafMaxBlocks || instCount > kLeafMaxInsts);
-    if (loopHeavyHotCall) {
-        return false;
+    const NaturalLoopSummary loopSummary = analyzeNaturalLoops(callee);
+
+    if (loopSummary.loopCount > 0) {
+        if (!hotCallSite || !leafCallee) {
+            return false;
+        }
+        return isEligibleHotLoopLeafCallee(mod, callee, loopSummary, allocaBytes, blockCount, instCount);
     }
 
     // 叶子函数：普通调用点保守，循环内热点调用点使用更宽松阈值。
-    if (!hasNonSelfUserCall(callee)) {
+    if (leafCallee) {
         const int32_t maxBlocks = hotCallSite ? kHotLeafMaxBlocks : kLeafMaxBlocks;
         const int32_t maxInsts = hotCallSite ? kHotLeafMaxInsts : kLeafMaxInsts;
         return blockCount <= maxBlocks && instCount <= maxInsts;

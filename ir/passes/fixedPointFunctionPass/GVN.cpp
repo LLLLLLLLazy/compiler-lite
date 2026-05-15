@@ -29,11 +29,14 @@
 #include "GlobalVariable.h"
 #include "ICmpInst.h"
 #include "Instruction.h"
+#include "LocalMemoryAnalysis.h"
 #include "LoadInst.h"
+#include "MemoryAccess.h"
 #include "MemoryLocation.h"
 #include "Module.h"
 #include "SIToFPInst.h"
 #include "FPToSIInst.h"
+#include "PureFunctionAnalysis.h"
 #include "StoreInst.h"
 #include "Type.h"
 #include "Value.h"
@@ -48,178 +51,9 @@ std::string ptrKey(const void * ptr)
     return os.str();
 }
 
-Value * getPointerRoot(Value * value)
-{
-    Value * current = value;
-    std::unordered_set<Value *> visited;
-    while (current && visited.insert(current).second) {
-        auto * gep = dynamic_cast<GetElementPtrInst *>(current);
-        if (!gep) {
-            break;
-        }
-        current = gep->getBasePointer();
-    }
-    return current;
-}
-
-bool isReadOnlyGlobal(Module * mod, GlobalVariable * global)
-{
-    if (!mod || !global) {
-        return false;
-    }
-
-    for (auto * function : mod->getFunctionList()) {
-        if (!function || function->isBuiltin()) {
-            continue;
-        }
-
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                auto * store = dynamic_cast<StoreInst *>(inst);
-                if (store && getPointerRoot(store->getPointerOperand()) == global) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    return true;
-}
-
-bool isLocalMemory(Value * ptr)
-{
-    return dynamic_cast<AllocaInst *>(getPointerRoot(ptr)) != nullptr;
-}
-
-bool isAllowedReadPointer(Module * mod, Value * ptr)
-{
-    Value * root = getPointerRoot(ptr);
-    if (dynamic_cast<AllocaInst *>(root) != nullptr || dynamic_cast<FormalParam *>(root) != nullptr) {
-        return true;
-    }
-
-    auto * global = dynamic_cast<GlobalVariable *>(root);
-    return global != nullptr && isReadOnlyGlobal(mod, global);
-}
-
-enum class PurityState {
-    Unknown,
-    Visiting,
-    Pure,
-    Impure,
-};
-
-class PurityAnalyzer {
-public:
-    explicit PurityAnalyzer(Module * module) : mod(module)
-    {}
-
-    bool isPure(Function * function)
-    {
-        if (!function || function->isBuiltin() || function->getBlocks().empty()) {
-            return false;
-        }
-
-        auto it = states.find(function);
-        if (it != states.end()) {
-            return it->second == PurityState::Pure;
-        }
-
-        states[function] = PurityState::Visiting;
-        bool pure = true;
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                if (!isInstructionAllowed(inst)) {
-                    pure = false;
-                    break;
-                }
-            }
-            if (!pure) {
-                break;
-            }
-        }
-
-        states[function] = pure ? PurityState::Pure : PurityState::Impure;
-        return pure;
-    }
-
-    bool isMemoryIndependent(Function * function)
-    {
-        if (!isPure(function)) {
-            return false;
-        }
-
-        auto cached = memoryIndependent.find(function);
-        if (cached != memoryIndependent.end()) {
-            return cached->second;
-        }
-
-        bool independent = true;
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                if (auto * load = dynamic_cast<LoadInst *>(inst)) {
-                    if (dynamic_cast<AllocaInst *>(getPointerRoot(load->getPointerOperand())) == nullptr) {
-                        independent = false;
-                        break;
-                    }
-                    continue;
-                }
-
-                if (auto * call = dynamic_cast<CallInst *>(inst)) {
-                    if (!isMemoryIndependent(call->getCallee())) {
-                        independent = false;
-                        break;
-                    }
-                }
-            }
-
-            if (!independent) {
-                break;
-            }
-        }
-
-        memoryIndependent[function] = independent;
-        return independent;
-    }
-
-private:
-    bool isInstructionAllowed(Instruction * inst)
-    {
-        if (!inst || inst->isDead() || inst->isTerminator()) {
-            return true;
-        }
-
-        if (dynamic_cast<AllocaInst *>(inst) != nullptr) {
-            return true;
-        }
-
-        if (auto * load = dynamic_cast<LoadInst *>(inst)) {
-            return isAllowedReadPointer(mod, load->getPointerOperand());
-        }
-
-        if (auto * store = dynamic_cast<StoreInst *>(inst)) {
-            return isLocalMemory(store->getPointerOperand());
-        }
-
-        if (auto * call = dynamic_cast<CallInst *>(inst)) {
-            auto it = states.find(call->getCallee());
-            if (it != states.end() && it->second == PurityState::Visiting) {
-                return false;
-            }
-            return isPure(call->getCallee());
-        }
-
-        return !inst->mayHaveSideEffects();
-    }
-
-    Module * mod = nullptr;
-    std::unordered_map<Function *, PurityState> states;
-    std::unordered_map<Function *, bool> memoryIndependent;
-};
-
 struct MemoryState {
     int32_t globalVersion = 0;
-    std::unordered_map<std::string, int32_t> versions;
+    std::unordered_map<LocalMemoryKey, int32_t, LocalMemoryKeyHash> versions;
 };
 
 bool sameMemoryState(const MemoryState & lhs, const MemoryState & rhs)
@@ -238,13 +72,13 @@ bool sameMemoryState(const MemoryState & lhs, const MemoryState & rhs)
     return true;
 }
 
-int32_t getVersion(const MemoryState & state, const std::string & key)
+int32_t getVersion(const MemoryState & state, const LocalMemoryKey & key)
 {
     auto it = state.versions.find(key);
     return it == state.versions.end() ? 0 : it->second;
 }
 
-void setVersion(MemoryState & state, const std::string & key, int32_t version)
+void setVersion(MemoryState & state, const LocalMemoryKey & key, int32_t version)
 {
     if (version == 0) {
         state.versions.erase(key);
@@ -254,31 +88,24 @@ void setVersion(MemoryState & state, const std::string & key, int32_t version)
     state.versions[key] = version;
 }
 
-std::string localObjectKey(AllocaInst * object)
+/// @brief 将局部内存统一键格式化为稳定文本，供 GVN meet 产生未知版本标识
+/// @param key 待格式化键
+/// @return 稳定文本形式
+std::string describeLocalMemoryKey(const LocalMemoryKey & key)
 {
-    return "obj:" + ptrKey(object);
-}
-
-std::string localPreciseKey(const MemoryLocation & location)
-{
-    std::string key = "loc:" + ptrKey(location.object);
-    for (int32_t index : location.indices) {
-        key += ":" + std::to_string(index);
+    std::string text = "mem:" + ptrKey(key.object) + ":" + std::to_string(static_cast<int32_t>(key.kind));
+    for (int32_t index : key.indices) {
+        text += ":" + std::to_string(index);
     }
-    return key;
-}
-
-bool isTrackableLocation(const MemoryLocation & location, const std::unordered_set<AllocaInst *> & trackableAllocas)
-{
-    return location.object != nullptr && trackableAllocas.find(location.object) != trackableAllocas.end();
+    return text;
 }
 
 class MemoryVersionAnalysis {
 public:
     MemoryVersionAnalysis(Function * function,
-                          PurityAnalyzer & analyzer,
-                          std::unordered_set<AllocaInst *> trackable)
-        : func(function), purity(analyzer), trackableAllocas(std::move(trackable))
+                          PureFunctionAnalysis & analyzer,
+                          const LocalMemoryAnalysis & analysis)
+        : func(function), purity(analyzer), localMemory(analysis)
     {
         assignClobberIds();
         solve();
@@ -315,15 +142,16 @@ public:
     std::string readVersionKey(Value * pointer, const MemoryState & state) const
     {
         MemoryLocation location = normalizeMemoryLocation(pointer);
-        if (isTrackableLocation(location, trackableAllocas)) {
-            const std::string objectKey = localObjectKey(location.object);
+        if (localMemory.isTrackableLocation(location)) {
+            const LocalMemoryKey objectKey = makeObjectAnyStoreLocalMemoryKey(location.object);
             if (!location.isPrecise()) {
                 return "local:" + std::to_string(getVersion(state, objectKey));
             }
 
-            const std::string preciseKey = localPreciseKey(location);
+            const LocalMemoryKey preciseKey = makePreciseLocalMemoryKey(location);
+            const LocalMemoryKey impreciseKey = makeObjectImpreciseStoreLocalMemoryKey(location.object);
             return "local:" + std::to_string(getVersion(state, preciseKey)) + ":" +
-                   std::to_string(getVersion(state, objectKey));
+                   std::to_string(getVersion(state, impreciseKey));
         }
 
         return "global:" + std::to_string(state.globalVersion);
@@ -398,7 +226,7 @@ private:
 
             result.globalVersion = meetVersion(result.globalVersion, predState.globalVersion, bb, "global");
 
-            std::unordered_set<std::string> keys;
+            std::unordered_set<LocalMemoryKey, LocalMemoryKeyHash> keys;
             keys.reserve(result.versions.size() + predState.versions.size());
             for (const auto & [key, _] : result.versions) {
                 keys.insert(key);
@@ -408,7 +236,10 @@ private:
             }
 
             for (const auto & key : keys) {
-                const int32_t merged = meetVersion(getVersion(result, key), getVersion(predState, key), bb, key);
+                const int32_t merged = meetVersion(getVersion(result, key),
+                                                   getVersion(predState, key),
+                                                   bb,
+                                                   describeLocalMemoryKey(key));
                 setVersion(result, key, merged);
             }
         }
@@ -416,13 +247,13 @@ private:
         return result;
     }
 
-    int32_t meetVersion(int32_t lhs, int32_t rhs, BasicBlock * bb, const std::string & key)
+    int32_t meetVersion(int32_t lhs, int32_t rhs, BasicBlock * bb, const std::string & keyText)
     {
         if (lhs == rhs) {
             return lhs;
         }
 
-        const std::string unknownKey = ptrKey(bb) + "|" + key;
+        const std::string unknownKey = ptrKey(bb) + "|" + keyText;
         auto it = unknownVersions.find(unknownKey);
         if (it != unknownVersions.end()) {
             return it->second;
@@ -444,11 +275,12 @@ private:
     void applyStoreClobber(StoreInst * store, MemoryState & state, int32_t version) const
     {
         MemoryLocation location = normalizeMemoryLocation(store->getPointerOperand());
-        if (isTrackableLocation(location, trackableAllocas)) {
+        if (localMemory.isTrackableLocation(location)) {
+            setVersion(state, makeObjectAnyStoreLocalMemoryKey(location.object), version);
             if (location.isPrecise()) {
-                setVersion(state, localPreciseKey(location), version);
+                setVersion(state, makePreciseLocalMemoryKey(location), version);
             } else {
-                setVersion(state, localObjectKey(location.object), version);
+                setVersion(state, makeObjectImpreciseStoreLocalMemoryKey(location.object), version);
             }
             return;
         }
@@ -457,8 +289,8 @@ private:
     }
 
     Function * func = nullptr;
-    PurityAnalyzer & purity;
-    std::unordered_set<AllocaInst *> trackableAllocas;
+    PureFunctionAnalysis & purity;
+    const LocalMemoryAnalysis & localMemory;
     std::unordered_map<Instruction *, int32_t> clobberIds;
     std::unordered_set<BasicBlock *> reachableBlocks;
     std::unordered_map<BasicBlock *, MemoryState> inStates;
@@ -556,7 +388,7 @@ class DominatorGVN {
 public:
     DominatorGVN(Function * function, Module * module)
         : func(function), mod(module), domTree(function), purity(module),
-          memory(function, purity, collectTrackableAllocas(function))
+                    localMemory(function), memory(function, purity, localMemory)
     {}
 
     bool run()
@@ -570,25 +402,6 @@ public:
     }
 
 private:
-    static std::unordered_set<AllocaInst *> collectTrackableAllocas(Function * function)
-    {
-        std::unordered_set<AllocaInst *> result;
-        if (!function) {
-            return result;
-        }
-
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                auto * alloca = dynamic_cast<AllocaInst *>(inst);
-                if (alloca && !doesPointerEscape(alloca)) {
-                    result.insert(alloca);
-                }
-            }
-        }
-
-        return result;
-    }
-
     void visit(BasicBlock * bb)
     {
         if (!bb || !visited.insert(bb).second) {
@@ -754,7 +567,8 @@ private:
     Function * func = nullptr;
     Module * mod = nullptr;
     DominatorTree domTree;
-    PurityAnalyzer purity;
+    PureFunctionAnalysis purity;
+    LocalMemoryAnalysis localMemory;
     MemoryVersionAnalysis memory;
     ScopedValueTable valueTable;
     std::unordered_set<BasicBlock *> visited;

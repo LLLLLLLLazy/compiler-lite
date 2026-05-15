@@ -15,6 +15,7 @@
 /// </table>
 ///
 
+#include <stdexcept>
 #include <string>
 
 #include "Antlr4CSTVisitor.h"
@@ -124,7 +125,7 @@ ast_node * materializeDeclNode(type_attr typeAttr, ast_node * specNode)
 }  // namespace
 
 /// @brief 构造函数
-MiniCCSTVisitor::MiniCCSTVisitor()
+MiniCCSTVisitor::MiniCCSTVisitor(bool extendedGrammar) : extendedGrammar(extendedGrammar)
 {}
 
 /// @brief 析构函数
@@ -397,7 +398,7 @@ std::any MiniCCSTVisitor::visitWhileStatement(MiniCParser::WhileStatementContext
 
 std::any MiniCCSTVisitor::visitCond(MiniCParser::CondContext * ctx)
 {
-	return visitLOrExp(ctx->lOrExp());
+	return visitExprWithMode(ctx->expr(), true);
 }
 
 std::any MiniCCSTVisitor::visitBreakStatement(MiniCParser::BreakStatementContext * ctx)
@@ -416,9 +417,38 @@ std::any MiniCCSTVisitor::visitContinueStatement(MiniCParser::ContinueStatementC
 /// @param ctx CST上下文
 std::any MiniCCSTVisitor::visitExpr(MiniCParser::ExprContext * ctx)
 {
-	// 识别产生式：expr: addExp;
+	return visitExprWithMode(ctx, extendedGrammar);
+}
 
-	return visitAddExp(ctx->addExp());
+std::any MiniCCSTVisitor::visitExprWithMode(MiniCParser::ExprContext * ctx, bool allowLogicalExpression)
+{
+	// 扩展文法：expr: lOrExp;
+	// 默认模式仍保持旧文法Exp->AddExp的外部行为。
+	if (!allowLogicalExpression && !isAddExpOnly(ctx->lOrExp())) {
+		throw std::runtime_error("默认文法下Exp仅支持AddExp；如需在普通表达式中使用逻辑/比较表达式，请指定-e");
+	}
+
+	return visitLOrExp(ctx->lOrExp());
+}
+
+bool MiniCCSTVisitor::isAddExpOnly(MiniCParser::LOrExpContext * ctx) const
+{
+	return ctx->lAndExp().size() == 1 && isAddExpOnly(ctx->lAndExp()[0]);
+}
+
+bool MiniCCSTVisitor::isAddExpOnly(MiniCParser::LAndExpContext * ctx) const
+{
+	return ctx->eqExp().size() == 1 && isAddExpOnly(ctx->eqExp()[0]);
+}
+
+bool MiniCCSTVisitor::isAddExpOnly(MiniCParser::EqExpContext * ctx) const
+{
+	return ctx->relExp().size() == 1 && isAddExpOnly(ctx->relExp()[0]);
+}
+
+bool MiniCCSTVisitor::isAddExpOnly(MiniCParser::RelExpContext * ctx) const
+{
+	return ctx->addExp().size() == 1;
 }
 
 std::any MiniCCSTVisitor::visitLOrExp(MiniCParser::LOrExpContext * ctx)

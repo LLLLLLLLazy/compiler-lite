@@ -27,6 +27,7 @@
 #include "LoopInfo.h"
 #include "Module.h"
 #include "PhiInst.h"
+#include "ScalarEvolution.h"
 #include "StoreInst.h"
 #include "Value.h"
 
@@ -36,18 +37,7 @@ constexpr int32_t kMinTileTripCount = 64;
 constexpr int32_t kLargeNestTileSize = 128;
 constexpr int32_t kLargeNestTripCount = 128;
 
-struct CanonicalLoop {
-    BasicBlock * header = nullptr;
-    BasicBlock * preheader = nullptr;
-    BasicBlock * body = nullptr;
-    BasicBlock * latch = nullptr;
-    BasicBlock * exit = nullptr;
-    PhiInst * induction = nullptr;
-    BinaryInst * next = nullptr;
-    ICmpInst * cmp = nullptr;
-    CondBranchInst * branch = nullptr;
-    ConstInteger * bound = nullptr;
-};
+using CanonicalLoop = ScalarEvolution::CanonicalLoop;
 
 enum class RootKind {
     Unknown,
@@ -268,14 +258,14 @@ bool repeatedLoopBodyIsInvariant(const std::unordered_set<BasicBlock *> & loopBo
 ///
 /// 只在可证明循环归纳变量不影响写地址、写值和调用实参，且唯一用户调用的
 /// 写集合来自形参根对象并被循环体中的不变 store 重新覆盖时触发。
-bool collapseRepeatedInvariantCallLoop(Function * func, Module * mod)
+bool collapseRepeatedInvariantCallLoop(Function * func,
+                                      Module * mod,
+                                      LoopInfo & loopInfo,
+                                      ScalarEvolution & scev)
 {
     if (!func || !mod || func->getBlocks().empty()) {
         return false;
     }
-
-    DominatorTree domTree(func);
-    LoopInfo loopInfo(func, &domTree);
 
     // 遍历所有循环头，寻找可折叠的重复不变调用循环
     for (auto * header : func->getBlocks()) {
@@ -283,39 +273,20 @@ bool collapseRepeatedInvariantCallLoop(Function * func, Module * mod)
             continue;
         }
 
-        // 匹配循环头结构：条件分支 + 比较指令 + 归纳变量phi + 常量上界
-        auto * condBr = dynamic_cast<CondBranchInst *>(header->getTerminator());
-        auto * cmp = condBr ? dynamic_cast<ICmpInst *>(condBr->getCondition()) : nullptr;
-        auto * induction = cmp ? dynamic_cast<PhiInst *>(cmp->getLHS()) : nullptr;
-        auto * bound = cmp ? asConstInt(cmp->getRHS()) : nullptr;
-        if (!condBr || !cmp || cmp->getOp() != IRInstOperator::IRINST_OP_LT_I ||
-            !induction || induction->getParentBlock() != header || !bound ||
-            induction->getIncomingCount() != 2) {
+        CanonicalLoop loop;
+        if (!scev.matchCanonicalLoop(header, loop) || !loop.recurrence || !loop.hasConstInitialValue ||
+            loop.recurrence->getStep() != 1 || loop.tripCount <= 1) {
             continue;
         }
 
-        // 提取归纳变量的初始值和步进指令（步长必须为1）
-        BasicBlock * latch = nullptr;
-        ConstInteger * init = nullptr;
-        Instruction * inductionNext = nullptr;
-        for (int32_t index = 0; index < induction->getIncomingCount(); ++index) {
-            Value * incoming = induction->getIncomingValue(index);
-            auto * initConst = asConstInt(incoming);
-            if (initConst) {
-                init = initConst;
-                continue;
-            }
-
-            if (isAddConstStep(incoming, induction, 1)) {
-                latch = induction->getIncomingBlock(index);
-                inductionNext = dynamic_cast<Instruction *>(incoming);
-            }
-        }
-        if (!init || !latch || !inductionNext || bound->getVal() - init->getVal() <= 1) {
+        PhiInst * induction = loop.induction;
+        ICmpInst * cmp = loop.cmp;
+        Instruction * inductionNext = dynamic_cast<Instruction *>(loop.recurrence->getBackEdgeValue());
+        if (!induction || !cmp || !inductionNext) {
             continue;
         }
 
-        const auto * loopBody = loopInfo.getLoopBody(header);
+        const auto * loopBody = loopInfo.getLoopBody(loop.header);
         if (!loopBody || loopBody->empty()) {
             continue;
         }
@@ -410,13 +381,12 @@ bool collapseRepeatedInvariantCallLoop(Function * func, Module * mod)
         }
 
         // 折叠循环：将上界设为init+1，使循环只执行一次
-        cmp->setOperand(1, mod->newConstInt32(init->getVal() + 1));
+        cmp->setOperand(1, mod->newConstInt32(loop.initialIntValue + 1));
         return true;
     }
 
     return false;
 }
-
 bool sameRoot(const PointerRoot & lhs, const PointerRoot & rhs)
 {
     return lhs.kind == rhs.kind && lhs.value == rhs.value;
@@ -557,71 +527,16 @@ int32_t chooseTileSize(int32_t requestedTileSize, const CanonicalLoop & outer, c
     return requestedTileSize;
 }
 
-bool matchCanonicalLoop(BasicBlock * header, CanonicalLoop & loop)
+bool matchCanonicalLoop(ScalarEvolution & scev, BasicBlock * header, CanonicalLoop & loop)
 {
-    if (!header) {
+    if (!header || !scev.matchCanonicalLoop(header, loop) || !loop.recurrence || !loop.hasConstInitialValue ||
+        loop.initialIntValue != 0 || loop.recurrence->getStep() != 1) {
+        return false;
+    }
+    if (loop.tripCount < kMinTileTripCount) {
         return false;
     }
 
-    auto * condBr = dynamic_cast<CondBranchInst *>(header->getTerminator());
-    if (!condBr) {
-        return false;
-    }
-
-    auto * cmp = dynamic_cast<ICmpInst *>(condBr->getCondition());
-    if (!cmp || cmp->getParentBlock() != header || cmp->getOp() != IRInstOperator::IRINST_OP_LT_I) {
-        return false;
-    }
-
-    auto * induction = dynamic_cast<PhiInst *>(cmp->getLHS());
-    auto * bound = asConstInt(cmp->getRHS());
-    if (!induction || induction->getParentBlock() != header || !bound ||
-        !induction->getType()->isInt32Type() || induction->getIncomingCount() != 2) {
-        return false;
-    }
-
-    BasicBlock * preheader = nullptr;
-    BasicBlock * latch = nullptr;
-    BinaryInst * next = nullptr;
-    for (int32_t index = 0; index < induction->getIncomingCount(); ++index) {
-        BasicBlock * incomingBlock = induction->getIncomingBlock(index);
-        Value * incomingValue = induction->getIncomingValue(index);
-        auto * initConst = asConstInt(incomingValue);
-        if (initConst && initConst->getVal() == 0) {
-            preheader = incomingBlock;
-            continue;
-        }
-
-        if (isAddConstStep(incomingValue, induction, 1)) {
-            latch = incomingBlock;
-            next = dynamic_cast<BinaryInst *>(incomingValue);
-        }
-    }
-
-    if (!preheader || !latch || !next || !next->getParentBlock() ||
-        !hasSingleBranchTo(preheader, header) || !hasSingleBranchTo(latch, header)) {
-        return false;
-    }
-
-    if (header->getPredecessors().size() != 2 || !hasPred(header, preheader) || !hasPred(header, latch)) {
-        return false;
-    }
-
-    const int32_t tripCount = bound->getVal();
-    if (tripCount < kMinTileTripCount) {
-        return false;
-    }
-
-    loop.header = header;
-    loop.preheader = preheader;
-    loop.body = condBr->getTrueDest();
-    loop.latch = latch;
-    loop.exit = condBr->getFalseDest();
-    loop.induction = induction;
-    loop.next = next;
-    loop.cmp = cmp;
-    loop.branch = condBr;
-    loop.bound = bound;
     return loop.body != nullptr && loop.exit != nullptr;
 }
 
@@ -642,18 +557,7 @@ bool loopHasOnlyExit(const std::unordered_set<BasicBlock *> & loopBody, BasicBlo
     return true;
 }
 
-bool isGepStepFromPhi(Value * value, PhiInst * phi)
-{
-    auto * gep = dynamic_cast<GetElementPtrInst *>(value);
-    if (!gep || gep->getBasePointer() != phi || gep->isArrayDecayGEP()) {
-        return false;
-    }
-
-    auto * step = asConstInt(gep->getIndexOperand());
-    return step && step->getVal() == 1;
-}
-
-bool isAdjustableHeaderPhi(PhiInst * phi, const CanonicalLoop & loop)
+bool isAdjustableHeaderPhi(PhiInst * phi, const CanonicalLoop & loop, ScalarEvolution & scev)
 {
     if (!phi || phi->getParentBlock() != loop.header || phi->getIncomingCount() != 2) {
         return false;
@@ -662,27 +566,19 @@ bool isAdjustableHeaderPhi(PhiInst * phi, const CanonicalLoop & loop)
         return true;
     }
 
-    Value * initValue = nullptr;
-    Value * latchValue = nullptr;
-    for (int32_t index = 0; index < phi->getIncomingCount(); ++index) {
-        if (phi->getIncomingBlock(index) == loop.preheader) {
-            initValue = phi->getIncomingValue(index);
-        } else if (phi->getIncomingBlock(index) == loop.latch) {
-            latchValue = phi->getIncomingValue(index);
-        }
-    }
-
-    return initValue && latchValue && (isGepStepFromPhi(latchValue, phi) || isAddConstStep(latchValue, phi, 1));
+    const auto * recurrence = scev.getAddRecurrence(phi);
+    return recurrence && recurrence->getLoopHeader() == loop.header && recurrence->getPreheader() == loop.preheader &&
+           recurrence->getLatch() == loop.latch && recurrence->getStep() == 1;
 }
 
-bool headerPhisAreAdjustable(const CanonicalLoop & loop)
+bool headerPhisAreAdjustable(const CanonicalLoop & loop, ScalarEvolution & scev)
 {
     for (auto * inst : loop.header->getInstructions()) {
         auto * phi = dynamic_cast<PhiInst *>(inst);
         if (!phi) {
             break;
         }
-        if (!isAdjustableHeaderPhi(phi, loop)) {
+        if (!isAdjustableHeaderPhi(phi, loop, scev)) {
             return false;
         }
     }
@@ -690,52 +586,9 @@ bool headerPhisAreAdjustable(const CanonicalLoop & loop)
     return true;
 }
 
-bool valueDependsOnLoopIndex(Value * value,
-                             const CanonicalLoop & loop,
-                             std::unordered_set<Value *> & visiting)
+bool valueDependsOnLoopIndex(Value * value, const CanonicalLoop & loop, ScalarEvolution & scev)
 {
-    if (value == loop.induction) {
-        return true;
-    }
-    if (!value || !visiting.insert(value).second) {
-        return false;
-    }
-
-    if (auto * phi = dynamic_cast<PhiInst *>(value)) {
-        if (phi->getParentBlock() == loop.header && isAdjustableHeaderPhi(phi, loop)) {
-            return true;
-        }
-
-        for (int32_t index = 0; index < phi->getIncomingCount(); ++index) {
-            Value * incoming = phi->getIncomingValue(index);
-            if (isDerivedFrom(incoming, phi)) {
-                continue;
-            }
-            if (valueDependsOnLoopIndex(incoming, loop, visiting)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    auto * inst = dynamic_cast<Instruction *>(value);
-    if (!inst) {
-        return false;
-    }
-
-    for (auto * operand : inst->getOperandsValue()) {
-        if (valueDependsOnLoopIndex(operand, loop, visiting)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-bool valueDependsOnLoopIndex(Value * value, const CanonicalLoop & loop)
-{
-    std::unordered_set<Value *> visiting;
-    return valueDependsOnLoopIndex(value, loop, visiting);
+    return scev.dependsOnLoop(value, loop.header);
 }
 
 int32_t formalIndex(Function * func, Value * value)
@@ -814,6 +667,7 @@ bool rootsCannotAlias(Function * func, Module * mod, const PointerRoot & lhs, co
 
 bool isDependenceSafe(Function * func,
                       Module * mod,
+                      ScalarEvolution & scev,
                       const CanonicalLoop & outer,
                       const CanonicalLoop & inner,
                       const std::unordered_set<BasicBlock *> & innerBody)
@@ -836,8 +690,8 @@ bool isDependenceSafe(Function * func,
         }
     }
 
-    if (!onlyStore || !valueDependsOnLoopIndex(onlyStore->getPointerOperand(), outer) ||
-        !valueDependsOnLoopIndex(onlyStore->getPointerOperand(), inner)) {
+    if (!onlyStore || !valueDependsOnLoopIndex(onlyStore->getPointerOperand(), outer, scev) ||
+        !valueDependsOnLoopIndex(onlyStore->getPointerOperand(), inner, scev)) {
         return false;
     }
 
@@ -978,36 +832,34 @@ void rewritePhiIncomingBlock(BasicBlock * bb, BasicBlock * oldPred, BasicBlock *
 }
 
 Instruction * createTileInitialValue(Function * func,
+                                     ScalarEvolution & scev,
                                      const CanonicalLoop & loop,
                                      PhiInst * phi,
                                      Value * tileOffset)
 {
-    Value * initValue = nullptr;
-    Value * latchValue = nullptr;
-    for (int32_t index = 0; index < phi->getIncomingCount(); ++index) {
-        if (phi->getIncomingBlock(index) == loop.preheader) {
-            initValue = phi->getIncomingValue(index);
-        } else if (phi->getIncomingBlock(index) == loop.latch) {
-            latchValue = phi->getIncomingValue(index);
-        }
-    }
-
-    if (!initValue || !latchValue) {
+    const auto * recurrence = scev.getAddRecurrence(phi);
+    if (!recurrence || recurrence->getLoopHeader() != loop.header || recurrence->getPreheader() != loop.preheader ||
+        recurrence->getLatch() != loop.latch || recurrence->getStep() != 1 || !recurrence->getStartValue()) {
         return nullptr;
     }
 
-    if (isGepStepFromPhi(latchValue, phi)) {
-        return new GetElementPtrInst(func, initValue, tileOffset, phi->getType(), false);
+    if (recurrence->isPointerRecurrence()) {
+        return new GetElementPtrInst(func, recurrence->getStartValue(), tileOffset, phi->getType(), false);
     }
 
-    if (isAddConstStep(latchValue, phi, 1)) {
-        return new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, initValue, tileOffset, phi->getType());
+    if (recurrence->isIntegerRecurrence()) {
+        return new BinaryInst(func,
+                              IRInstOperator::IRINST_OP_ADD_I,
+                              recurrence->getStartValue(),
+                              tileOffset,
+                              phi->getType());
     }
 
     return nullptr;
 }
 
 bool retargetHeaderPhiInitialValues(Function * func,
+                                    ScalarEvolution & scev,
                                     const CanonicalLoop & loop,
                                     BasicBlock * newIncomingBlock,
                                     Value * tileOffset,
@@ -1031,7 +883,7 @@ bool retargetHeaderPhiInitialValues(Function * func,
             continue;
         }
 
-        Instruction * initInst = createTileInitialValue(func, loop, phi, tileOffset);
+        Instruction * initInst = createTileInitialValue(func, scev, loop, phi, tileOffset);
         if (!initInst) {
             return false;
         }
@@ -1062,8 +914,13 @@ bool LoopTiling::run()
     }
 
     // 优先尝试折叠重复不变调用循环（将多次相同调用折叠为一次）
-    if (collapseRepeatedInvariantCallLoop(func, mod)) {
-        return true;
+    {
+        DominatorTree domTree(func);
+        LoopInfo loopInfo(func, &domTree);
+        ScalarEvolution scev(func, &domTree, &loopInfo);
+        if (collapseRepeatedInvariantCallLoop(func, mod, loopInfo, scev)) {
+            return true;
+        }
     }
 
     bool changed = false;
@@ -1071,6 +928,7 @@ bool LoopTiling::run()
         bool localChanged = false;
         DominatorTree domTree(func);
         LoopInfo loopInfo(func, &domTree);
+        ScalarEvolution scev(func, &domTree, &loopInfo);
 
         std::vector<BasicBlock *> headers;
         for (auto * bb : func->getBlocks()) {
@@ -1086,7 +944,7 @@ bool LoopTiling::run()
                          });
 
         for (auto * header : headers) {
-            if (tryTileHeader(header, loopInfo)) {
+            if (tryTileHeader(header, loopInfo, scev)) {
                 localChanged = true;
                 changed = true;
                 break;
@@ -1101,10 +959,10 @@ bool LoopTiling::run()
     return changed;
 }
 
-bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo)
+bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo, ScalarEvolution & scev)
 {
     CanonicalLoop outer;
-    if (!matchCanonicalLoop(header, outer)) {
+    if (!matchCanonicalLoop(scev, header, outer)) {
         return false;
     }
 
@@ -1114,16 +972,16 @@ bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo)
     }
 
     CanonicalLoop inner;
-    if (!matchCanonicalLoop(outerBodyBranch->getTarget(), inner) || inner.preheader != outer.body ||
+    if (!matchCanonicalLoop(scev, outerBodyBranch->getTarget(), inner) || inner.preheader != outer.body ||
         inner.exit != outer.latch) {
         return false;
     }
 
     const auto * outerBody = loopInfo.getLoopBody(outer.header);
     const auto * innerBody = loopInfo.getLoopBody(inner.header);
-    if (!outerBody || !innerBody || !headerPhisAreAdjustable(outer) || !headerPhisAreAdjustable(inner) ||
+    if (!outerBody || !innerBody || !headerPhisAreAdjustable(outer, scev) || !headerPhisAreAdjustable(inner, scev) ||
         !loopHasOnlyExit(*outerBody, outer.exit) ||
-        !loopHasOnlyExit(*innerBody, inner.exit) || !isDependenceSafe(func, mod, outer, inner, *innerBody)) {
+        !loopHasOnlyExit(*innerBody, inner.exit) || !isDependenceSafe(func, mod, scev, outer, inner, *innerBody)) {
         return false;
     }
 
@@ -1234,8 +1092,8 @@ bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo)
     rowTile->addIncoming(rowNext, rowLatch);
 
     if (!rewriteTerminatorTarget(outer.preheader, outer.header, rowHeader) ||
-        !retargetHeaderPhiInitialValues(func, outer, colLimitMerge, rowTile, colLimitMerge, true) ||
-        !retargetHeaderPhiInitialValues(func, inner, inner.preheader, colTile, inner.preheader, false)) {
+        !retargetHeaderPhiInitialValues(func, scev, outer, colLimitMerge, rowTile, colLimitMerge, true) ||
+        !retargetHeaderPhiInitialValues(func, scev, inner, inner.preheader, colTile, inner.preheader, false)) {
         return false;
     }
 
