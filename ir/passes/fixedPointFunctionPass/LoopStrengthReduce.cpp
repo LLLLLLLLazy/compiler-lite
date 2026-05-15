@@ -6,7 +6,9 @@
 #include "LoopStrengthReduce.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <iterator>
+#include <limits>
 #include <unordered_set>
 #include <vector>
 
@@ -24,6 +26,8 @@
 #include "ScalarEvolution.h"
 #include "Type.h"
 #include "Value.h"
+#include "Types/ArrayType.h"
+#include "Types/PointerType.h"
 
 namespace {
 
@@ -117,6 +121,23 @@ void insertBeforeTerminator(BasicBlock * bb, Instruction * inst)
     insts.insert(insertPos, inst);
 }
 
+void insertBeforeInstruction(Instruction * before, Instruction * inst)
+{
+    if (!before || !inst || !before->getParentBlock()) {
+        return;
+    }
+
+    auto * bb = before->getParentBlock();
+    auto & insts = bb->getInstructions();
+    auto pos = std::find(insts.begin(), insts.end(), before);
+    if (pos == insts.end()) {
+        return;
+    }
+
+    inst->setParentBlock(bb);
+    insts.insert(pos, inst);
+}
+
 void insertPhiAtHeader(BasicBlock * header, PhiInst * phi)
 {
     if (!header || !phi) {
@@ -151,6 +172,162 @@ const ScalarEvolution::AddRecurrenceExpr * getLoopIndexRecurrence(GetElementPtrI
 
     return recurrence;
 }
+
+/// @brief 判断两个 SCEV 表达式是否表示同一 affine 索引值
+bool areEquivalentSCEVExpr(const ScalarEvolution::Expr * lhs, const ScalarEvolution::Expr * rhs)
+{
+    if (lhs == rhs) {
+        return true;
+    }
+    if (!lhs || !rhs || lhs->getKind() != rhs->getKind() || lhs->getType() != rhs->getType()) {
+        return false;
+    }
+
+    switch (lhs->getKind()) {
+    case ScalarEvolution::ExprKind::Constant:
+        return static_cast<const ScalarEvolution::ConstantExpr *>(lhs)->getIntValue() ==
+               static_cast<const ScalarEvolution::ConstantExpr *>(rhs)->getIntValue();
+    case ScalarEvolution::ExprKind::Unknown:
+        return static_cast<const ScalarEvolution::UnknownExpr *>(lhs)->getValue() ==
+               static_cast<const ScalarEvolution::UnknownExpr *>(rhs)->getValue();
+    case ScalarEvolution::ExprKind::Add:
+    case ScalarEvolution::ExprKind::Multiply: {
+        const auto * lhsBinary = static_cast<const ScalarEvolution::BinaryExpr *>(lhs);
+        const auto * rhsBinary = static_cast<const ScalarEvolution::BinaryExpr *>(rhs);
+        return (areEquivalentSCEVExpr(lhsBinary->getLHS(), rhsBinary->getLHS()) &&
+                areEquivalentSCEVExpr(lhsBinary->getRHS(), rhsBinary->getRHS())) ||
+               (areEquivalentSCEVExpr(lhsBinary->getLHS(), rhsBinary->getRHS()) &&
+                areEquivalentSCEVExpr(lhsBinary->getRHS(), rhsBinary->getLHS()));
+    }
+    case ScalarEvolution::ExprKind::AddRecurrence: {
+        const auto * lhsRecurrence = static_cast<const ScalarEvolution::AddRecurrenceExpr *>(lhs);
+        const auto * rhsRecurrence = static_cast<const ScalarEvolution::AddRecurrenceExpr *>(rhs);
+        return lhsRecurrence->getLoopHeader() == rhsRecurrence->getLoopHeader() &&
+               lhsRecurrence->getPreheader() == rhsRecurrence->getPreheader() &&
+               lhsRecurrence->getLatch() == rhsRecurrence->getLatch() &&
+               lhsRecurrence->getStep() == rhsRecurrence->getStep() &&
+               lhsRecurrence->getStepKind() == rhsRecurrence->getStepKind() &&
+               areEquivalentSCEVExpr(lhsRecurrence->getStartExpr(), rhsRecurrence->getStartExpr());
+    }
+    }
+
+    return false;
+}
+
+void collectAdditiveSCEVTerms(const ScalarEvolution::Expr * expr,
+                              std::vector<const ScalarEvolution::Expr *> & terms,
+                              int64_t & constantSum,
+                              bool & overflow)
+{
+    if (!expr || overflow) {
+        return;
+    }
+
+    switch (expr->getKind()) {
+    case ScalarEvolution::ExprKind::Constant: {
+        const int64_t updated = constantSum + static_cast<const ScalarEvolution::ConstantExpr *>(expr)->getIntValue();
+        if (updated < std::numeric_limits<int32_t>::min() || updated > std::numeric_limits<int32_t>::max()) {
+            overflow = true;
+            return;
+        }
+        constantSum = updated;
+        return;
+    }
+    case ScalarEvolution::ExprKind::Add: {
+        const auto * add = static_cast<const ScalarEvolution::BinaryExpr *>(expr);
+        collectAdditiveSCEVTerms(add->getLHS(), terms, constantSum, overflow);
+        collectAdditiveSCEVTerms(add->getRHS(), terms, constantSum, overflow);
+        return;
+    }
+    case ScalarEvolution::ExprKind::Unknown:
+    case ScalarEvolution::ExprKind::Multiply:
+    case ScalarEvolution::ExprKind::AddRecurrence:
+        terms.push_back(expr);
+        return;
+    }
+}
+
+bool tryComputeConstantAdditiveOffset(const ScalarEvolution::Expr * candidateExpr,
+                                      const ScalarEvolution::Expr * seedExpr,
+                                      int32_t & offset)
+{
+    std::vector<const ScalarEvolution::Expr *> candidateTerms;
+    std::vector<const ScalarEvolution::Expr *> seedTerms;
+    int64_t candidateConstant = 0;
+    int64_t seedConstant = 0;
+    bool overflow = false;
+    collectAdditiveSCEVTerms(candidateExpr, candidateTerms, candidateConstant, overflow);
+    collectAdditiveSCEVTerms(seedExpr, seedTerms, seedConstant, overflow);
+    if (overflow || candidateTerms.size() != seedTerms.size()) {
+        return false;
+    }
+
+    std::vector<bool> matched(seedTerms.size(), false);
+    for (const auto * candidateTerm : candidateTerms) {
+        bool found = false;
+        for (std::size_t index = 0; index < seedTerms.size(); ++index) {
+            if (matched[index] || !areEquivalentSCEVExpr(candidateTerm, seedTerms[index])) {
+                continue;
+            }
+
+            matched[index] = true;
+            found = true;
+            break;
+        }
+
+        if (!found) {
+            return false;
+        }
+    }
+
+    const int64_t delta = candidateConstant - seedConstant;
+    if (delta < std::numeric_limits<int32_t>::min() || delta > std::numeric_limits<int32_t>::max()) {
+        return false;
+    }
+
+    offset = static_cast<int32_t>(delta);
+    return true;
+}
+
+bool tryComputePointerOffset(const ScalarEvolution::Expr * candidateIndexExpr,
+                             const ScalarEvolution::Expr * seedIndexExpr,
+                             const ScalarEvolution::AddRecurrenceExpr * seedRecurrence,
+                             int32_t & offset)
+{
+    offset = 0;
+    if (!candidateIndexExpr || !seedIndexExpr || !seedRecurrence || !seedRecurrence->isIntegerRecurrence()) {
+        return false;
+    }
+
+    if (areEquivalentSCEVExpr(candidateIndexExpr, seedIndexExpr)) {
+        return true;
+    }
+
+    const auto * candidateRecurrence = dynamic_cast<const ScalarEvolution::AddRecurrenceExpr *>(candidateIndexExpr);
+    if (candidateRecurrence && candidateRecurrence->isIntegerRecurrence() &&
+        candidateRecurrence->getLoopHeader() == seedRecurrence->getLoopHeader() &&
+        candidateRecurrence->getPreheader() == seedRecurrence->getPreheader() &&
+        candidateRecurrence->getLatch() == seedRecurrence->getLatch() &&
+        candidateRecurrence->getStep() == seedRecurrence->getStep() &&
+        candidateRecurrence->getStepKind() == seedRecurrence->getStepKind()) {
+        return tryComputeConstantAdditiveOffset(candidateRecurrence->getStartExpr(),
+                                                seedRecurrence->getStartExpr(),
+                                                offset);
+    }
+
+    return tryComputeConstantAdditiveOffset(candidateIndexExpr, seedIndexExpr, offset);
+}
+
+bool canRewriteConstantOffsetGEP(Type * pointerType)
+{
+    auto * ptrType = dynamic_cast<const PointerType *>(pointerType);
+    return ptrType != nullptr && dynamic_cast<const ArrayType *>(ptrType->getPointeeType()) == nullptr;
+}
+
+struct ReducedGEPCandidate {
+    GetElementPtrInst * gep = nullptr;
+    int32_t offset = 0;
+};
 
 Value * materializeSCEVExpr(const ScalarEvolution::Expr * expr,
                            Function * func,
@@ -308,9 +485,13 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
     Value * base = seed->getBasePointer();
     Type * pointerType = seed->getType();
     const bool decayArray = seed->isArrayDecayGEP();
-    Value * seedIndex = seed->getIndexOperand();
+    const bool allowConstantOffsetRewrite = canRewriteConstantOffsetGEP(pointerType);
+    const ScalarEvolution::Expr * seedIndexExpr = scev.getSCEV(seed->getIndexOperand());
+    if (!seedIndexExpr) {
+        return false;
+    }
 
-    std::vector<GetElementPtrInst *> candidates;
+    std::vector<ReducedGEPCandidate> candidates;
     for (auto * bb : func->getBlocks()) {
         if (loopBody.find(bb) == loopBody.end()) {
             continue;
@@ -322,10 +503,16 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
                 continue;
             }
 
-            if (gep->getBasePointer() == base && gep->getIndexOperand() == seedIndex &&
-                gep->getType() == pointerType && gep->isArrayDecayGEP() == decayArray &&
-                allUsesStayInLoop(gep, loopBody)) {
-                candidates.push_back(gep);
+            if (gep->getBasePointer() != base || gep->getType() != pointerType ||
+                gep->isArrayDecayGEP() != decayArray || !allUsesStayInLoop(gep, loopBody)) {
+                continue;
+            }
+
+            const ScalarEvolution::Expr * candidateIndexExpr = scev.getSCEV(gep->getIndexOperand());
+            int32_t offset = 0;
+            if (tryComputePointerOffset(candidateIndexExpr, seedIndexExpr, seedRecurrence, offset) &&
+                (offset == 0 || allowConstantOffsetRewrite)) {
+                candidates.push_back({gep, offset});
             }
         }
     }
@@ -336,7 +523,7 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
 
     auto * initPtr = new GetElementPtrInst(func, base, initValue, pointerType, decayArray);
     auto * ptrPhi = new PhiInst(func, pointerType);
-    auto * stepValue = mod->newConstInteger(seedIndex->getType(), seedRecurrence->getStep());
+    auto * stepValue = mod->newConstInteger(seed->getIndexOperand()->getType(), seedRecurrence->getStep());
     auto * nextPtr = new GetElementPtrInst(func, ptrPhi, stepValue, pointerType, false);
 
     insertBeforeTerminator(preheader, initPtr);
@@ -346,10 +533,18 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
     ptrPhi->addIncoming(initPtr, preheader);
     ptrPhi->addIncoming(nextPtr, latch);
 
-    for (auto * gep : candidates) {
-        gep->replaceAllUseWith(ptrPhi);
-        gep->clearOperands();
-        gep->setDead(true);
+    for (const auto & candidate : candidates) {
+        Value * replacement = ptrPhi;
+        if (candidate.offset != 0) {
+            auto * offsetValue = mod->newConstInteger(candidate.gep->getIndexOperand()->getType(), candidate.offset);
+            auto * offsetPtr = new GetElementPtrInst(func, ptrPhi, offsetValue, candidate.gep->getType(), false);
+            insertBeforeInstruction(candidate.gep, offsetPtr);
+            replacement = offsetPtr;
+        }
+
+        candidate.gep->replaceAllUseWith(replacement);
+        candidate.gep->clearOperands();
+        candidate.gep->setDead(true);
     }
 
     return true;

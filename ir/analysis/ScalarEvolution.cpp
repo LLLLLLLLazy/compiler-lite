@@ -22,6 +22,103 @@
 #include "Type.h"
 #include "Value.h"
 
+namespace {
+
+using CompareKind = ScalarEvolution::CompareKind;
+
+CompareKind getCompareKindFromOp(IRInstOperator op)
+{
+    switch (op) {
+    case IRInstOperator::IRINST_OP_EQ_I:
+        return CompareKind::Equal;
+    case IRInstOperator::IRINST_OP_NE_I:
+        return CompareKind::NotEqual;
+    case IRInstOperator::IRINST_OP_LT_I:
+        return CompareKind::LessThan;
+    case IRInstOperator::IRINST_OP_LE_I:
+        return CompareKind::LessEqual;
+    case IRInstOperator::IRINST_OP_GT_I:
+        return CompareKind::GreaterThan;
+    case IRInstOperator::IRINST_OP_GE_I:
+        return CompareKind::GreaterEqual;
+    default:
+        return CompareKind::Unknown;
+    }
+}
+
+CompareKind swapCompareKind(CompareKind kind)
+{
+    switch (kind) {
+    case CompareKind::Equal:
+        return CompareKind::Equal;
+    case CompareKind::NotEqual:
+        return CompareKind::NotEqual;
+    case CompareKind::LessThan:
+        return CompareKind::GreaterThan;
+    case CompareKind::LessEqual:
+        return CompareKind::GreaterEqual;
+    case CompareKind::GreaterThan:
+        return CompareKind::LessThan;
+    case CompareKind::GreaterEqual:
+        return CompareKind::LessEqual;
+    case CompareKind::Unknown:
+        return CompareKind::Unknown;
+    }
+
+    return CompareKind::Unknown;
+}
+
+CompareKind invertCompareKind(CompareKind kind)
+{
+    switch (kind) {
+    case CompareKind::Equal:
+        return CompareKind::NotEqual;
+    case CompareKind::NotEqual:
+        return CompareKind::Equal;
+    case CompareKind::LessThan:
+        return CompareKind::GreaterEqual;
+    case CompareKind::LessEqual:
+        return CompareKind::GreaterThan;
+    case CompareKind::GreaterThan:
+        return CompareKind::LessEqual;
+    case CompareKind::GreaterEqual:
+        return CompareKind::LessThan;
+    case CompareKind::Unknown:
+        return CompareKind::Unknown;
+    }
+
+    return CompareKind::Unknown;
+}
+
+bool evaluateCompare(CompareKind kind, int64_t lhs, int64_t rhs)
+{
+    switch (kind) {
+    case CompareKind::Equal:
+        return lhs == rhs;
+    case CompareKind::NotEqual:
+        return lhs != rhs;
+    case CompareKind::LessThan:
+        return lhs < rhs;
+    case CompareKind::LessEqual:
+        return lhs <= rhs;
+    case CompareKind::GreaterThan:
+        return lhs > rhs;
+    case CompareKind::GreaterEqual:
+        return lhs >= rhs;
+    case CompareKind::Unknown:
+        return false;
+    }
+
+    return false;
+}
+
+int64_t ceilDivPositive(int64_t numerator, int64_t denominator)
+{
+    return (numerator + denominator - 1) / denominator;
+}
+
+} // namespace
+
 ScalarEvolution::Expr::Expr(ExprKind kind, Type * type) : kind(kind), type(type)
 {}
 
@@ -83,6 +180,8 @@ const ScalarEvolution::Expr * ScalarEvolution::getSCEV(Value * value)
         return cached->second;
     }
 
+    const Expr * provisional = createUnknown(value);
+    exprCache[value] = provisional;
     const Expr * expr = analyzeValue(value);
     exprCache[value] = expr;
     return expr;
@@ -102,7 +201,8 @@ bool ScalarEvolution::matchCanonicalLoop(BasicBlock * header, CanonicalLoop & lo
 {
     loop = {};
     LoopInfo * currentLoopInfo = ensureLoopInfo();
-    if (!header || !currentLoopInfo || !currentLoopInfo->isLoopHeader(header)) {
+    const auto * loopBody = currentLoopInfo ? currentLoopInfo->getLoopBody(header) : nullptr;
+    if (!header || !currentLoopInfo || !loopBody || !currentLoopInfo->isLoopHeader(header)) {
         return false;
     }
 
@@ -112,19 +212,40 @@ bool ScalarEvolution::matchCanonicalLoop(BasicBlock * header, CanonicalLoop & lo
     }
 
     auto * cmp = dynamic_cast<ICmpInst *>(condBr->getCondition());
-    if (!cmp || cmp->getParentBlock() != header || cmp->getOp() != IRInstOperator::IRINST_OP_LT_I) {
+    if (!cmp || cmp->getParentBlock() != header) {
         return false;
     }
 
-    auto * induction = dynamic_cast<PhiInst *>(cmp->getLHS());
-    auto * bound = dynamic_cast<ConstInteger *>(cmp->getRHS());
-    if (!induction || induction->getParentBlock() != header || !bound || !induction->getType()->isIntegerType()) {
+    PhiInst * induction = nullptr;
+    Value * boundValue = nullptr;
+    CompareKind compareKind = CompareKind::Unknown;
+    if (!normalizeCanonicalCompare(cmp, induction, boundValue, compareKind) || !induction || !boundValue ||
+        induction->getParentBlock() != header || !induction->getType()->isIntegerType()) {
+        return false;
+    }
+
+    BasicBlock * body = nullptr;
+    BasicBlock * exit = nullptr;
+    CompareKind loopCompareKind = compareKind;
+    const bool trueInLoop = loopBody->find(condBr->getTrueDest()) != loopBody->end();
+    const bool falseInLoop = loopBody->find(condBr->getFalseDest()) != loopBody->end();
+    if (trueInLoop == falseInLoop) {
+        return false;
+    }
+    if (trueInLoop) {
+        body = condBr->getTrueDest();
+        exit = condBr->getFalseDest();
+    } else {
+        body = condBr->getFalseDest();
+        exit = condBr->getTrueDest();
+        loopCompareKind = invertCompareKind(loopCompareKind);
+    }
+    if (loopCompareKind == CompareKind::Unknown || loopCompareKind == CompareKind::Equal) {
         return false;
     }
 
     const AddRecurrenceExpr * recurrence = getAddRecurrence(induction);
-    if (!recurrence || !recurrence->isIntegerRecurrence() || recurrence->getLoopHeader() != header ||
-        recurrence->getStep() <= 0) {
+    if (!recurrence || !recurrence->isIntegerRecurrence() || recurrence->getLoopHeader() != header) {
         return false;
     }
 
@@ -133,23 +254,40 @@ bool ScalarEvolution::matchCanonicalLoop(BasicBlock * header, CanonicalLoop & lo
         return false;
     }
 
+    const Expr * boundExpr = getSCEV(boundValue);
+    if (!boundExpr || !isLoopInvariantExpr(boundExpr, header)) {
+        return false;
+    }
+
     int32_t initialIntValue = 0;
     const bool hasConstInitialValue = tryEvaluateConstantInt(recurrence->getStartExpr(), initialIntValue);
+    int32_t boundIntValue = 0;
+    const bool hasConstBoundValue = tryEvaluateConstantInt(boundExpr, boundIntValue);
+    int32_t tripCount = 0;
+    const bool hasConstTripCount =
+        hasConstInitialValue && hasConstBoundValue &&
+        computeTripCount(loopCompareKind, initialIntValue, boundIntValue, recurrence->getStep(), tripCount);
 
     loop.header = header;
     loop.preheader = recurrence->getPreheader();
-    loop.body = condBr->getTrueDest();
+    loop.body = body;
     loop.latch = recurrence->getLatch();
-    loop.exit = condBr->getFalseDest();
+    loop.exit = exit;
     loop.induction = induction;
     loop.recurrence = recurrence;
     loop.cmp = cmp;
     loop.branch = condBr;
-    loop.bound = bound;
+    loop.compareKind = loopCompareKind;
+    loop.bound = dynamic_cast<ConstInteger *>(boundValue);
+    loop.boundValue = boundValue;
+    loop.boundExpr = boundExpr;
+    loop.boundIntValue = boundIntValue;
+    loop.hasConstBoundValue = hasConstBoundValue;
     loop.initialValue = recurrence->getStartValue();
     loop.initialIntValue = initialIntValue;
     loop.hasConstInitialValue = hasConstInitialValue;
-    loop.tripCount = hasConstInitialValue ? computeTripCount(initialIntValue, bound->getVal(), recurrence->getStep()) : 0;
+    loop.tripCount = hasConstTripCount ? tripCount : 0;
+    loop.hasConstTripCount = hasConstTripCount;
     return loop.body != nullptr && loop.exit != nullptr;
 }
 
@@ -451,7 +589,7 @@ bool ScalarEvolution::matchAddRecurrence(PhiInst * phi,
                                          int32_t & step,
                                          AddRecurrenceExpr::StepKind & stepKind,
                                          BasicBlock *& preheader,
-                                         BasicBlock *& latch) const
+                                         BasicBlock *& latch)
 {
     startValue = nullptr;
     backEdgeValue = nullptr;
@@ -517,10 +655,46 @@ bool ScalarEvolution::findUniqueLoopEntryAndLatch(BasicBlock * loopHeader,
     return preheader != nullptr && latch != nullptr;
 }
 
+bool ScalarEvolution::normalizeCanonicalCompare(ICmpInst * cmp,
+                                                PhiInst *& induction,
+                                                Value *& boundValue,
+                                                CompareKind & compareKind) const
+{
+    induction = nullptr;
+    boundValue = nullptr;
+    compareKind = CompareKind::Unknown;
+    if (!cmp) {
+        return false;
+    }
+
+    const CompareKind baseKind = getCompareKindFromOp(cmp->getOp());
+    if (baseKind == CompareKind::Unknown) {
+        return false;
+    }
+
+    auto * lhsPhi = dynamic_cast<PhiInst *>(cmp->getLHS());
+    auto * rhsPhi = dynamic_cast<PhiInst *>(cmp->getRHS());
+    if ((lhsPhi == nullptr) == (rhsPhi == nullptr)) {
+        return false;
+    }
+
+    if (lhsPhi) {
+        induction = lhsPhi;
+        boundValue = cmp->getRHS();
+        compareKind = baseKind;
+        return true;
+    }
+
+    induction = rhsPhi;
+    boundValue = cmp->getLHS();
+    compareKind = swapCompareKind(baseKind);
+    return compareKind != CompareKind::Unknown;
+}
+
 bool ScalarEvolution::matchConstStep(Value * value,
                                      PhiInst * phi,
                                      int32_t & step,
-                                     AddRecurrenceExpr::StepKind & stepKind) const
+                                     AddRecurrenceExpr::StepKind & stepKind)
 {
     step = 0;
     stepKind = AddRecurrenceExpr::StepKind::Integer;
@@ -532,30 +706,26 @@ bool ScalarEvolution::matchConstStep(Value * value,
     if (binary && phi->getType()->isIntegerType()) {
         if (binary->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
             if (binary->getLHS() == phi) {
-                auto * rhs = dynamic_cast<ConstInteger *>(binary->getRHS());
-                if (!rhs) {
+                if (!tryEvaluateConstantInt(getSCEV(binary->getRHS()), step)) {
                     return false;
                 }
-                step = rhs->getVal();
                 return step != 0;
             }
 
             if (binary->getRHS() == phi) {
-                auto * lhs = dynamic_cast<ConstInteger *>(binary->getLHS());
-                if (!lhs) {
+                if (!tryEvaluateConstantInt(getSCEV(binary->getLHS()), step)) {
                     return false;
                 }
-                step = lhs->getVal();
                 return step != 0;
             }
         }
 
         if (binary->getOp() == IRInstOperator::IRINST_OP_SUB_I && binary->getLHS() == phi) {
-            auto * rhs = dynamic_cast<ConstInteger *>(binary->getRHS());
-            if (!rhs) {
+            int32_t delta = 0;
+            if (!tryEvaluateConstantInt(getSCEV(binary->getRHS()), delta)) {
                 return false;
             }
-            step = -rhs->getVal();
+            step = -delta;
             return step != 0;
         }
     }
@@ -565,12 +735,10 @@ bool ScalarEvolution::matchConstStep(Value * value,
         return false;
     }
 
-    auto * index = dynamic_cast<ConstInteger *>(gep->getIndexOperand());
-    if (!index) {
+    if (!tryEvaluateConstantInt(getSCEV(gep->getIndexOperand()), step)) {
         return false;
     }
 
-    step = index->getVal();
     stepKind = AddRecurrenceExpr::StepKind::Pointer;
     return step != 0;
 }
@@ -774,16 +942,73 @@ bool ScalarEvolution::hasSingleBranchTo(BasicBlock * bb, BasicBlock * target) co
     return branch && branch->getTarget() == target && bb->getSuccessors().size() == 1;
 }
 
-int32_t ScalarEvolution::computeTripCount(int32_t initialValue, int32_t bound, int32_t step) const
+bool ScalarEvolution::computeTripCount(CompareKind compareKind,
+                                       int32_t initialValue,
+                                       int32_t bound,
+                                       int32_t step,
+                                       int32_t & tripCount) const
 {
-    if (step <= 0) {
-        return 0;
+    tripCount = 0;
+    if (compareKind == CompareKind::Unknown || compareKind == CompareKind::Equal || step == 0) {
+        return false;
     }
 
-    const int32_t delta = bound - initialValue;
-    if (delta <= 0) {
-        return 0;
+    const int64_t start = initialValue;
+    const int64_t limit = bound;
+    const int64_t stride = step;
+    if (!evaluateCompare(compareKind, start, limit)) {
+        return true;
     }
 
-    return (delta + step - 1) / step;
+    int64_t iterations = 0;
+    switch (compareKind) {
+    case CompareKind::LessThan:
+        if (stride <= 0) {
+            return false;
+        }
+        iterations = ceilDivPositive(limit - start, stride);
+        break;
+    case CompareKind::LessEqual:
+        if (stride <= 0) {
+            return false;
+        }
+        iterations = ((limit - start) / stride) + 1;
+        break;
+    case CompareKind::GreaterThan:
+        if (stride >= 0) {
+            return false;
+        }
+        iterations = ceilDivPositive(start - limit, -stride);
+        break;
+    case CompareKind::GreaterEqual:
+        if (stride >= 0) {
+            return false;
+        }
+        iterations = ((start - limit) / (-stride)) + 1;
+        break;
+    case CompareKind::NotEqual: {
+        const int64_t delta = limit - start;
+        if ((delta > 0 && stride <= 0) || (delta < 0 && stride >= 0)) {
+            return false;
+        }
+
+        const int64_t absDelta = delta >= 0 ? delta : -delta;
+        const int64_t absStride = stride >= 0 ? stride : -stride;
+        if (absDelta % absStride != 0) {
+            return false;
+        }
+        iterations = absDelta / absStride;
+        break;
+    }
+    case CompareKind::Equal:
+    case CompareKind::Unknown:
+        return false;
+    }
+
+    if (iterations < 0 || iterations > std::numeric_limits<int32_t>::max()) {
+        return false;
+    }
+
+    tripCount = static_cast<int32_t>(iterations);
+    return true;
 }
