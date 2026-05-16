@@ -25,7 +25,6 @@
 #include "functionPass/PhiLowering.h"
 #include "functionPass/PureCallCSE.h"
 #include "functionPass/TailRecursionElim.h"
-#include "functionPass/LoopRotate.h"
 #include "modulePass/GlobalToLocal.h"
 #include "modulePass/InterproceduralConstProp.h"
 #include "modulePass/SmallFunctionInline.h"
@@ -230,10 +229,6 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return pass.run();
     });
 
-    registerLateFunctionPass([this](Function * func) {
-        LoopRotate pass(func, module);
-        return pass.run();
-    });
 }
 
 /// @brief 注册后端前置的 phi 降级流水线

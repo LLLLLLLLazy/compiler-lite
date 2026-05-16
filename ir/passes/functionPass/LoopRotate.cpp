@@ -23,6 +23,32 @@
 #include "ScalarEvolution.h"
 #include "Value.h"
 
+namespace {
+
+void eraseInstructionIfUnused(Instruction * inst)
+{
+    if (!inst || !inst->getUseList().empty()) {
+        return;
+    }
+
+    auto * bb = inst->getParentBlock();
+    if (!bb) {
+        return;
+    }
+
+    auto & insts = bb->getInstructions();
+    auto pos = std::find(insts.begin(), insts.end(), inst);
+    if (pos == insts.end()) {
+        return;
+    }
+
+    insts.erase(pos);
+    inst->clearOperands();
+    delete inst;
+}
+
+} // namespace
+
 LoopRotate::LoopRotate(Function * _func, Module * /*_mod*/) : func(_func)
 {}
 
@@ -82,6 +108,12 @@ bool LoopRotate::tryRotateHeader(BasicBlock * header, LoopInfo & loopInfo, Scala
 
     const auto * loopBody = loopInfo.getLoopBody(header);
     if (!loopBody || loopBody->empty()) {
+        return false;
+    }
+
+    // Multi-block loop rotation needs stronger late cleanup/cost modeling; in the
+    // current pipeline it regresses hot kernels like conv2d more often than it helps.
+    if (loop.body != loop.latch) {
         return false;
     }
 
@@ -181,6 +213,7 @@ bool LoopRotate::tryRotateHeader(BasicBlock * header, LoopInfo & loopInfo, Scala
     if (!replaceCondBranchWithBranch(header, loop.body)) {
         return false;
     }
+    eraseInstructionIfUnused(loop.cmp);
     header->removeSuccessor(loop.exit);
     loop.exit->removePredecessor(header);
 
