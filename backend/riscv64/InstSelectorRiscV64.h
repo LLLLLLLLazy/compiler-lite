@@ -232,7 +232,12 @@ private:
 	void releaseOperand(OperandReg & operand);
 
 	/// @brief 获取float操作数所在浮点寄存器，必要时借用临时FPR加载
-	FloatOperandReg loadFloatOperand(Value * val, Instruction * inst, int excludeReg = -1, int preferredReg = -1);
+	/// @param allowLivePreferredReg 若 preferredReg 是当前指令定义的目标寄存器，则允许直接写入
+	FloatOperandReg loadFloatOperand(Value * val,
+	                                 Instruction * inst,
+	                                 int excludeReg = -1,
+	                                 int preferredReg = -1,
+	                                 bool allowLivePreferredReg = false);
 
 	/// @brief 释放通过loadFloatOperand借用的临时浮点寄存器
 	void releaseFloatOperand(FloatOperandReg & operand);

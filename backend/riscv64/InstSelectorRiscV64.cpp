@@ -1996,13 +1996,21 @@ void InstSelectorRiscV64::translate_copy(Instruction * inst)
 
 	Value * dst = copy->getDst() != nullptr ? copy->getDst() : static_cast<Value *>(copy);
 	if (isFloatValue(dst) || isFloatValue(copy->getSource())) {
-		FloatOperandReg src = loadFloatOperand(copy->getSource(), inst);
+		// 浮点copy：以目标寄存器为preferredReg，尝试直接加载到目标位置以消除冗余move
+		RegAllocInfo dstInfo = getAllocInfo(dst, inst);
+		const int preferredReg = dstInfo.hasFloatReg() ? dstInfo.regId : -1;
+		// allowLivePreferredReg=true：copy的src与dst共享同一指令位置，
+		// preferredReg是当前指令定义的目标寄存器，允许直接写入
+		FloatOperandReg src = loadFloatOperand(copy->getSource(), inst, -1, preferredReg, true);
 		storeFloatResult(dst, src.reg, inst);
 		releaseFloatOperand(src);
 		return;
 	}
 
-	OperandReg src = loadOperand(copy->getSource(), inst);
+	// 整数copy：以目标寄存器为preferredReg，尝试直接加载到目标位置以消除冗余move
+	RegAllocInfo dstInfo = getAllocInfo(dst, inst);
+	const int preferredReg = dstInfo.hasReg() ? dstInfo.regId : -1;
+	OperandReg src = loadOperand(copy->getSource(), inst, -1, preferredReg);
 	storeResult(dst, src.reg, inst);
 	releaseOperand(src);
 }
@@ -2379,16 +2387,23 @@ InstSelectorRiscV64::loadOperand(Value * val, Instruction * inst, int excludeReg
 }
 
 InstSelectorRiscV64::FloatOperandReg
-InstSelectorRiscV64::loadFloatOperand(Value * val, Instruction * inst, int excludeReg, int preferredReg)
+InstSelectorRiscV64::loadFloatOperand(Value * val,
+	                                  Instruction * inst,
+	                                  int excludeReg,
+	                                  int preferredReg,
+	                                  bool allowLivePreferredReg)
 {
 	RegAllocInfo info = getAllocInfo(val, inst);
 	if (info.hasFloatReg()) {
 		return FloatOperandReg(info.regId, false);
 	}
 
+	// 若preferredReg可用（未被排除、未被借用），则优先使用preferredReg；
+	// allowLivePreferredReg为true时跳过活跃性检查，允许使用当前指令定义的目标寄存器
 	int reg = -1;
 	bool temp = false;
-	if (preferredReg >= 0 && preferredReg != excludeReg && !isFloatRegLiveAt(preferredReg, inst) &&
+	if (preferredReg >= 0 && preferredReg != excludeReg &&
+	    (allowLivePreferredReg || !isFloatRegLiveAt(preferredReg, inst)) &&
 	    borrowedFloatTemps.find(preferredReg) == borrowedFloatTemps.end()) {
 		reg = preferredReg;
 	} else {

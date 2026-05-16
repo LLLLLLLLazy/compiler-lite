@@ -19,10 +19,12 @@ public:
 	/// @param enableCalleeSavedFPR 是否启用 callee-saved FPR
 	/// @param enableCoalesce 是否启用寄存器合并
 	/// @param enableSplit 是否启用活跃区间分裂
+	/// @param raStatsJsonPath 若非空，则输出寄存器分配JSON统计到该路径
 	explicit CodeGeneratorRiscV64(Module * module,
 	                             bool enableCalleeSavedFPR = false,
 	                             bool enableCoalesce = false,
-	                             bool enableSplit = false);
+	                             bool enableSplit = false,
+	                             std::string raStatsJsonPath = "");
 	~CodeGeneratorRiscV64() override = default;
 	using CodeGenerator::run;
 
@@ -68,6 +70,20 @@ private:
 	/// @brief 输出内置循环并行运行时汇编
 	void emitMtRuntime();
 
+	/// @brief 将本模块的寄存器分配评测指标写为JSON
+	/// @return 写入是否成功；若未配置输出路径则直接返回true
+	bool writeRAStatsJson() const;
+
+	/// @brief 单个函数的RA统计报告，用于JSON输出
+	struct FunctionRAReport {
+		std::string functionName;              ///< 函数名
+		RegAllocStats regAllocStats;           ///< 寄存器分配统计（分配区间数、溢出数等）
+		int frameSize = 0;                     ///< 栈帧大小（字节）
+		std::vector<int> usedCalleeSavedGPRs;  ///< 实际使用的callee-saved GPR编号
+		std::vector<int> usedCalleeSavedFPRs;  ///< 实际使用的callee-saved FPR编号
+		RiscV64CodegenStats codegenStats;      ///< 代码生成统计（指令数、栈访问数等）
+	};
+
 	/// @brief Greedy寄存器分配器实例
 	GreedyRegAllocator greedyAllocator;
 
@@ -76,4 +92,15 @@ private:
 
 	/// @brief 当前函数需要保存的callee-saved FPR编号
 	std::vector<int> currentSavedFPRs;
+
+	/// @brief 当前代码生成器启用的RA配置
+	bool enableCalleeSavedFPR_ = false;  ///< 是否启用callee-saved FPR分配
+	bool enableCoalesce_ = false;        ///< 是否启用寄存器合并（coalescing）
+	bool enableSplit_ = false;           ///< 是否启用活跃区间分裂
+
+	/// @brief 机器可读RA统计输出路径，为空则不输出
+	std::string raStatsJsonPath_;
+
+	/// @brief 模块内所有函数的RA评测记录，在run()结束时统一写为JSON
+	std::vector<FunctionRAReport> raReports_;
 };

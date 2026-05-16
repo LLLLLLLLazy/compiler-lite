@@ -218,6 +218,15 @@ public:
 	/// @brief 获取被消除的 copy 指令集合（供指令选择阶段跳过）
 	const std::unordered_set<Instruction *> & getEliminatedCopies() const;
 
+	/// @brief 获取 coalescing 后某个 Value 的最终代表；未合并时返回自身
+	/// @param value 待查询的Value
+	/// @return 沿representative映射链找到的最终代表值
+	Value * getCoalescedRepresentative(Value * value) const;
+
+	/// @brief 将代表值的分配信息回填到所有被合并的别名 Value
+	/// @note 在栈分配完成后调用，确保coalesced alias与代表值共享同一位置
+	void refreshCoalescedAliasAllocations();
+
 private:
 	/// @brief 执行Greedy分配主循环
 	/// @param intervals 按起点排序的活跃区间列表
