@@ -8,6 +8,7 @@
 #include "Module.h"
 #include "fixedPointFunctionPass/CFGSimplify.h"
 #include "fixedPointFunctionPass/ConstProp.h"
+#include "fixedPointFunctionPass/CanonicalizeLoop.h"
 #include "fixedPointFunctionPass/DeadInstElim.h"
 #include "fixedPointFunctionPass/GVN.h"
 #include "fixedPointFunctionPass/InstCombine.h"
@@ -24,6 +25,7 @@
 #include "functionPass/PhiLowering.h"
 #include "functionPass/PureCallCSE.h"
 #include "functionPass/TailRecursionElim.h"
+#include "functionPass/LoopRotate.h"
 #include "modulePass/GlobalToLocal.h"
 #include "modulePass/InterproceduralConstProp.h"
 #include "modulePass/SmallFunctionInline.h"
@@ -37,6 +39,8 @@ bool isOptimizableFunction(Function * func)
     return func != nullptr && !func->isBuiltin() && !func->getBlocks().empty();
 }
 
+/// @brief 第二轮 SmallFunctionInline 后的清理流水线，主要针对内联展开后产生的冗余代码进行清理
+/// @param currentModule 
 bool runPostInlineCleanupPipeline(Module * currentModule)
 {
     if (currentModule == nullptr) {
@@ -86,11 +90,6 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return pass.run();
     });
 
-    registerFunctionPass([this](Function * func) {
-        PureCallCSE pass(func, module);
-        return pass.run();
-    });
-
     registerModulePass([](Module * currentModule) {
         SmallFunctionInline pass(currentModule);
         return pass.run();
@@ -98,6 +97,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
 
     registerModulePass([](Module * currentModule) {
         GlobalToLocal pass(currentModule);
+        return pass.run();
+    });
+
+    registerFunctionPass([this](Function * func) {
+        PureCallCSE pass(func, module);
         return pass.run();
     });
 
@@ -143,6 +147,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
 
     registerFixedPointFunctionPass([this](Function * func) {
         LICM pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        CanonicalizeLoop pass(func, module);
         return pass.run();
     });
 
@@ -220,6 +229,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         CFGSimplify pass(func);
         return pass.run();
     });
+
+    registerLateFunctionPass([this](Function * func) {
+        LoopRotate pass(func, module);
+        return pass.run();
+    });
 }
 
 /// @brief 注册后端前置的 phi 降级流水线
@@ -259,16 +273,16 @@ void PassManager::run()
         runner(module);
     }
 
-    if (fixedPointFunctionPasses.empty()) {
-        return;
+    if (!fixedPointFunctionPasses.empty()) {
+        bool changed = false;
+        int32_t round = 0;
+        do {
+            changed = runFunctionPassGroup(fixedPointFunctionPasses);
+            ++round;
+        } while (changed && round < maxFixedPointRounds);
     }
 
-    bool changed = false;
-    int32_t round = 0;
-    do {
-        changed = runFunctionPassGroup(fixedPointFunctionPasses);
-        ++round;
-    } while (changed && round < maxFixedPointRounds);
+    runFunctionPassGroup(lateFunctionPasses);
 }
 
 /// @brief 清空当前已注册的所有 pass
@@ -278,6 +292,7 @@ void PassManager::clear()
     lateModulePasses.clear();
     functionPasses.clear();
     fixedPointFunctionPasses.clear();
+    lateFunctionPasses.clear();
     maxFixedPointRounds = 0;
 }
 
@@ -288,7 +303,7 @@ void PassManager::registerModulePass(ModulePassRunner runner)
     modulePasses.push_back(std::move(runner));
 }
 
-/// @brief 注册函数级 pass 之后、定点函数级 pass 之前执行的模块级 pass
+/// @brief 注册定点函数级 pass 之前执行的模块级 pass
 /// @param runner pass 执行器
 void PassManager::registerLateModulePass(ModulePassRunner runner)
 {
@@ -307,6 +322,13 @@ void PassManager::registerFunctionPass(FunctionPassRunner runner)
 void PassManager::registerFixedPointFunctionPass(FunctionPassRunner runner)
 {
     fixedPointFunctionPasses.push_back(std::move(runner));
+}
+
+/// @brief 注册在定点迭代收敛后执行一次的后置函数级 pass
+/// @param runner pass 执行器
+void PassManager::registerLateFunctionPass(FunctionPassRunner runner)
+{
+    lateFunctionPasses.push_back(std::move(runner));
 }
 
 /// @brief 执行一组函数级 pass
