@@ -220,10 +220,10 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
     });
 
     // 循环并行化pass放在定点迭代之后执行，确保分块等变换已稳定
-    registerPostFixedPointFunctionPass([this](Function * func) {
-        LoopParallelize pass(func, module);
-        return pass.run();
-    });
+    // registerPostFixedPointFunctionPass([this](Function * func) {
+    //     LoopParallelize pass(func, module);
+    //     return pass.run();
+    // });
 }
 
 /// @brief 注册后端前置的 phi 降级流水线

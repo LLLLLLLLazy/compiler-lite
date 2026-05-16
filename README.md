@@ -182,7 +182,404 @@ MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2023
 MINIC_TEST_MODE=asm bash ./tools/run-local-tests.sh 2023
 ```
 
-### 5.2 已通过测试
+### 5.2 测试脚本参数详解
+
+#### 5.2.1 `run-local-tests.sh` — 本地综合测试运行器
+
+支持 LLVM IR、RISCV64 汇编和 AST 三种验证模式。
+
+**用法：**
+
+```bash
+bash ./tools/run-local-tests.sh [suite] [testcase]
+```
+
+**位置参数：**
+
+| 参数 | 说明 |
+|------|------|
+| （无参数） | 运行所有套件 |
+| `<suite>` | 指定测试套件 |
+| `<testcase>` | 指定单个测试用例（自动推断套件） |
+| `<suite> <testcase>` | 指定套件和测试用例 |
+
+**套件选项：** `2023` | `2025` | `2025_perf` | `2025_performance` | `2026` | `2026_perf` | `2026_performance` | `all`
+
+**环境变量：**
+
+| 环境变量 | 默认值 | 可选项 | 说明 |
+|----------|--------|--------|------|
+| `MINIC_BIN` | `./build/minic` | — | minic 编译器路径 |
+| `MINIC_FRONTEND` | `antlr` | `antlr` \| `recursive` \| `default` | 前端选择 |
+| `MINIC_RUNTIME_SOURCE` | `./tests/sylib.c` | — | 运行时源文件路径 |
+| `MINIC_TEST_MODE` | `llvmir` | `llvmir` \| `asm` \| `ast` \| `all` | 测试模式 |
+| `MINIC_TEST_TIMEOUT` | `30` | — | 每步超时秒数 |
+| `MINIC_ASM_TARGET` | `RISCV64` | `RISCV64` | 汇编后端目标 |
+| `RISCV64_GCC_BIN` | `riscv64-linux-gnu-gcc` | — | RISC-V64 交叉编译器 |
+| `QEMU_RISCV64_BIN` | 自动检测 | — | QEMU RISC-V64 模拟器 |
+| `CLANG_BIN` | `clang` | — | Clang 可执行文件 |
+
+**示例：**
+
+```bash
+# LLVM IR 模式运行 2023 套件
+MINIC_TEST_MODE=llvmir bash ./tools/run-local-tests.sh 2023
+
+# 汇编模式运行所有套件
+MINIC_TEST_MODE=asm bash ./tools/run-local-tests.sh all
+
+# 指定前端和超时
+MINIC_FRONTEND=recursive MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh 2025
+```
+
+---
+
+#### 5.2.2 `run-local-riscv64-tests.sh` — RISC-V64 专项测试运行器
+
+支持汇编运行验证和仅汇编两种模式，并对比 minic-ir-llvm 和 clang 直接编译两条基准线。
+
+**用法：**
+
+```bash
+bash ./tools/run-local-riscv64-tests.sh [suite] [testcase]
+```
+
+**位置参数：**
+
+| 参数 | 说明 |
+|------|------|
+| （无参数） | 运行所有套件 |
+| `<suite>` | 指定测试套件 |
+| `<testcase>` | 指定单个测试用例（自动推断套件） |
+| `<suite> <testcase>` | 指定套件和测试用例 |
+
+**套件选项：** `2023` | `2025` | `2025_perf` | `2025_performance` | `2026` | `2026_perf` | `2026_performance` | `all`
+
+**环境变量：**
+
+| 环境变量 | 默认值 | 可选项 | 说明 |
+|----------|--------|--------|------|
+| `MINIC_BIN` | `./build/minic` | — | minic 编译器路径 |
+| `MINIC_FRONTEND` | `antlr` | `antlr` \| `recursive` \| `default` | 前端选择 |
+| `MINIC_RISCV64_TEST_MODE` | `asm` | `asm` \| `assemble` | 测试模式（`asm`=编译+链接+运行+对比，`assemble`=仅编译+汇编） |
+| `MINIC_RISCV64_TIMEOUT` | `30` | — | 每步超时秒数 |
+| `MINIC_TEST_ROOT` | `./tests` | — | 测试根目录 |
+| `MINIC_RUNTIME_LIB` | `./tests/libsysy_riscv.a` | — | 运行时库路径 |
+| `MINIC_RUNTIME_SOURCE` | `./tests/sylib.c` | — | 运行时源文件路径 |
+| `RISCV64_GCC_BIN` | `riscv64-linux-gnu-gcc` | — | RISC-V64 交叉编译器 |
+| `QEMU_RISCV64_BIN` | 自动检测 | — | QEMU RISC-V64 模拟器 |
+| `CLANG_BIN` | `clang` | — | Clang 可执行文件 |
+
+**示例：**
+
+```bash
+# 运行 2023 套件的汇编验证
+bash ./tools/run-local-riscv64-tests.sh 2023
+
+# 仅汇编模式（不运行）
+MINIC_RISCV64_TEST_MODE=assemble bash ./tools/run-local-riscv64-tests.sh 2025
+
+# 运行单个用例
+bash ./tools/run-local-riscv64-tests.sh 2023 2023_func_00_main
+```
+
+---
+
+#### 5.2.3 `run-float-regression.sh` — 浮点回归测试运行器
+
+验证浮点相关编译器的正确性。
+
+**用法：**
+
+```bash
+bash ./tools/run-float-regression.sh [mode] [testcase]
+```
+
+**位置参数：**
+
+| 参数 | 说明 |
+|------|------|
+| （无参数） | 运行所有浮点回归测试（默认 `all` 模式） |
+| `<mode>` | 指定测试模式 |
+| `<testcase>` | 指定单个测试用例 |
+| `<mode> <testcase>` | 指定模式和测试用例 |
+
+**模式选项：** `ll`（LLVM IR 验证）| `asm`（RISCV64 汇编验证）| `all`（两者都运行）
+
+**环境变量：**
+
+| 环境变量 | 默认值 | 可选项 | 说明 |
+|----------|--------|--------|------|
+| `MINIC_BIN` | `./build/minic` | — | minic 编译器路径 |
+| `MINIC_FLOAT_TEST_DIR` | `./tests/float_regression` | — | 浮点回归测试目录 |
+| `MINIC_RUNTIME_SOURCE` | `./tests/sylib.c` | — | 运行时源文件路径 |
+| `MINIC_RUNTIME_LIB` | `./tests/libsysy_riscv.a` | — | 运行时库路径 |
+| `MINIC_FRONTEND` | `antlr` | `antlr` \| `recursive` \| `default` | 前端选择 |
+| `MINIC_FLOAT_TEST_MODE` | `all` | `ll` \| `asm` \| `all` | 测试模式 |
+| `MINIC_FLOAT_LL_OPT_LEVEL` | `1` | `0` \| `1` | LLVM IR 优化级别 |
+| `MINIC_FLOAT_ASM_OPT_LEVEL` | `1` | `0` \| `1` | 汇编优化级别 |
+| `CLANG_BIN` | `clang` | — | Clang 可执行文件 |
+| `RISCV64_GCC_BIN` | `riscv64-linux-gnu-gcc` | — | RISC-V64 交叉编译器 |
+| `QEMU_RISCV64_BIN` | 自动检测 | — | QEMU RISC-V64 模拟器 |
+
+**示例：**
+
+```bash
+# 运行所有浮点回归测试
+bash ./tools/run-float-regression.sh
+
+# 仅 LLVM IR 模式
+bash ./tools/run-float-regression.sh ll
+
+# 指定优化级别
+MINIC_FLOAT_ASM_OPT_LEVEL=0 bash ./tools/run-float-regression.sh asm
+```
+
+---
+
+#### 5.2.4 `run-phi-regression.sh` — Phi 节点回归测试运行器
+
+验证 SSA phi 节点相关编译的正确性。
+
+**用法：**
+
+```bash
+bash ./tools/run-phi-regression.sh [mode] [testcase]
+```
+
+**位置参数：**
+
+| 参数 | 说明 |
+|------|------|
+| （无参数） | 运行所有 phi 回归测试（默认 `all` 模式） |
+| `<mode>` | 指定测试模式 |
+| `<testcase>` | 指定单个测试用例 |
+| `<mode> <testcase>` | 指定模式和测试用例 |
+
+**模式选项：** `ll`（LLVM IR 验证）| `asm`（RISCV64 汇编验证）| `all`（两者都运行）
+
+**环境变量：**
+
+| 环境变量 | 默认值 | 可选项 | 说明 |
+|----------|--------|--------|------|
+| `MINIC_BIN` | `./build/minic` | — | minic 编译器路径 |
+| `MINIC_PHI_TEST_DIR` | `./tests/phi_regression` | — | Phi 回归测试目录 |
+| `MINIC_RUNTIME_SOURCE` | `./tests/sylib.c` | — | 运行时源文件路径 |
+| `MINIC_RUNTIME_LIB` | `./tests/libsysy_riscv.a` | — | 运行时库路径 |
+| `MINIC_FRONTEND` | `antlr` | `antlr` \| `recursive` \| `default` | 前端选择 |
+| `MINIC_PHI_TEST_MODE` | `all` | `ll` \| `asm` \| `all` | 测试模式 |
+| `MINIC_PHI_LL_OPT_LEVEL` | `1` | `0` \| `1` | LLVM IR 优化级别 |
+| `MINIC_PHI_ASM_OPT_LEVEL` | `1` | `0` \| `1` | 汇编优化级别 |
+| `CLANG_BIN` | `clang` | — | Clang 可执行文件 |
+| `RISCV64_GCC_BIN` | `riscv64-linux-gnu-gcc` | — | RISC-V64 交叉编译器 |
+| `QEMU_RISCV64_BIN` | 自动检测 | — | QEMU RISC-V64 模拟器 |
+
+**示例：**
+
+```bash
+# 运行所有 phi 回归测试
+bash ./tools/run-phi-regression.sh
+
+# 仅汇编模式
+bash ./tools/run-phi-regression.sh asm
+
+# 运行单个用例
+bash ./tools/run-phi-regression.sh ll phi_test_01
+```
+
+---
+
+#### 5.2.5 `run_ra_eval.py` — 寄存器分配评估矩阵执行器
+
+执行 RISC-V64 寄存器分配评估矩阵，包括正确性验证和性能基准测试。
+
+**用法：**
+
+```bash
+python3 tools/run_ra_eval.py [OPTIONS]
+```
+
+**命令行参数：**
+
+| 参数 | 类型 | 默认值 | 可选项 | 说明 |
+|------|------|--------|--------|------|
+| `--mode` | str | `all` | `correctness` \| `benchmark` \| `all` | 运行模式 |
+| `--output-dir` | Path | `build/ra-eval/<timestamp>` | — | 原始产物和记录的输出目录 |
+| `--suite` | str（可追加） | 内置默认值 | — | 覆盖所选模式的测试套件，可多次指定 |
+| `--case` | str（可追加） | `[]` | — | 用例名称或前缀 glob（如 `2026_perf_fft*`），可多次指定 |
+| `--config` | str（可追加） | 所有配置 | 见下表 | 限制运行的 RA 配置，可多次指定 |
+| `--repeat` | int | `7` | — | 每个用例/配置的基准测量运行次数 |
+| `--warmup` | int | `1` | — | 每个用例/配置的预热运行次数 |
+| `--timeout` | int | `120` | — | 每步超时秒数 |
+| `--skip-microbench` | flag | `False` | — | 跳过诊断套件 `tests/ra_microbench` |
+| `--skip-llvm-lanes` | flag | `False` | — | 跳过 LLVM 对照 lane |
+| `--minic-bin` | Path | `build/minic` | — | minic 编译器可执行文件路径 |
+| `--runtime-lib` | Path | `tests/libsysy_riscv.a` | — | RISC-V64 运行时库路径 |
+| `--clang-bin` | str | `clang` | — | Clang 可执行文件名/路径 |
+| `--llc-bin` | str | `llc` | — | LLVM `llc` 可执行文件名/路径 |
+| `--riscv64-gcc` | str | `riscv64-linux-gnu-gcc` | — | RISC-V64 GCC 交叉编译器 |
+| `--objdump-bin` | str | `riscv64-linux-gnu-objdump` | — | RISC-V64 objdump 可执行文件名/路径 |
+| `--qemu` | str | 自动检测 | — | QEMU RISC-V64 用户态模拟器路径 |
+
+**`--config` 可选项（RA 寄存器分配配置）：**
+
+| 配置名 | 启用的特性 |
+|--------|-----------|
+| `none` | 无（全部禁用） |
+| `callee_saved_fpr` | 被调用者保存浮点寄存器 |
+| `coalesce` | 寄存器合并 |
+| `split` | 寄存器分裂 |
+| `callee_saved_fpr+coalesce` | 被调用者保存浮点 + 合并 |
+| `callee_saved_fpr+split` | 被调用者保存浮点 + 分裂 |
+| `coalesce+split` | 合并 + 分裂 |
+| `callee_saved_fpr+coalesce+split` | 全部启用 |
+
+**环境变量：**
+
+| 环境变量 | 对应参数 | 默认值 |
+|----------|----------|--------|
+| `MINIC_RA_EVAL_TIMEOUT` | `--timeout` | `120` |
+| `MINIC_BIN` | `--minic-bin` | `build/minic` |
+| `MINIC_RUNTIME_LIB` | `--runtime-lib` | `tests/libsysy_riscv.a` |
+| `CLANG_BIN` | `--clang-bin` | `clang` |
+| `LLC_BIN` | `--llc-bin` | `llc` |
+| `RISCV64_GCC_BIN` | `--riscv64-gcc` | `riscv64-linux-gnu-gcc` |
+| `RISCV64_OBJDUMP_BIN` | `--objdump-bin` | `riscv64-linux-gnu-objdump` |
+| `QEMU_RISCV64_BIN` | `--qemu` | `""`（自动检测） |
+
+**内置测试套件：**
+
+- 正确性套件：`2023_function`、`2025_function`、`2026_function`、`phi_regression`、`float_regression`、`riscv64_regression`、`ra_microbench`
+- 性能套件：真实程序 `2025_performance`、`2026_performance`，以及默认独立汇总的诊断套件 `ra_microbench`
+- LLVM lane：`llvm_ra_fast`、`llvm_ra_basic`、`llvm_ra_greedy`、`same_ir_clang_o2`、`direct_clang_o2`
+
+**示例：**
+
+```bash
+# 运行完整评估矩阵（正确性 + 基准测试）
+python3 tools/run_ra_eval.py
+
+# 仅运行正确性验证
+python3 tools/run_ra_eval.py --mode correctness
+
+# 仅基准测试，指定配置和重复次数
+python3 tools/run_ra_eval.py --mode benchmark --config coalesce --config split --repeat 10
+
+# 指定用例和超时
+python3 tools/run_ra_eval.py --case "2026_perf_fft*" --timeout 300
+
+# 只跑自家后端 lane，跳过 LLVM 对照
+python3 tools/run_ra_eval.py --skip-llvm-lanes
+
+# 指定工具路径
+python3 tools/run_ra_eval.py --minic-bin /path/to/minic --qemu /path/to/qemu-riscv64-static
+```
+
+---
+
+#### 5.2.6 `analyze_ra_eval.py` — 寄存器分配评估记录分析器
+
+分析由 `run_ra_eval.py` 生成的原始寄存器分配评估记录，生成 CSV 和 Markdown 报告。
+
+**用法：**
+
+```bash
+python3 tools/analyze_ra_eval.py records [OPTIONS]
+```
+
+**命令行参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `records`（位置参数） | Path | （必填） | `run_ra_eval.py` 输出的 `records.jsonl` 文件路径 |
+| `--output-dir` | Path | records 文件所在目录 | CSV/Markdown 报告的输出目录 |
+
+**输出文件：**
+
+| 文件 | 说明 |
+|------|------|
+| `config_summary.csv` | 各 RA 配置的运行时排名汇总 |
+| `case_summary.csv` | 各用例/配置的详细指标 |
+| `external_baselines.csv` | LLVM / Clang lane 相对 `own:none` 的兼容输出 |
+| `llvm_regalloc_summary.csv` | 同一 LLVM 后端内 `fast/basic/greedy` 的 allocator 敏感度 |
+| `backend_gap_summary.csv` | 逐 case 的五段归因口径 |
+| `microbench_summary.csv` | 专项微基准的诊断信号与归因结果 |
+| `strongest_interactions.csv` | 特性间最强交互效应 |
+| `worst_regressions.csv` | 最严重性能回退 |
+| `summary.md` | Markdown 综合报告 |
+
+**示例：**
+
+```bash
+# 分析评估记录（报告输出到 records.jsonl 同目录）
+python3 tools/analyze_ra_eval.py build/ra-eval/20260516-120000/records.jsonl
+
+# 指定报告输出目录
+python3 tools/analyze_ra_eval.py build/ra-eval/20260516-120000/records.jsonl --output-dir /tmp/reports
+```
+
+---
+
+#### 5.2.7 GDB 调试脚本
+
+以下脚本用于交叉编译后通过 QEMU 启动 GDB 调试，均采用相同的位置参数格式。
+
+| 脚本 | 用途 |
+|------|------|
+| `arm32-build-gdb.sh` | minic 编译 → ARM32 汇编 → 交叉编译 → QEMU GDB |
+| `arm32-direct-gdb.sh` | 直接 ARM32 GCC 交叉编译 → QEMU GDB |
+| `arm32-build-run.sh` | clang 直接编译 + IRCompiler + minic ARM32 汇编 → QEMU 运行 |
+| `arm64-build-gdb.sh` | minic 编译 → ARM64 汇编 → 交叉编译 → QEMU GDB |
+| `arm64-direct-gdb.sh` | 直接 ARM64 GCC 交叉编译 → QEMU GDB |
+| `riscv64-build-gdb.sh` | minic 编译 → RISC-V64 汇编 → 交叉编译 → QEMU GDB |
+| `riscv64-direct-gdb.sh` | 直接 RISC-V64 GCC 交叉编译 → QEMU GDB |
+
+**GDB 调试脚本用法（`*-build-gdb.sh`、`*-direct-gdb.sh`）：**
+
+```bash
+bash ./tools/<script> <workspace_dir> <testcase_name>
+```
+
+| 参数 | 说明 |
+|------|------|
+| `<workspace_dir>` | 项目根目录路径 |
+| `<testcase_name>` | 测试用例文件名（不含扩展名） |
+
+**`arm32-build-run.sh` 用法：**
+
+```bash
+bash ./tools/arm32-build-run.sh [rundir] [casename]
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| （无参数） | `rundir="."`, `casename="test1-1"` | 使用默认值 |
+| `<casename>` | — | 用例名称（仅一个参数时） |
+| `<rundir> <casename>` | — | 运行目录和用例名称 |
+
+**示例：**
+
+```bash
+# RISC-V64 GDB 调试
+bash ./tools/riscv64-build-gdb.sh /path/to/compiler-lite 2023_func_00_main
+
+# ARM32 综合运行
+bash ./tools/arm32-build-run.sh ./tests 2023_func_00_main
+```
+
+---
+
+#### 5.2.8 `test_ra_eval_common.py` — RA 评估工具单元测试
+
+`ra_eval_common.py` 共享模块的单元自测，使用 `unittest` 框架，无自定义参数。
+
+**用法：**
+
+```bash
+python3 tools/test_ra_eval_common.py
+```
+
+### 5.3 已通过测试
 
 参考 [测试结果说明](./测试结果说明.md) 文档，包含 CI 和 COJ 上的测试结果统计。
 
