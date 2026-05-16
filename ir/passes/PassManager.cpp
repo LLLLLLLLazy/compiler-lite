@@ -20,6 +20,7 @@
 #include "fixedPointFunctionPass/UnreachableBlockElim.h"
 #include "fixedPointFunctionPass/PureCallLoopCache.h"
 #include "functionPass/ArrayScalarize.h"
+#include "functionPass/LateLoopCFGCleanup.h"
 #include "functionPass/Mem2Reg.h"
 #include "functionPass/PhiToSelect.h"
 #include "functionPass/PhiLowering.h"
@@ -64,6 +65,32 @@ bool runPostInlineCleanupPipeline(Module * currentModule)
         InstCombine instCombine(func, currentModule);
         changed = instCombine.run() || changed;
     }
+
+    return changed;
+}
+
+/// @brief 固定点循环优化结束后的晚期 CFG 收尾流水线
+/// @param func 待处理函数
+/// @return true 表示至少有一个 pass 修改了 IR
+bool runPostFixedPointLoopCleanupPipeline(Function * func)
+{
+    if (!isOptimizableFunction(func)) {
+        return false;
+    }
+
+    bool changed = false;
+    bool localChanged = false;
+    do {
+        localChanged = false;
+
+        LateLoopCFGCleanup lateLoopCFGCleanup(func);
+        localChanged = lateLoopCFGCleanup.run() || localChanged;
+
+        CFGSimplify cfgSimplify(func);
+        localChanged = cfgSimplify.run() || localChanged;
+
+        changed = localChanged || changed;
+    } while (localChanged);
 
     return changed;
 }
@@ -227,6 +254,10 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
     registerFixedPointFunctionPass([](Function * func) {
         CFGSimplify pass(func);
         return pass.run();
+    });
+
+    registerLateFunctionPass([](Function * func) {
+        return runPostFixedPointLoopCleanupPipeline(func);
     });
 
 }
