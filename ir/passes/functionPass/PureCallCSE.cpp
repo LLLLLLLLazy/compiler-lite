@@ -37,6 +37,7 @@
 #include "Module.h"
 #include "FPToSIInst.h"
 #include "PureFunctionAnalysis.h"
+#include "SelectInst.h"
 #include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "Type.h"
@@ -252,7 +253,8 @@ private:
         }
 
         if (dynamic_cast<BinaryInst *>(inst) || dynamic_cast<ICmpInst *>(inst) || dynamic_cast<FCmpInst *>(inst) ||
-            dynamic_cast<ZExtInst *>(inst) || dynamic_cast<SIToFPInst *>(inst) || dynamic_cast<FPToSIInst *>(inst)) {
+            dynamic_cast<ZExtInst *>(inst) || dynamic_cast<SelectInst *>(inst) ||
+            dynamic_cast<SIToFPInst *>(inst) || dynamic_cast<FPToSIInst *>(inst)) {
             std::vector<std::string> operands;
             operands.reserve(static_cast<std::size_t>(inst->getOperandsNum()));
             for (Value * operand : inst->getOperandsValue()) {

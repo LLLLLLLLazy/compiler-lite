@@ -60,6 +60,7 @@ bool isPureLoopInvariantOp(IRInstOperator op)
         case IRInstOperator::IRINST_OP_EQ_F:
         case IRInstOperator::IRINST_OP_NE_F:
         case IRInstOperator::IRINST_OP_ZEXT:
+        case IRInstOperator::IRINST_OP_SELECT:
         case IRInstOperator::IRINST_OP_SITOFP:
         case IRInstOperator::IRINST_OP_FPTOSI:
         case IRInstOperator::IRINST_OP_GEP:
