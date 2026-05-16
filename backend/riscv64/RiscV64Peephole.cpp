@@ -1,7 +1,9 @@
 #include "RiscV64Peephole.h"
 
+#include <algorithm>
 #include <list>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -295,11 +297,248 @@ bool isArgumentRegister(const std::string & reg)
 	return reg.size() == 2 && reg[0] == 'a' && reg[1] >= '0' && reg[1] <= '7';
 }
 
+/// @brief 判断寄存器名是否为浮点参数寄存器（fa0-fa7）
+bool isFloatArgumentRegister(const std::string & reg)
+{
+	return reg.size() == 3 && reg[0] == 'f' && reg[1] == 'a' && reg[2] >= '0' && reg[2] <= '7';
+}
+
+/// @brief 判断寄存器名是否为整数或浮点参数寄存器（a0-a7或fa0-fa7）
+bool isCallArgumentRegister(const std::string & reg)
+{
+	return isArgumentRegister(reg) || isFloatArgumentRegister(reg);
+}
+
+/// @brief 判断寄存器名是否为返回值寄存器（a0或fa0）
+bool isReturnValueRegister(const std::string & reg)
+{
+	return reg == "a0" || reg == "fa0";
+}
+
+std::string addressBaseRegister(const std::string & operand);
+
+/// @brief 判断寄存器名是否为RISC-V64物理寄存器名
+bool isPhysicalRegisterName(const std::string & reg)
+{
+	static const std::unordered_set<std::string> kRegs = {
+		"zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "fp", "s1", "a0", "a1", "a2",
+		"a3",   "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10",
+		"s11",  "t3", "t4", "t5", "t6", "ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7",
+		"fs0",  "fs1", "fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7", "fs2", "fs3",
+		"fs4",  "fs5", "fs6", "fs7", "fs8", "fs9", "fs10", "fs11", "ft8", "ft9", "ft10", "ft11",
+	};
+	return kRegs.find(reg) != kRegs.end();
+}
+
+/// @brief 判断指令是否隐式使用指定寄存器（call隐式使用参数寄存器，ret隐式使用返回值寄存器）
+bool instructionImplicitlyUsesRegister(RiscV64Inst * inst, const std::string & reg)
+{
+	if (!isLiveInst(inst) || reg.empty()) {
+		return false;
+	}
+	if (inst->opcode == "call" && isCallArgumentRegister(reg)) {
+		return true;
+	}
+	return inst->opcode == "ret" && isReturnValueRegister(reg);
+}
+
+/// @brief 从操作数字符串中收集引用的物理寄存器名（包括内存基址寄存器）
+void collectOperandRegisters(const std::string & operand, std::unordered_set<std::string> & regs)
+{
+	if (isPhysicalRegisterName(operand)) {
+		regs.insert(operand);
+	}
+	const std::string base = addressBaseRegister(operand);
+	if (isPhysicalRegisterName(base)) {
+		regs.insert(base);
+	}
+}
+
+/// @brief 收集指令显式和隐式使用的寄存器集合
+std::unordered_set<std::string> instructionUseSet(RiscV64Inst * inst)
+{
+	std::unordered_set<std::string> regs;
+	if (!isLiveInst(inst)) {
+		return regs;
+	}
+	if (!definesResultOperand(inst)) {
+		collectOperandRegisters(inst->result, regs);
+	}
+	collectOperandRegisters(inst->arg1, regs);
+	collectOperandRegisters(inst->arg2, regs);
+	collectOperandRegisters(inst->addition, regs);
+	if (inst->opcode == "call") {
+		for (int i = 0; i <= 7; ++i) {
+			regs.insert("a" + std::to_string(i));
+			regs.insert("fa" + std::to_string(i));
+		}
+	} else if (inst->opcode == "ret") {
+		regs.insert("a0");
+		regs.insert("fa0");
+	}
+	return regs;
+}
+
+/// @brief 收集指令定义的寄存器集合
+std::unordered_set<std::string> instructionDefSet(RiscV64Inst * inst)
+{
+	std::unordered_set<std::string> regs;
+	if (definesResultOperand(inst) && isPhysicalRegisterName(inst->result)) {
+		regs.insert(inst->result);
+	}
+	return regs;
+}
+
+/// @brief 机器级基本块，用于局部分析的活跃性计算
+struct MachineBlock {
+	std::vector<RiscV64Inst *> insts;              ///< 块内指令列表
+	std::vector<int> succs;                        ///< 后继块索引列表
+	std::unordered_set<std::string> use;           ///< 块内向上暴露的使用（use-before-def）
+	std::unordered_set<std::string> def;           ///< 块内所有定义
+	std::unordered_set<std::string> liveIn;        ///< 块入口活跃寄存器集合
+	std::unordered_set<std::string> liveOut;       ///< 块出口活跃寄存器集合
+};
+
+/// @brief 机器级活跃性分析结果
+struct MachineLiveness {
+	std::vector<MachineBlock> blocks;                           ///< 所有基本块
+	std::unordered_map<RiscV64Inst *, int> instToBlock;         ///< 指令到基本块索引的映射
+};
+
+/// @brief 提取指令引用的标签名（以.L开头的操作数）
+std::string referencedLabel(RiscV64Inst * inst)
+{
+	if (!isLiveInst(inst)) {
+		return "";
+	}
+	for (const auto * operand : {&inst->result, &inst->arg1, &inst->arg2, &inst->addition}) {
+		if (operand->rfind(".L", 0) == 0) {
+			return *operand;
+		}
+	}
+	return "";
+}
+
+/// @brief 构建机器级活跃性分析：划分基本块、计算liveIn/liveOut
+/// @param code 指令列表
+/// @return 包含基本块信息和活跃性分析结果的结构
+MachineLiveness buildMachineLiveness(InstList & code)
+{
+	MachineLiveness info;
+	std::unordered_map<std::string, int> labelToBlock;
+	std::vector<std::string> pendingLabels;
+	MachineBlock current;
+
+	auto flushCurrent = [&]() {
+		if (current.insts.empty()) {
+			return;
+		}
+		const int idx = static_cast<int>(info.blocks.size());
+		for (const auto & label : pendingLabels) {
+			labelToBlock[label] = idx;
+		}
+		pendingLabels.clear();
+		for (auto * inst : current.insts) {
+			info.instToBlock[inst] = idx;
+		}
+		info.blocks.push_back(std::move(current));
+		current = MachineBlock{};
+	};
+
+	for (auto * inst : code) {
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		if (isLabel(inst)) {
+			flushCurrent();
+			pendingLabels.push_back(inst->opcode);
+			continue;
+		}
+		current.insts.push_back(inst);
+		if (isControlBoundary(inst)) {
+			flushCurrent();
+		}
+	}
+	flushCurrent();
+
+	for (int i = 0; i < static_cast<int>(info.blocks.size()); ++i) {
+		auto & block = info.blocks[i];
+		auto * last = block.insts.empty() ? nullptr : block.insts.back();
+		auto addTarget = [&](const std::string & label) {
+			auto it = labelToBlock.find(label);
+			if (it != labelToBlock.end()) {
+				block.succs.push_back(it->second);
+			}
+		};
+
+		if (last != nullptr && isBranchOpcode(last->opcode)) {
+			addTarget(referencedLabel(last));
+			if (i + 1 < static_cast<int>(info.blocks.size())) {
+				block.succs.push_back(i + 1);
+			}
+		} else if (last != nullptr && (last->opcode == "j" || last->opcode == "jal")) {
+			addTarget(referencedLabel(last));
+		} else if (last == nullptr || last->opcode != "ret") {
+			if (i + 1 < static_cast<int>(info.blocks.size())) {
+				block.succs.push_back(i + 1);
+			}
+		}
+		std::sort(block.succs.begin(), block.succs.end());
+		block.succs.erase(std::unique(block.succs.begin(), block.succs.end()), block.succs.end());
+
+		for (auto * inst : block.insts) {
+			for (const auto & reg : instructionUseSet(inst)) {
+				if (block.def.find(reg) == block.def.end()) {
+					block.use.insert(reg);
+				}
+			}
+			for (const auto & reg : instructionDefSet(inst)) {
+				block.def.insert(reg);
+			}
+		}
+	}
+
+	bool changed = true;
+	while (changed) {
+		changed = false;
+		for (int i = static_cast<int>(info.blocks.size()) - 1; i >= 0; --i) {
+			auto & block = info.blocks[i];
+			std::unordered_set<std::string> newOut;
+			for (int succ : block.succs) {
+				newOut.insert(info.blocks[succ].liveIn.begin(), info.blocks[succ].liveIn.end());
+			}
+			std::unordered_set<std::string> newIn = block.use;
+			for (const auto & reg : newOut) {
+				if (block.def.find(reg) == block.def.end()) {
+					newIn.insert(reg);
+				}
+			}
+			if (newOut != block.liveOut || newIn != block.liveIn) {
+				block.liveOut = std::move(newOut);
+				block.liveIn = std::move(newIn);
+				changed = true;
+			}
+		}
+	}
+	return info;
+}
+
+/// @brief 判断寄存器是否在指令所在基本块的出口活跃
+bool registerLiveOutOfBlock(const MachineLiveness & info, RiscV64Inst * inst, const std::string & reg)
+{
+	auto it = info.instToBlock.find(inst);
+	if (it == info.instToBlock.end()) {
+		return true;
+	}
+	return info.blocks[it->second].liveOut.find(reg) != info.blocks[it->second].liveOut.end();
+}
+
+/// @brief 判断寄存器在当前块内是否先被使用（或遇到控制流边界），再被重定义
 bool registerUsedBeforeRedef(InstList & code, InstIt start, const std::string & reg)
 {
 	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
 		auto * inst = *it;
-		if (usesRegister(inst, reg) || (inst->opcode == "call" && isArgumentRegister(reg))) {
+		if (usesRegister(inst, reg) || instructionImplicitlyUsesRegister(inst, reg)) {
 			return true;
 		}
 		if (isControlBoundary(inst)) {
@@ -312,11 +551,13 @@ bool registerUsedBeforeRedef(InstList & code, InstIt start, const std::string & 
 	return false;
 }
 
+/// @brief 判断寄存器在当前块内是否先被使用（或遇到控制流边界），再被重定义
+/// @note 与registerUsedBeforeRedef逻辑相同，用于不同上下文
 bool registerUsedAfterBeforeRedefOrBoundary(InstList & code, InstIt start, const std::string & reg)
 {
 	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
 		auto * inst = *it;
-		if (usesRegister(inst, reg)) {
+		if (usesRegister(inst, reg) || instructionImplicitlyUsesRegister(inst, reg)) {
 			return true;
 		}
 		if (isControlBoundary(inst)) {
@@ -329,6 +570,28 @@ bool registerUsedAfterBeforeRedefOrBoundary(InstList & code, InstIt start, const
 	return false;
 }
 
+/// @brief 判断寄存器在当前块内是否会先被重定义、而不是先被使用或跨出控制流边界。
+///
+/// 只有在这个条件成立时，才能安全地把前面的定义视为局部死定义；
+/// 若先遇到边界，则寄存器可能在后继块继续存活，局部 peephole 不做猜测。
+bool registerRedefinedBeforeUseOrBoundary(InstList & code, InstIt start, const std::string & reg)
+{
+	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (usesRegister(inst, reg) || instructionImplicitlyUsesRegister(inst, reg)) {
+			return false;
+		}
+		if (isControlBoundary(inst)) {
+			return false;
+		}
+		if (definesResultOperand(inst) && inst->result == reg) {
+			return true;
+		}
+	}
+	return true;
+}
+
+/// @brief 判断指令是否在任何操作数中提及指定寄存器
 bool instructionMentionsRegister(RiscV64Inst * inst, const std::string & reg)
 {
 	return isLiveInst(inst) &&
@@ -336,6 +599,7 @@ bool instructionMentionsRegister(RiscV64Inst * inst, const std::string & reg)
 	        operandMentionsRegister(inst->arg2, reg) || operandMentionsRegister(inst->addition, reg));
 }
 
+/// @brief 判断寄存器是否在整个函数中被提及
 bool registerMentionedInFunction(const InstList & code, const std::string & reg)
 {
 	for (auto * inst : code) {
@@ -346,6 +610,7 @@ bool registerMentionedInFunction(const InstList & code, const std::string & reg)
 	return false;
 }
 
+/// @brief 判断寄存器是否在指定指令范围内被提及
 bool registerMentionedInRange(InstIt begin, InstIt end, const std::string & reg)
 {
 	for (auto it = begin; it != end; ++it) {
@@ -356,6 +621,7 @@ bool registerMentionedInRange(InstIt begin, InstIt end, const std::string & reg)
 	return false;
 }
 
+/// @brief 判断寄存器是否在指定指令范围内被定义
 bool registerDefinedInRange(InstIt begin, InstIt end, const std::string & reg)
 {
 	for (auto it = begin; it != end; ++it) {
@@ -367,6 +633,7 @@ bool registerDefinedInRange(InstIt begin, InstIt end, const std::string & reg)
 	return false;
 }
 
+/// @brief 从内存操作数中提取基址寄存器名，如 "8(sp)" -> "sp"
 std::string addressBaseRegister(const std::string & operand)
 {
 	const auto open = operand.find('(');
@@ -377,6 +644,7 @@ std::string addressBaseRegister(const std::string & operand)
 	return operand.substr(open + 1, close - open - 1);
 }
 
+/// @brief 在指定范围内选择一个未被使用的浮点临时寄存器（ft4-ft7）
 std::string chooseFreeFloatTemp(InstIt begin, InstIt end)
 {
 	static const std::vector<std::string> kCandidates = {"ft4", "ft5", "ft6", "ft7"};
@@ -388,6 +656,7 @@ std::string chooseFreeFloatTemp(InstIt begin, InstIt end)
 	return "";
 }
 
+/// @brief 判断函数中是否包含存储指令
 bool functionHasStore(const InstList & code)
 {
 	for (auto * inst : code) {
@@ -704,6 +973,197 @@ bool replaceUsesBeforeRedef(InstIt begin, InstIt end, const std::string & oldReg
 			break;
 		}
 		changed = replaceRegisterUse(inst, oldReg, newReg) || changed;
+	}
+	return changed;
+}
+
+/// @brief 将块内局部物化后的唯一 move 折叠回物化指令。
+///
+/// 匹配：
+///   li/la tmp, X
+///   ...
+///   mv dst, tmp
+///
+/// 仅当 tmp 的第一个后续提及就是该 move、dst 在两者之间未被提及，
+/// 且 tmp 在 move 后会先被重定义而不是跨出块边界时才改写。
+/// @brief 折叠立即数/地址材料化后的冗余move
+///
+/// 匹配模式：
+///   li/la src, imm     // 材料化立即数或地址到src
+///   ...
+///   mv dst, src        // 随后move到dst
+///
+/// 若src在li/la与mv之间未被其他指令使用，且dst在两者之间未出现，
+/// 且src在mv之后会被重定义（即mv是src的唯一消费），则将li/la的目标
+/// 直接改为dst，消除冗余move。
+bool foldMaterializationMoves(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * materialize = *it;
+		if (!isLiveInst(materialize) || (materialize->opcode != "li" && materialize->opcode != "la") ||
+		    materialize->result.empty()) {
+			continue;
+		}
+
+		const std::string src = materialize->result;
+		for (auto scan = nextLive(code, it); scan != code.end(); scan = nextLive(code, scan)) {
+			auto * inst = *scan;
+			if (isControlBoundary(inst)) {
+				break;
+			}
+			if (!instructionMentionsRegister(inst, src)) {
+				continue;
+			}
+
+			if (inst->opcode != "mv" || inst->arg1 != src || inst->result.empty() || inst->result == src) {
+				break;
+			}
+
+			const std::string dst = inst->result;
+			auto betweenBegin = nextLive(code, it);
+			if (registerMentionedInRange(betweenBegin, scan, dst) ||
+			    !registerRedefinedBeforeUseOrBoundary(code, scan, src)) {
+				break;
+			}
+
+			materialize->result = dst;
+			inst->setDead();
+			changed = true;
+			break;
+		}
+	}
+	return changed;
+}
+
+/// @brief 判断指令是否为从寄存器到寄存器的move（mv或fsgnj.s同寄存器形式）
+/// @param inst 待判断的指令
+/// @param dst [out] 目标寄存器名
+/// @param src [out] 源寄存器名
+/// @return 若为move指令则返回true
+bool isMoveFromRegister(RiscV64Inst * inst, std::string & dst, std::string & src)
+{
+	if (!isLiveInst(inst) || inst->result.empty()) {
+		return false;
+	}
+	if (inst->opcode == "mv" && !inst->arg1.empty()) {
+		dst = inst->result;
+		src = inst->arg1;
+		return true;
+	}
+	if (inst->opcode == "fsgnj.s" && !inst->arg1.empty() && inst->arg1 == inst->arg2) {
+		dst = inst->result;
+		src = inst->arg1;
+		return true;
+	}
+	return false;
+}
+
+/// @brief 将局部唯一消费的 producer 直接改写到 copy 目标寄存器。
+///
+/// 匹配：
+///   def tmp, ...
+///   ...
+///   mv/fsgnj.s dst, tmp
+///
+/// 只在同一基本块内改写；tmp 的第一次后续提及必须就是该 copy，
+/// dst 在 producer 与 copy 之间不能出现，copy 后 tmp 在本块内也不能
+/// 再被读取。这样把“计算到 tmp 再搬到 dst”收成“直接计算到 dst”。
+bool retargetSingleUseDefinitions(InstList & code)
+{
+	bool changed = false;
+	const MachineLiveness liveness = buildMachineLiveness(code);
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * def = *it;
+		if (!definesResultOperand(def) || def->result.empty()) {
+			continue;
+		}
+
+		const std::string tmp = def->result;
+		for (auto scan = nextLive(code, it); scan != code.end(); scan = nextLive(code, scan)) {
+			auto * inst = *scan;
+			if (isControlBoundary(inst)) {
+				break;
+			}
+			if (!instructionMentionsRegister(inst, tmp)) {
+				continue;
+			}
+
+			std::string dst;
+			std::string src;
+			if (!isMoveFromRegister(inst, dst, src) || src != tmp || dst.empty() || dst == tmp) {
+				break;
+			}
+
+			const auto betweenBegin = nextLive(code, it);
+			if (registerMentionedInRange(betweenBegin, scan, dst) ||
+			    registerUsedAfterBeforeRedefOrBoundary(code, scan, tmp) ||
+			    registerLiveOutOfBlock(liveness, inst, tmp)) {
+				break;
+			}
+
+			def->result = dst;
+			inst->setDead();
+			changed = true;
+			break;
+		}
+	}
+	return changed;
+}
+
+/// @brief 在单个基本块内传播 mv 的目标寄存器使用。
+///
+/// `mv dst, src` 之后，直到 dst/src 被重定义或遇到控制流边界前，
+/// 后续读取 dst 等价于读取 src。这里会同时改写普通 operand 与内存地址基寄存器。
+bool propagateMoveUses(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * move = *it;
+		if (!isLiveInst(move) || move->opcode != "mv" || move->result.empty() || move->arg1.empty() ||
+		    move->result == move->arg1) {
+			continue;
+		}
+
+		const std::string dst = move->result;
+		const std::string src = move->arg1;
+		for (auto scan = nextLive(code, it); scan != code.end(); scan = nextLive(code, scan)) {
+			auto * inst = *scan;
+			if (isControlBoundary(inst)) {
+				break;
+			}
+
+			if (usesRegister(inst, dst)) {
+				changed = replaceRegisterUse(inst, dst, src) || changed;
+				if (isMemoryOpcode(inst->opcode)) {
+					changed = replaceMemoryBase(inst, dst, src) || changed;
+				}
+			}
+
+			const bool redefinesDst = definesResultOperand(inst) && inst->result == dst;
+			const bool redefinesSrc = definesResultOperand(inst) && inst->result == src;
+			if (redefinesDst || redefinesSrc) {
+				break;
+			}
+		}
+	}
+	return changed;
+}
+
+/// @brief 删除只在本基本块内被后续重定义覆盖的死 move。
+bool removeDeadMoves(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * move = *it;
+		if (!isLiveInst(move) || move->opcode != "mv" || move->result.empty() || move->arg1.empty() ||
+		    move->result == move->arg1) {
+			continue;
+		}
+		if (registerRedefinedBeforeUseOrBoundary(code, it, move->result)) {
+			move->setDead();
+			changed = true;
+		}
 	}
 	return changed;
 }
@@ -1367,7 +1827,7 @@ bool reduceAffineAddressRecurrences(InstList & code)
 
 } // namespace
 
-bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel)
+bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceRetargeting)
 {
 	bool changed = false;
 	bool localChanged = false;
@@ -1386,6 +1846,16 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel)
 		localChanged = reduceMulByConst(code) || localChanged;
 		localChanged = foldUnitStepIncrements(code) || localChanged;
 		localChanged = foldZeroSubCompare(code) || localChanged;
+		// 折叠立即数/地址材料化后的冗余move：li x,imm; mv y,x -> li y,imm
+		localChanged = foldMaterializationMoves(code) || localChanged;
+		// coalesce专属优化：将局部唯一消费的producer直接改写到copy目标寄存器
+		if (enableCoalesceRetargeting) {
+			localChanged = retargetSingleUseDefinitions(code) || localChanged;
+		}
+		// 在单基本块内传播mv的目标寄存器使用，消除冗余move链
+		localChanged = propagateMoveUses(code) || localChanged;
+		// 删除只在本基本块内被后续重定义覆盖的死move
+		localChanged = removeDeadMoves(code) || localChanged;
 		localChanged = removeSelfMoves(code) || localChanged;
 		localChanged = removeConsecutiveDuplicates(code) || localChanged;
 		localChanged = removeJumpToNextLabel(code) || localChanged;

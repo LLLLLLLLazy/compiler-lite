@@ -15,9 +15,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "AllocaInst.h"
@@ -187,18 +190,111 @@ bool canOmitLeafFrame(Function * func,
 	return true;
 }
 
+/// @brief 从当前保存列表中提取真正由寄存器分配器使用的callee-saved GPR
+/// @param savedRegs 所有被保存的寄存器编号列表
+/// @return 仅包含callee-saved GPR（x9/s1, x18-27/s2-s11）的子集
+/// @note 用于RA统计JSON输出，记录实际占用的callee-saved GPR编号
+std::vector<int> collectUsedCalleeSavedGPRs(const std::vector<int> & savedRegs)
+{
+	std::vector<int> used;
+	for (int reg : savedRegs) {
+		if (reg == 9 || (reg >= 18 && reg <= 27)) {
+			used.push_back(reg);
+		}
+	}
+	return used;
+}
+
+/// @brief 将字符串写成JSON安全形式，转义双引号、反斜杠和控制字符
+/// @param value 原始字符串
+/// @return 转义后的JSON安全字符串
+std::string jsonEscape(const std::string & value)
+{
+	std::ostringstream out;
+	for (unsigned char ch : value) {
+		switch (ch) {
+			case '"':
+				out << "\\\"";
+				break;
+			case '\\':
+				out << "\\\\";
+				break;
+			case '\b':
+				out << "\\b";
+				break;
+			case '\f':
+				out << "\\f";
+				break;
+			case '\n':
+				out << "\\n";
+				break;
+			case '\r':
+				out << "\\r";
+				break;
+			case '\t':
+				out << "\\t";
+				break;
+			default:
+				if (ch < 0x20) {
+					const char * hex = "0123456789ABCDEF";
+					out << "\\u00" << hex[(ch >> 4) & 0xF] << hex[ch & 0xF];
+				} else {
+					out << static_cast<char>(ch);
+				}
+				break;
+		}
+	}
+	return out.str();
+}
+
+/// @brief 将整数数组写为JSON数组格式，如 [1, 2, 3]
+/// @param out 输出流
+/// @param values 整数数组
+void writeJsonIntArray(std::ostream & out, const std::vector<int> & values)
+{
+	out << "[";
+	for (size_t i = 0; i < values.size(); ++i) {
+		if (i != 0) {
+			out << ", ";
+		}
+		out << values[i];
+	}
+	out << "]";
+}
+
 } // namespace
 
 /// @brief 构造函数
 /// @param _module 待编译的IR模块
+/// @param enableCalleeSavedFPR 是否启用 callee-saved FPR
+/// @param enableCoalesce 是否启用寄存器合并
+/// @param enableSplit 是否启用活跃区间分裂
+/// @param raStatsJsonPath 若非空，则输出寄存器分配JSON统计到该路径
 CodeGeneratorRiscV64::CodeGeneratorRiscV64(Module * _module,
                                            bool enableCalleeSavedFPR,
                                            bool enableCoalesce,
-                                           bool enableSplit)
+                                           bool enableSplit,
+                                           std::string raStatsJsonPath)
 	: CodeGeneratorAsm(_module),
-	  greedyAllocator(nullptr, enableCalleeSavedFPR, enableCoalesce, enableSplit)
+	  greedyAllocator(nullptr, enableCalleeSavedFPR, enableCoalesce, enableSplit),
+	  enableCalleeSavedFPR_(enableCalleeSavedFPR),
+	  enableCoalesce_(enableCoalesce),
+	  enableSplit_(enableSplit),
+	  raStatsJsonPath_(std::move(raStatsJsonPath))
 {}
 
+/// @brief 产生汇编文件
+/// @return 始终返回true
+bool CodeGeneratorRiscV64::run()
+{
+	genHeader();
+	genDataSection();
+	CodeGeneratorAsm::genCodeSection();
+	if (!writeRAStatsJson()) {
+		return false;
+	}
+	return true;
+}
 /// @brief 生成汇编文件头部，输出RISC-V64架构属性
 void CodeGeneratorRiscV64::genHeader()
 {
@@ -340,10 +436,23 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	}
 
 	RiscV64Peephole peephole;
-	peephole.run(iloc, module->getOptLevel());
+	peephole.run(iloc, module->getOptLevel(), enableCoalesce_);
 
 	// 删除未被引用的基本块标签
 	iloc.deleteUnusedLabel();
+
+	// 收集当前函数的RA统计报告（仅在JSON输出启用时）
+	if (!raStatsJsonPath_.empty()) {
+		FunctionRAReport report;
+		report.functionName = func->getName();
+		report.regAllocStats = greedyAllocator.getStats();
+		report.frameSize = iloc.getFrameSize();
+		report.usedCalleeSavedGPRs = collectUsedCalleeSavedGPRs(currentSavedRegs);
+		report.usedCalleeSavedFPRs = currentSavedFPRs;
+		// 收集peephole优化后的最终汇编级指标（指令数、栈访问数、move数）
+		report.codegenStats = iloc.collectFinalStats();
+		raReports_.push_back(std::move(report));
+	}
 
 	// 输出函数头部信息
 	std::fprintf(fp, ".align %d\n", func->getAlignment());
@@ -388,6 +497,69 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	std::fprintf(fp, ".size %s, .-%s\n", func->getName().c_str(), func->getName().c_str());
 }
 
+/// @brief 将本模块的寄存器分配评测指标写为JSON
+/// @return 写入是否成功；若未配置输出路径则直接返回true
+/// @note JSON结构包含schema版本、目标架构、RA配置（callee-saved FPR/coalesce/split）
+///       以及每个函数的RA统计（分配区间数、溢出数、消除copy数、栈帧大小等）
+///       和代码生成统计（机器指令数、栈load/store数、move指令数）
+bool CodeGeneratorRiscV64::writeRAStatsJson() const
+{
+	if (raStatsJsonPath_.empty()) {
+		return true;
+	}
+
+	std::ofstream out(raStatsJsonPath_, std::ios::out | std::ios::trunc);
+	if (!out.is_open()) {
+		return false;
+	}
+
+	out << "{\n";
+	out << "  \"schema_version\": 1,\n";
+	out << "  \"target\": \"RISCV64\",\n";
+	out << "  \"config\": {\n";
+	out << "    \"callee_saved_fpr\": " << (enableCalleeSavedFPR_ ? "true" : "false") << ",\n";
+	out << "    \"coalesce\": " << (enableCoalesce_ ? "true" : "false") << ",\n";
+	out << "    \"split\": " << (enableSplit_ ? "true" : "false") << "\n";
+	out << "  },\n";
+	out << "  \"functions\": [\n";
+
+	for (size_t i = 0; i < raReports_.size(); ++i) {
+		const auto & report = raReports_[i];
+		const auto & stats = report.regAllocStats;
+		const auto & codegen = report.codegenStats;
+		out << "    {\n";
+		out << "      \"name\": \"" << jsonEscape(report.functionName) << "\",\n";
+		out << "      \"assigned_reg_intervals\": " << stats.assignedRegIntervals << ",\n";
+		out << "      \"assigned_gpr_intervals\": " << stats.assignedGprIntervals << ",\n";
+		out << "      \"assigned_fpr_intervals\": " << stats.assignedFprIntervals << ",\n";
+		out << "      \"spilled_intervals\": " << stats.spilledIntervals << ",\n";
+		out << "      \"spilled_values\": " << stats.spilledValues << ",\n";
+		out << "      \"estimated_reloads\": " << stats.estimatedReloads << ",\n";
+		out << "      \"estimated_spill_stores\": " << stats.estimatedSpillStores << ",\n";
+		out << "      \"eliminated_copies\": " << stats.eliminatedCopies << ",\n";
+		out << "      \"split_count\": " << stats.splitCount << ",\n";
+		out << "      \"frame_size\": " << report.frameSize << ",\n";
+		out << "      \"used_callee_saved_gpr\": ";
+		writeJsonIntArray(out, report.usedCalleeSavedGPRs);
+		out << ",\n";
+		out << "      \"used_callee_saved_fpr\": ";
+		writeJsonIntArray(out, report.usedCalleeSavedFPRs);
+		out << ",\n";
+		out << "      \"machine_instruction_count\": " << codegen.machineInstructionCount << ",\n";
+		out << "      \"stack_load_count\": " << codegen.stackLoadCount << ",\n";
+		out << "      \"stack_store_count\": " << codegen.stackStoreCount << ",\n";
+		out << "      \"move_instruction_count\": " << codegen.moveInstructionCount << "\n";
+		out << "    }";
+		if (i + 1 != raReports_.size()) {
+			out << ",";
+		}
+		out << "\n";
+	}
+
+	out << "  ]\n";
+	out << "}\n";
+	return out.good();
+}
 /// @brief 执行寄存器分配，包括Greedy分配和栈空间分配
 /// @param func 待分配寄存器的函数
 void CodeGeneratorRiscV64::registerAllocation(Function * func)
@@ -410,6 +582,9 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 	currentSavedFPRs = greedyAllocator.getUsedCalleeSavedFPRs();
 	// 为未分配寄存器和溢出的变量分配栈槽
 	stackAlloc(func);
+	// 栈分配完成后，将coalesced alias的分配信息回填到代表值，
+	// 确保被合并的值与代表值共享同一栈槽/寄存器位置
+	greedyAllocator.refreshCoalescedAliasAllocations();
 	if (canOmitLeafFrame(func,
 	                     greedyAllocator.getAllocationMap(),
 	                     currentSavedRegs,
@@ -497,15 +672,28 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func)
 		}
 	}
 
-	// 为强制栈分配、未分配寄存器或被溢出的变量分配栈槽
+	// 为强制栈分配、未分配寄存器或被溢出的变量分配栈槽。
+	// coalesced alias 与其代表共享同一 canonical 栈槽，避免 eliminated copy
+	// 在栈分配阶段又被拆回两个独立位置。
+	std::vector<Value *> stackSlotCandidates;
 	for (auto & [val, info]: allocMap) {
 		if (val == nullptr) {
 			continue;
 		}
 
 		if (GreedyRegAllocator::isForcedStackValue(val) || info.regId == -1 || greedyAllocator.isSpilled(val)) {
-			assignStackSlot(val);
+			stackSlotCandidates.push_back(val);
 		}
+	}
+	for (auto * val : stackSlotCandidates) {
+		Value * representative = greedyAllocator.getCoalescedRepresentative(val);
+		if (representative != nullptr && representative != val) {
+			allocMap.try_emplace(representative, RegAllocInfo{});
+			assignStackSlot(representative);
+			allocMap[val] = allocMap[representative];
+			continue;
+		}
+		assignStackSlot(val);
 	}
 
 	// 计算栈帧总大小：callee-saved + 局部变量 + 超出寄存器传递的调用参数，16字节对齐

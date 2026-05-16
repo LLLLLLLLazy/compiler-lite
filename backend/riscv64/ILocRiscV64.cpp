@@ -46,6 +46,46 @@ bool referencesLabel(const RiscV64Inst * inst, const std::string & label)
 	return inst->result == label || inst->arg1 == label || inst->arg2 == label || inst->addition == label;
 }
 
+/// @brief 判断指令是否为最终有效的机器指令（非dead、非注释、非标签）
+/// @param inst 待判断的指令
+/// @return 若为有效机器指令则返回true
+bool isFinalMachineInstruction(const RiscV64Inst * inst)
+{
+	return inst != nullptr && !inst->dead && !inst->opcode.empty() && inst->opcode != "#" && inst->result != ":";
+}
+
+/// @brief 判断操作数是否为直接栈操作数（以(sp)或(s0)为基址）
+/// @param operand 操作数字符串
+/// @return 若为栈操作数则返回true
+bool isDirectStackOperand(const std::string & operand)
+{
+	return operand.find("(sp)") != std::string::npos || operand.find("(s0)") != std::string::npos;
+}
+
+/// @brief 判断操作码是否为栈加载指令（lw/ld/flw/fld）
+/// @param opcode 操作码字符串
+/// @return 若为加载指令则返回true
+bool isLoadOpcode(const std::string & opcode)
+{
+	return opcode == "lw" || opcode == "ld" || opcode == "flw" || opcode == "fld";
+}
+
+/// @brief 判断操作码是否为栈存储指令（sw/sd/fsw/fsd）
+/// @param opcode 操作码字符串
+/// @return 若为存储指令则返回true
+bool isStoreOpcode(const std::string & opcode)
+{
+	return opcode == "sw" || opcode == "sd" || opcode == "fsw" || opcode == "fsd";
+}
+
+/// @brief 判断操作码是否为寄存器移动指令（mv/fmv.x.w/fmv.w.x/fsgnj.s）
+/// @param opcode 操作码字符串
+/// @return 若为move指令则返回true
+bool isMoveOpcode(const std::string & opcode)
+{
+	return opcode == "mv" || opcode == "fmv.x.w" || opcode == "fmv.w.x" || opcode == "fsgnj.s";
+}
+
 int alignTo(int value, int align)
 {
 	if (align <= 0) {
@@ -275,6 +315,32 @@ void ILocRiscV64::outPut(FILE * file, bool outputEmpty)
 std::list<RiscV64Inst *> & ILocRiscV64::getCode()
 {
 	return code;
+}
+
+/// @brief 收集最终静态指标
+/// @return peephole之后、忽略dead/标签/注释后的汇编级指标
+/// @note 统计内容包括：机器指令总数、栈load/store次数（以sp/s0为基址的lw/ld/flw/fld/sw/sd/fsw/fsd）、
+///       move指令次数（mv/fmv.x.w/fmv.w.x/fsgnj.s）
+RiscV64CodegenStats ILocRiscV64::collectFinalStats() const
+{
+	RiscV64CodegenStats stats;
+	for (const auto * inst : code) {
+		if (!isFinalMachineInstruction(inst)) {
+			continue;
+		}
+
+		++stats.machineInstructionCount;
+		if (isLoadOpcode(inst->opcode) && isDirectStackOperand(inst->arg1)) {
+			++stats.stackLoadCount;
+		}
+		if (isStoreOpcode(inst->opcode) && isDirectStackOperand(inst->arg1)) {
+			++stats.stackStoreCount;
+		}
+		if (isMoveOpcode(inst->opcode)) {
+			++stats.moveInstructionCount;
+		}
+	}
+	return stats;
 }
 
 /**

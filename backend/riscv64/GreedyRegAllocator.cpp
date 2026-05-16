@@ -135,7 +135,7 @@ void GreedyRegAllocator::allocate(Function * func)
 		}
 	}
 	if (coalescer_) {
-		coalescer_->run(intervals, ig, func, valueToInterval);
+		coalescer_->run(intervals, ig, func, valueToInterval, instNumbering);
 	}
 
 	// 运行Greedy分配主循环
@@ -166,6 +166,7 @@ void GreedyRegAllocator::allocate(Function * func)
 			valueLiveRanges[interval->getVReg()] = {interval->getStart(), interval->getEnd()};
 		}
 	}
+	refreshCoalescedAliasAllocations();
 }
 
 /// @brief 获取虚拟寄存器分配的物理寄存器编号
@@ -226,6 +227,77 @@ const std::unordered_set<Instruction *> & GreedyRegAllocator::getEliminatedCopie
 		return coalescer_->getEliminatedCopies();
 	}
 	return emptySet;
+}
+
+/// @brief 获取寄存器合并后的最终代表值
+/// @param value 待查询的Value
+/// @return 沿着representative映射链找到的最终代表值；若未被合并则返回自身
+/// @note 使用visited集合防止循环引用导致无限循环
+Value * GreedyRegAllocator::getCoalescedRepresentative(Value * value) const
+{
+	if (value == nullptr || !coalescer_) {
+		return value;
+	}
+
+	const auto & representative = coalescer_->getRepresentativeMap();
+	std::unordered_set<Value *> visited;
+	Value * current = value;
+	while (current != nullptr) {
+		auto it = representative.find(current);
+		if (it == representative.end() || it->second == nullptr || !visited.insert(current).second) {
+			break;
+		}
+		current = it->second;
+	}
+	return current;
+}
+
+/// @brief 将 coalesced alias 的位置查询统一回最终代表值
+/// @note 遍历coalescer的representative映射，对每个被合并的alias：
+///       1. 查找其最终代表值（沿映射链走到终点）
+///       2. 将代表值的allocationMap、allocationSegments、valueLiveRanges
+///          复制到alias，使两者共享同一位置
+///       3. 同步spilledValues和splitStackValues集合
+///       这确保被coalescing消除的copy指令的src/dst在后续代码生成中
+///       使用完全相同的寄存器/栈槽位置
+void GreedyRegAllocator::refreshCoalescedAliasAllocations()
+{
+	if (!coalescer_) {
+		return;
+	}
+
+	for (const auto & [alias, _] : coalescer_->getRepresentativeMap()) {
+		Value * representative = getCoalescedRepresentative(alias);
+		if (alias == nullptr || representative == nullptr || alias == representative) {
+			continue;
+		}
+
+		auto mapIt = allocationMap.find(representative);
+		if (mapIt != allocationMap.end()) {
+			allocationMap[alias] = mapIt->second;
+		}
+
+		auto segIt = allocationSegments.find(representative);
+		if (segIt != allocationSegments.end()) {
+			allocationSegments[alias] = segIt->second;
+		}
+
+		auto liveIt = valueLiveRanges.find(representative);
+		if (liveIt != valueLiveRanges.end()) {
+			valueLiveRanges[alias] = liveIt->second;
+		}
+
+		if (spilledValues.find(representative) != spilledValues.end()) {
+			spilledValues.insert(alias);
+		} else {
+			spilledValues.erase(alias);
+		}
+		if (splitStackValues.find(representative) != splitStackValues.end()) {
+			splitStackValues.insert(alias);
+		} else {
+			splitStackValues.erase(alias);
+		}
+	}
 }
 
 /// @brief 执行Greedy分配主循环
@@ -772,6 +844,7 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 	rebuildStats();
 	stats.estimatedReloads = estimatedReloads;
 	stats.estimatedSpillStores = estimatedSpillStores;
+	refreshCoalescedAliasAllocations();
 }
 
 void GreedyRegAllocator::rebuildStats()

@@ -305,6 +305,10 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 		}
 	}
 
+	// 逐块反向扫描生成区间。对每个 block，liveEnd[value] 表示该值当前
+	// 打开的局部 live segment 右端点：use 打开区间，def 关闭区间，liveOut
+	// 则从块尾先打开。这样既覆盖回边，又不会把互斥前驱的多定义值误扩成
+	// 一条跨整段函数的假活跃区间。
 	for (auto * bb : blocks) {
 		auto firstIt = blockFirstInst.find(bb);
 		auto lastIt = blockLastInst.find(bb);
@@ -312,58 +316,92 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 			continue;
 		}
 
-		ValueSet blockLive = liveIn[bb];
-		blockLive.insert(liveOut[bb].begin(), liveOut[bb].end());
-		for (Value * value : blockLive) {
+		const int blockStart = firstIt->second;
+		const int blockEnd = lastIt->second + 1;
+		std::unordered_map<Value *, int> liveEnd;
+		for (Value * value : liveOut[bb]) {
 			if (needsInterval(value)) {
-				getOrCreateInterval(value)->addSegment(firstIt->second, lastIt->second + 1);
+				liveEnd[value] = blockEnd;
 			}
+		}
+
+		auto & insts = bb->getInstructions();
+		for (auto instIt = insts.rbegin(); instIt != insts.rend(); ++instIt) {
+			Instruction * inst = *instIt;
+			const int pos = instNumbering[inst];
+
+			if (Value * def = instructionDef(inst); needsInterval(def)) {
+				auto openIt = liveEnd.find(def);
+				if (openIt != liveEnd.end()) {
+					getOrCreateInterval(def)->addSegment(pos, openIt->second);
+					liveEnd.erase(openIt);
+				} else {
+					// 即便定义结果未被后续读取，也保留定义点这一拍，供
+					// copy endpoint overlap 与局部死定义判断使用。
+					getOrCreateInterval(def)->addSegment(pos, pos + 1);
+				}
+			}
+
+			for (Value * use : instructionUses(inst)) {
+				if (!needsInterval(use)) {
+					continue;
+				}
+				auto [_, inserted] = liveEnd.emplace(use, pos + 1);
+				if (!inserted) {
+					// 反向扫描时保留更靠后的右端点。
+					continue;
+				}
+			}
+		}
+
+		for (const auto & [value, end] : liveEnd) {
+			getOrCreateInterval(value)->addSegment(blockStart, end);
 		}
 	}
 
-	// SSA值通常只有一个定义，可直接从定义点延伸到各使用点。
-	// PhiLowering会为同一个phi结果在不同前驱块插入显式copy，形成多个定义；
-	// 这种值使用一个保守连续区间覆盖所有copy定义和后续使用。
+	// PhiLowering 会把循环携带值改写成“同一个逻辑 Value 的多次定义”。
+	// 当前 split lane 仍按 Value 的整体区间决定 call-site transfer，因此这类
+	// 循环多定义值先保留一条保守总段，避免在旧值/新值交接尚未完全建模时
+	// 把同一逻辑变量拆到不兼容的位置。coalescer 对局部 producer temp 的
+	// destructive-update 合并仍能在这层保守壳里安全发生。
+	// 仅对定义点或使用点触及循环（loopDepth > 0）的多定义值做此保守扩展。
 	for (auto * interval : intervals) {
 		Value * value = interval->getVReg();
 		auto defsIt = valueDefs.find(value);
 		auto usesIt = valueUses.find(value);
-		const auto * uses = usesIt != valueUses.end() ? &usesIt->second : nullptr;
-
-		if (defsIt == valueDefs.end() || defsIt->second.empty()) {
-			if (uses == nullptr || uses->empty()) {
-				continue;
-			}
-
-			int lastUse = 0;
-			for (const auto & use : *uses) {
-				lastUse = std::max(lastUse, use.pos);
-			}
-			interval->addSegment(0, lastUse + 1);
+		if (defsIt == valueDefs.end() || defsIt->second.size() <= 1) {
 			continue;
 		}
 
-		const auto & defs = defsIt->second;
-		if (defs.size() == 1) {
-			if (uses == nullptr) {
-				continue;
+		bool touchesLoop = false;
+		if (loopInfo != nullptr) {
+			for (const auto & def : defsIt->second) {
+				if (def.block != nullptr && loopInfo->getLoopDepth(def.block) > 0) {
+					touchesLoop = true;
+					break;
+				}
 			}
-
-			const int defPos = defs.front().pos;
-			for (const auto & use : *uses) {
-				interval->addSegment(std::min(defPos, use.pos), std::max(defPos, use.pos) + 1);
+			if (!touchesLoop && usesIt != valueUses.end()) {
+				for (const auto & use : usesIt->second) {
+					if (use.block != nullptr && loopInfo->getLoopDepth(use.block) > 0) {
+						touchesLoop = true;
+						break;
+					}
+				}
 			}
+		}
+		if (!touchesLoop) {
 			continue;
 		}
 
 		int firstPos = std::numeric_limits<int>::max();
 		int lastPos = std::numeric_limits<int>::min();
-		for (const auto & def : defs) {
+		for (const auto & def : defsIt->second) {
 			firstPos = std::min(firstPos, def.pos);
 			lastPos = std::max(lastPos, def.pos);
 		}
-		if (uses != nullptr) {
-			for (const auto & use : *uses) {
+		if (usesIt != valueUses.end()) {
+			for (const auto & use : usesIt->second) {
 				firstPos = std::min(firstPos, use.pos);
 				lastPos = std::max(lastPos, use.pos);
 			}
@@ -373,10 +411,10 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 		}
 	}
 
-	// 对跨越自然循环的值补充整段循环体。这里覆盖两类常见形态：
-	// 1. 循环前定义，循环体内或循环退出后使用，必须穿过整个循环；
-	// 2. 循环内定义，循环外使用，必须活到循环出口。
-	// 这直接用LoopInfo覆盖回边，不再通过基本块live-in/live-out求不动点。
+	// Split 传递与临时寄存器避让当前仍以整体区间边界为主视图。
+	// 对跨越自然循环的值补足整个循环体，避免回边值在 split lane
+	// 被误判为可中途改位；coalescer 对局部 destructive-update 仍可识别
+	// 真正只覆盖 def→copy 的临时值。
 	if (loopInfo != nullptr) {
 		std::vector<LoopRange> loopRanges;
 		for (auto * bb : blocks) {
@@ -442,7 +480,7 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 				}
 
 				if ((hasDefBeforeLoop && (usedInLoop || usedAtOrAfterLoop)) ||
-					(hasDefInsideLoop && usedOutsideLoop)) {
+				    (hasDefInsideLoop && usedOutsideLoop)) {
 					interval->addSegment(loop.start, loop.end);
 				}
 			}

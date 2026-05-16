@@ -117,6 +117,14 @@ struct RiscV64Inst {
 	std::string outPut();
 };
 
+/// @brief 汇编输出后的函数级静态指标，用于RA统计JSON输出
+struct RiscV64CodegenStats {
+	int machineInstructionCount = 0;  ///< 有效机器指令总数（排除dead/标签/注释）
+	int stackLoadCount = 0;           ///< 直接栈加载次数（lw/ld/flw/fld + sp/s0基址）
+	int stackStoreCount = 0;          ///< 直接栈存储次数（sw/sd/fsw/fsd + sp/s0基址）
+	int moveInstructionCount = 0;     ///< 寄存器移动指令次数（mv/fmv.x.w/fmv.w.x/fsgnj.s）
+};
+
 /// @brief 底层汇编序列-RISC-V64
 ///
 /// 适配SSA IR：
@@ -335,6 +343,9 @@ public:
 
 	/// @brief 获取当前机器指令计数
 	int getMachineInstCount() const { return machineInstCount; }
+
+	/// @brief 收集经过peephole与dead-code标记后的最终静态指标
+	RiscV64CodegenStats collectFinalStats() const;
 
 	/// @brief 记录IR指令对应的机器指令范围
 	/// @param inst IR指令
