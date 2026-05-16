@@ -39,7 +39,7 @@ private:
     /// @param runner pass 执行器
     void registerModulePass(ModulePassRunner runner);
 
-    /// @brief 注册函数级 pass 之后、定点函数级 pass 之前执行的模块级 pass
+    /// @brief 注册定点函数级 pass 之前执行的模块级 pass
     /// @param runner pass 执行器
     void registerLateModulePass(ModulePassRunner runner);
 
@@ -50,6 +50,10 @@ private:
     /// @brief 注册参与定点迭代的函数级 pass
     /// @param runner pass 执行器
     void registerFixedPointFunctionPass(FunctionPassRunner runner);
+
+    /// @brief 注册在定点迭代收敛后执行一次的后置函数级 pass
+    /// @param runner pass 执行器
+    void registerLateFunctionPass(FunctionPassRunner runner);
 
     /// @brief 执行一组函数级 pass
     /// @param runners pass 执行器列表
@@ -66,5 +70,6 @@ private:
     std::vector<ModulePassRunner> lateModulePasses;
     std::vector<FunctionPassRunner> functionPasses;
     std::vector<FunctionPassRunner> fixedPointFunctionPasses;
+    std::vector<FunctionPassRunner> lateFunctionPasses;
     int32_t maxFixedPointRounds = 0;
 };

@@ -237,6 +237,10 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/LoopTiling.cpp
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.h
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.cpp
+	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.h
+	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.cpp
+	ir/passes/functionPass/LoopRotate.h
+	ir/passes/functionPass/LoopRotate.cpp
 	ir/passes/fixedPointFunctionPass/SimpleLoopUnroll.h
 	ir/passes/fixedPointFunctionPass/SimpleLoopUnroll.cpp
 	ir/passes/toolPass/CFGStateCleanup.h
