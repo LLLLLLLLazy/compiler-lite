@@ -269,6 +269,8 @@ set(IR_SRCS
 	ir/passes/modulePass/SmallFunctionInline.cpp
 	ir/passes/functionPass/TailRecursionElim.h
 	ir/passes/functionPass/TailRecursionElim.cpp
+	ir/passes/functionPass/LateLoopCFGCleanup.h
+	ir/passes/functionPass/LateLoopCFGCleanup.cpp
 	ir/passes/functionPass/PhiLowering.h
 	ir/passes/functionPass/PhiLowering.cpp
 	ir/passes/fixedPointFunctionPass/PureCallLoopCache.h
