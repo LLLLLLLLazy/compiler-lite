@@ -38,6 +38,7 @@
 #include "PlatformRiscV64.h"
 #include "PointerType.h"
 #include "ReturnInst.h"
+#include "SelectInst.h"
 #include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "Use.h"
@@ -512,6 +513,7 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_RET] = &InstSelectorRiscV64::translate_ret;
 	translatorHandlers[IRInstOperator::IRINST_OP_CALL] = &InstSelectorRiscV64::translate_call;
 	translatorHandlers[IRInstOperator::IRINST_OP_PHI] = &InstSelectorRiscV64::translate_phi;
+	translatorHandlers[IRInstOperator::IRINST_OP_SELECT] = &InstSelectorRiscV64::translate_select;
 	translatorHandlers[IRInstOperator::IRINST_OP_ZEXT] = &InstSelectorRiscV64::translate_zext;
 	translatorHandlers[IRInstOperator::IRINST_OP_COPY] = &InstSelectorRiscV64::translate_copy;
 	translatorHandlers[IRInstOperator::IRINST_OP_GEP] = &InstSelectorRiscV64::translate_gep;
@@ -1952,6 +1954,85 @@ bool InstSelectorRiscV64::tryTranslateRepeatedPowerOfTwoDivRemCall(CallInst * ca
 void InstSelectorRiscV64::translate_phi(Instruction * inst)
 {
 	(void) inst;
+}
+
+/// @brief 翻译select指令（条件选择）
+/// @param inst IR指令
+///
+/// RISC-V64 没有通用条件移动指令，这里统一降为：
+///   1. 先判断条件并跳到 false 标签
+///   2. true 路径先写入结果并跳过 false 路径
+///   3. false 路径补写结果
+void InstSelectorRiscV64::translate_select(Instruction * inst)
+{
+	auto * select = dynamic_cast<SelectInst *>(inst);
+	if (select == nullptr) {
+		return;
+	}
+
+	OperandReg cond = loadOperand(select->getCondition(), inst);
+	const std::string labelBase = ".L_" + func->getName() + "_select_" +
+	                              std::to_string(iloc.getMachineInstCount());
+	const std::string falseLabel = labelBase + "_false";
+	const std::string doneLabel = labelBase + "_done";
+	iloc.inst("beq", PlatformRiscV64::regName[cond.reg], "zero", falseLabel);
+	releaseOperand(cond);
+
+	if (select->getType()->isFloatType()) {
+		// float 结果优先保留在 FPR 中，避免额外的整数/浮点搬运
+		int dstReg = getFloatResultReg(inst);
+		bool dstTemp = false;
+		if (dstReg < 0) {
+			dstReg = borrowFloatTemp(inst);
+			dstTemp = true;
+		}
+
+		FloatOperandReg trueOperand = loadFloatOperand(select->getTrueValue(), inst, -1, dstReg);
+		if (trueOperand.reg != dstReg) {
+			iloc.fmov_reg(dstReg, trueOperand.reg);
+		}
+		releaseFloatOperand(trueOperand);
+		iloc.jump(doneLabel);
+		iloc.label(falseLabel);
+
+		FloatOperandReg falseOperand = loadFloatOperand(select->getFalseValue(), inst, -1, dstReg);
+		if (falseOperand.reg != dstReg) {
+			iloc.fmov_reg(dstReg, falseOperand.reg);
+		}
+		releaseFloatOperand(falseOperand);
+		iloc.label(doneLabel);
+
+		storeFloatResult(inst, dstReg, inst);
+		if (dstTemp) {
+			releaseFloatTemp(dstReg);
+		}
+		return;
+	}
+
+	// 整数和指针结果复用通用 GPR 结果槽
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg trueOperand = loadOperand(select->getTrueValue(), inst, -1, dstReg);
+	if (trueOperand.reg != dstReg) {
+		iloc.mov_reg(dstReg, trueOperand.reg);
+	}
+	releaseOperand(trueOperand);
+	iloc.jump(doneLabel);
+	iloc.label(falseLabel);
+
+	OperandReg falseOperand = loadOperand(select->getFalseValue(), inst, -1, dstReg);
+	if (falseOperand.reg != dstReg) {
+		iloc.mov_reg(dstReg, falseOperand.reg);
+	}
+	releaseOperand(falseOperand);
+	iloc.label(doneLabel);
+
+	storeResult(inst, dstReg, inst);
 }
 
 /// @brief 翻译zext指令（零扩展）

@@ -151,6 +151,8 @@ private:
 	void translate_call(Instruction * inst);
 	/// @brief 翻译phi指令（φ节点，SSA合并）
 	void translate_phi(Instruction * inst);
+	/// @brief 翻译select指令（条件选择）
+	void translate_select(Instruction * inst);
 	/// @brief 翻译zext指令（零扩展）
 	void translate_zext(Instruction * inst);
 	/// @brief 翻译copy指令（寄存器复制）

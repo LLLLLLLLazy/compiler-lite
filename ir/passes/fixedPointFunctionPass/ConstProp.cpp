@@ -29,6 +29,7 @@
 #include "LoadInst.h"
 #include "PhiInst.h"
 #include "SIToFPInst.h"
+#include "SelectInst.h"
 #include "StoreInst.h"
 #include "Value.h"
 #include "ZExtInst.h"
@@ -656,6 +657,37 @@ private:
         return LatticeValue::getUnknown();
     }
 
+    /// @brief 计算 select 指令的 lattice 值
+    /// @param inst 待求值的 select 指令
+    /// @return 求值得到的 lattice 状态
+    LatticeValue evaluateSelect(SelectInst * inst) const
+    {
+        if (!inst) {
+            return LatticeValue::getOverdefined();
+        }
+
+        LatticeValue cond = getValueState(inst->getCondition());
+        LatticeValue trueValue = getValueState(inst->getTrueValue());
+        LatticeValue falseValue = getValueState(inst->getFalseValue());
+
+        // 条件格已知时，直接沿被选择的那一路继续传播
+        if (cond.isIntegerConstant()) {
+            return cond.intConstant != 0 ? trueValue : falseValue;
+        }
+
+        // 条件未知但两路是同一个常量时，结果仍可定为该常量
+        if (trueValue.isConstant() && falseValue.isConstant()) {
+            return trueValue.equalsConstant(falseValue) ? trueValue : LatticeValue::getOverdefined();
+        }
+
+        // 任一路退化为 overdefined 后，结果也无法继续精化
+        if (trueValue.isOverdefined() || falseValue.isOverdefined()) {
+            return LatticeValue::getOverdefined();
+        }
+
+        return LatticeValue::getUnknown();
+    }
+
     /// @brief 计算 sitofp 指令的 lattice 值
     /// @param inst 待求值的 sitofp 指令
     /// @return 求值得到的 lattice 状态
@@ -812,6 +844,9 @@ private:
 
             case IRInstOperator::IRINST_OP_ZEXT:
                 return evaluateZExt(dynamic_cast<ZExtInst *>(inst));
+
+            case IRInstOperator::IRINST_OP_SELECT:
+                return evaluateSelect(dynamic_cast<SelectInst *>(inst));
 
             case IRInstOperator::IRINST_OP_SITOFP:
                 return evaluateSIToFP(dynamic_cast<SIToFPInst *>(inst));

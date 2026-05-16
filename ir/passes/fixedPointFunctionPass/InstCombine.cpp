@@ -24,6 +24,7 @@
 #include "Module.h"
 #include "PhiInst.h"
 #include "SIToFPInst.h"
+#include "SelectInst.h"
 #include "Value.h"
 #include "ZExtInst.h"
 
@@ -199,6 +200,10 @@ bool InstCombine::trySimplifyInstruction(Instruction * inst)
 
     if (auto * sitofp = dynamic_cast<SIToFPInst *>(inst)) {
         return simplifySIToFP(sitofp);
+    }
+
+    if (auto * select = dynamic_cast<SelectInst *>(inst)) {
+        return simplifySelect(select);
     }
 
     if (auto * fptosi = dynamic_cast<FPToSIInst *>(inst)) {
@@ -443,6 +448,29 @@ bool InstCombine::simplifySIToFP(SIToFPInst * inst)
     }
 
     return replaceInstWithValue(inst, mod->newConstFloat(static_cast<float>(source->getVal())));
+}
+
+/// @brief 化简 select 指令
+/// @param inst 待化简的 select 指令
+/// @return 若成功化简则返回 true
+bool InstCombine::simplifySelect(SelectInst * inst)
+{
+    if (!inst) {
+        return false;
+    }
+
+    // true/false 两路相同则 select 本身冗余
+    if (inst->getTrueValue() == inst->getFalseValue()) {
+        return replaceInstWithValue(inst, inst->getTrueValue());
+    }
+
+    auto * condition = dynamic_cast<ConstInteger *>(inst->getCondition());
+    if (!condition) {
+        return false;
+    }
+
+    // 条件已知时直接挑出对应分支值
+    return replaceInstWithValue(inst, condition->getVal() != 0 ? inst->getTrueValue() : inst->getFalseValue());
 }
 
 /// @brief 折叠常量 float-to-int cast

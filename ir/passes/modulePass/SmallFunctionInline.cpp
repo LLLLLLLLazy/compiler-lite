@@ -41,6 +41,7 @@
 #include "Module.h"
 #include "PhiInst.h"
 #include "ReturnInst.h"
+#include "SelectInst.h"
 #include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "ZExtInst.h"
@@ -533,6 +534,7 @@ bool isSupportedInlineInstruction(Instruction * inst)
            dynamic_cast<LoadInst *>(inst) != nullptr ||
            dynamic_cast<PhiInst *>(inst) != nullptr ||
            dynamic_cast<ReturnInst *>(inst) != nullptr ||
+           dynamic_cast<SelectInst *>(inst) != nullptr ||
            dynamic_cast<SIToFPInst *>(inst) != nullptr ||
            dynamic_cast<StoreInst *>(inst) != nullptr ||
            dynamic_cast<ZExtInst *>(inst) != nullptr;
@@ -789,6 +791,14 @@ Instruction * SmallFunctionInline::cloneInstructionShell(Instruction * inst, Fun
 
     if (auto * zext = dynamic_cast<ZExtInst *>(inst)) {
         return new ZExtInst(caller, zext->getSource(), zext->getType());
+    }
+
+    if (auto * select = dynamic_cast<SelectInst *>(inst)) {
+        return new SelectInst(caller,
+                              select->getCondition(),
+                              select->getTrueValue(),
+                              select->getFalseValue(),
+                              select->getType());
     }
 
     if (auto * sitofp = dynamic_cast<SIToFPInst *>(inst)) {

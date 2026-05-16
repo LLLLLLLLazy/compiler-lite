@@ -23,6 +23,7 @@ class Instruction;
 class Module;
 class PhiInst;
 class SIToFPInst;
+class SelectInst;
 class Value;
 class ZExtInst;
 
@@ -75,6 +76,11 @@ private:
     /// @param inst 待化简的 sitofp 指令
     /// @return 若成功化简则返回 true
     bool simplifySIToFP(SIToFPInst * inst);
+
+    /// @brief 化简 select 指令
+    /// @param inst 待化简的 select 指令
+    /// @return 若成功化简则返回 true
+    bool simplifySelect(SelectInst * inst);
 
     /// @brief 折叠常量 float-to-int cast
     /// @param inst 待化简的 fptosi 指令

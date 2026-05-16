@@ -29,6 +29,7 @@
 #include "Module.h"
 #include "PhiInst.h"
 #include "ScalarEvolution.h"
+#include "SelectInst.h"
 #include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "Value.h"
@@ -58,6 +59,7 @@ bool isCloneableBodyInstruction(Instruction * inst)
            dynamic_cast<LoadInst *>(inst) != nullptr ||
            dynamic_cast<StoreInst *>(inst) != nullptr ||
            dynamic_cast<ZExtInst *>(inst) != nullptr ||
+           dynamic_cast<SelectInst *>(inst) != nullptr ||
            dynamic_cast<SIToFPInst *>(inst) != nullptr ||
            dynamic_cast<FPToSIInst *>(inst) != nullptr;
 }
@@ -297,6 +299,13 @@ Instruction * SimpleLoopUnroll::cloneInstruction(Instruction * inst)
     }
     if (auto * zext = dynamic_cast<ZExtInst *>(inst)) {
         return new ZExtInst(func, zext->getSource(), zext->getType());
+    }
+    if (auto * select = dynamic_cast<SelectInst *>(inst)) {
+        return new SelectInst(func,
+                              select->getCondition(),
+                              select->getTrueValue(),
+                              select->getFalseValue(),
+                              select->getType());
     }
     if (auto * sitofp = dynamic_cast<SIToFPInst *>(inst)) {
         return new SIToFPInst(func, sitofp->getSource(), sitofp->getType());

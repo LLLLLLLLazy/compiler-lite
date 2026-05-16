@@ -37,6 +37,7 @@
 #include "SIToFPInst.h"
 #include "FPToSIInst.h"
 #include "PureFunctionAnalysis.h"
+#include "SelectInst.h"
 #include "StoreInst.h"
 #include "Type.h"
 #include "Value.h"
@@ -380,6 +381,7 @@ bool isValueInstruction(Instruction * inst)
            dynamic_cast<ICmpInst *>(inst) != nullptr ||
            dynamic_cast<FCmpInst *>(inst) != nullptr ||
            dynamic_cast<ZExtInst *>(inst) != nullptr ||
+            dynamic_cast<SelectInst *>(inst) != nullptr ||
            dynamic_cast<SIToFPInst *>(inst) != nullptr ||
            dynamic_cast<FPToSIInst *>(inst) != nullptr;
 }

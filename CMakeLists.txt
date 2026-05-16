@@ -200,6 +200,8 @@ set(IR_SRCS
 	ir/Instructions/PhiInst.cpp
 	ir/Instructions/ZExtInst.h
 	ir/Instructions/ZExtInst.cpp
+	ir/Instructions/SelectInst.h
+	ir/Instructions/SelectInst.cpp
 	ir/Instructions/CopyInst.h
 	ir/Instructions/CopyInst.cpp
 	ir/Instructions/GetElementPtrInst.h
@@ -259,6 +261,8 @@ set(IR_SRCS
 	ir/analysis/LoopInfo.cpp
 	ir/passes/functionPass/Mem2Reg.h
 	ir/passes/functionPass/Mem2Reg.cpp
+	ir/passes/functionPass/PhiToSelect.h
+	ir/passes/functionPass/PhiToSelect.cpp
 	ir/passes/fixedPointFunctionPass/LICM.h
 	ir/passes/fixedPointFunctionPass/LICM.cpp
 	ir/passes/modulePass/SmallFunctionInline.h

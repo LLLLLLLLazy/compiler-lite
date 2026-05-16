@@ -20,6 +20,7 @@
 #include "fixedPointFunctionPass/PureCallLoopCache.h"
 #include "functionPass/ArrayScalarize.h"
 #include "functionPass/Mem2Reg.h"
+#include "functionPass/PhiToSelect.h"
 #include "functionPass/PhiLowering.h"
 #include "functionPass/PureCallCSE.h"
 #include "functionPass/TailRecursionElim.h"
@@ -185,6 +186,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return pass.run();
     });
 
+    registerFixedPointFunctionPass([](Function * func) {
+        PhiToSelect pass(func);
+        return pass.run();
+    });
+
     registerFixedPointFunctionPass([this](Function * func) {
         InstCombine pass(func, module);
         return pass.run();
@@ -223,6 +229,11 @@ void PassManager::registerPhiLoweringPipeline()
     if (module == nullptr) {
         return;
     }
+
+    registerFunctionPass([](Function * func) {
+        PhiToSelect pass(func);
+        return pass.run();
+    });
 
     registerFunctionPass([this](Function * func) {
         PhiLowering pass(func, module);

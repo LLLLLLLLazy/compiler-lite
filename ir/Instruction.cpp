@@ -136,6 +136,7 @@ bool Instruction::isSpeculatable() const
         case IRInstOperator::IRINST_OP_ZEXT:
         case IRInstOperator::IRINST_OP_SITOFP:
         case IRInstOperator::IRINST_OP_FPTOSI:
+        case IRInstOperator::IRINST_OP_SELECT:
         case IRInstOperator::IRINST_OP_COPY:
         case IRInstOperator::IRINST_OP_GEP:
             return true;

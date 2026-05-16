@@ -48,6 +48,7 @@ enum class IRInstOperator : std::int8_t {
     IRINST_OP_ZEXT,      ///< 零扩展指令，例如将 i1 扩展为 i32
     IRINST_OP_SITOFP,    ///< i32 -> float
     IRINST_OP_FPTOSI,    ///< float -> i32
+    IRINST_OP_SELECT,    ///< 条件选择指令
     IRINST_OP_COPY,      ///< 值复制指令，供 PhiLoweringPass 消除 phi 时使用
     IRINST_OP_GEP,       ///< 元素地址计算指令
 
