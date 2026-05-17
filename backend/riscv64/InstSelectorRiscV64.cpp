@@ -181,28 +181,6 @@ bool isConstIntValue(Value * value, int32_t expected)
 	return constant != nullptr && constant->getVal() == expected;
 }
 
-/// @brief 判断比较指令是否可由其唯一的 select 使用点直接处理
-/// @param icmp 待判断的整数比较指令
-/// @return 若是仅被单个 select 使用的与 0 比较，则返回 true
-bool isZeroCompareOnlyUsedBySelect(ICmpInst * icmp)
-{
-	if (icmp == nullptr) {
-		return false;
-	}
-
-	if (icmp->getOp() != IRInstOperator::IRINST_OP_EQ_I &&
-	    icmp->getOp() != IRInstOperator::IRINST_OP_NE_I) {
-		return false;
-	}
-
-	if (!isConstIntValue(icmp->getLHS(), 0) && !isConstIntValue(icmp->getRHS(), 0)) {
-		return false;
-	}
-
-	const auto & uses = icmp->getUseList();
-	return uses.size() == 1 && uses.front() != nullptr && dynamic_cast<SelectInst *>(uses.front()->getUser()) != nullptr;
-}
-
 /// @brief 判断值是否为int32类型
 /// @param value 待判断的值
 /// @return 若value非空且类型为int32则返回true
@@ -1430,12 +1408,6 @@ void InstSelectorRiscV64::translate_icmp(Instruction * inst)
 		return;
 	}
 
-	// 这类比较只作为 select(cond, true, false) 的条件使用时，select 会直接按被比较值发分支。
-	// 因此这里无需再先把比较结果物化成 0/1。
-	if (isZeroCompareOnlyUsedBySelect(icmp)) {
-		return;
-	}
-
 	int dstReg = getResultReg(inst);
 	LocalTempManager::Lease dstLease;
 	if (dstReg < 0) {
@@ -2012,9 +1984,8 @@ void InstSelectorRiscV64::translate_phi(Instruction * inst)
 /// @brief 翻译select指令（条件选择）
 /// @param inst IR指令
 ///
-/// RISC-V64 没有通用条件移动指令，这里分两种策略降级：
-///   1. cond 是 icmp 时，直接基于原比较发分支，避免先把条件物化成 0/1
-///   2. 其它情况采用“先写 false，再按 cond 覆写 true”的单分支形式
+/// RISC-V64 没有通用条件移动指令，这里采用“先写 false，再按 cond 覆写 true”的单分支形式。
+/// 条件值统一使用前序指令已物化的 0/1 结果，避免跨越其它定义后再次读取原比较操作数。
 void InstSelectorRiscV64::translate_select(Instruction * inst)
 {
 	auto * select = dynamic_cast<SelectInst *>(inst);
@@ -2024,38 +1995,7 @@ void InstSelectorRiscV64::translate_select(Instruction * inst)
 
 	const std::string labelBase = ".L_" + func->getName() + "_select_" +
 	                              std::to_string(iloc.getMachineInstCount());
-	const std::string trueLabel = labelBase + "_true";
 	const std::string doneLabel = labelBase + "_done";
-	auto * condIcmp = dynamic_cast<ICmpInst *>(select->getCondition());
-	auto tryEmitZeroCompareTrueBranch = [&](const std::string & label) -> bool {
-		if (condIcmp == nullptr) {
-			return false;
-		}
-
-		if (condIcmp->getOp() != IRInstOperator::IRINST_OP_EQ_I &&
-		    condIcmp->getOp() != IRInstOperator::IRINST_OP_NE_I) {
-			return false;
-		}
-
-		Value * comparedValue = nullptr;
-		if (isConstIntValue(condIcmp->getLHS(), 0)) {
-			comparedValue = condIcmp->getRHS();
-		} else if (isConstIntValue(condIcmp->getRHS(), 0)) {
-			comparedValue = condIcmp->getLHS();
-		} else {
-			return false;
-		}
-
-		OperandReg compared = loadOperand(comparedValue, inst);
-		const std::string comparedReg = PlatformRiscV64::regName[compared.reg];
-		if (condIcmp->getOp() == IRInstOperator::IRINST_OP_NE_I) {
-			iloc.inst("bne", comparedReg, "zero", label);
-		} else {
-			iloc.inst("beq", comparedReg, "zero", label);
-		}
-		releaseOperand(compared);
-		return true;
-	};
 
 	if (select->getType()->isFloatType()) {
 		// float 结果优先保留在 FPR 中，避免额外的整数/浮点搬运
@@ -2064,29 +2004,6 @@ void InstSelectorRiscV64::translate_select(Instruction * inst)
 		if (dstReg < 0) {
 			dstReg = borrowFloatTemp(inst);
 			dstTemp = true;
-		}
-
-		if (tryEmitZeroCompareTrueBranch(trueLabel)) {
-			FloatOperandReg falseOperand = loadFloatOperand(select->getFalseValue(), inst, -1, dstReg);
-			if (falseOperand.reg != dstReg) {
-				iloc.fmov_reg(dstReg, falseOperand.reg);
-			}
-			releaseFloatOperand(falseOperand);
-			iloc.jump(doneLabel);
-			iloc.label(trueLabel);
-
-			FloatOperandReg trueOperand = loadFloatOperand(select->getTrueValue(), inst, -1, dstReg);
-			if (trueOperand.reg != dstReg) {
-				iloc.fmov_reg(dstReg, trueOperand.reg);
-			}
-			releaseFloatOperand(trueOperand);
-			iloc.label(doneLabel);
-
-			storeFloatResult(inst, dstReg, inst);
-			if (dstTemp) {
-				releaseFloatTemp(dstReg);
-			}
-			return;
 		}
 
 		OperandReg cond = loadOperand(select->getCondition(), inst);
@@ -2119,26 +2036,6 @@ void InstSelectorRiscV64::translate_select(Instruction * inst)
 	if (dstReg < 0) {
 		dstLease = tempMgr.borrow(inst);
 		dstReg = dstLease.reg();
-	}
-
-	if (tryEmitZeroCompareTrueBranch(trueLabel)) {
-		OperandReg falseOperand = loadOperand(select->getFalseValue(), inst, -1, dstReg);
-		if (falseOperand.reg != dstReg) {
-			iloc.mov_reg(dstReg, falseOperand.reg);
-		}
-		releaseOperand(falseOperand);
-		iloc.jump(doneLabel);
-		iloc.label(trueLabel);
-
-		OperandReg trueOperand = loadOperand(select->getTrueValue(), inst, -1, dstReg);
-		if (trueOperand.reg != dstReg) {
-			iloc.mov_reg(dstReg, trueOperand.reg);
-		}
-		releaseOperand(trueOperand);
-		iloc.label(doneLabel);
-
-		storeResult(inst, dstReg, inst);
-		return;
 	}
 
 	OperandReg cond = loadOperand(select->getCondition(), inst);
