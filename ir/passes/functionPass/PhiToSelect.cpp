@@ -566,7 +566,8 @@ bool tryCollapseMerge(BasicBlock * merge)
     BasicBlock * first = preds[0];
     BasicBlock * second = preds[1];
 
-    if (branchesDirectlyTo(first, merge) && branchesDirectlyTo(second, merge)) {
+    if (branchesDirectlyTo(first, merge) && branchesDirectlyTo(second, merge) &&
+        getNonTerminatorInstructionCount(first) == 0 && getNonTerminatorInstructionCount(second) == 0) {
         const auto & firstPreds = first->getPredecessors();
         const auto & secondPreds = second->getPredecessors();
         if (firstPreds.size() == 1 && secondPreds.size() == 1 && firstPreds.front() == secondPreds.front()) {
@@ -604,7 +605,8 @@ bool tryCollapseMerge(BasicBlock * merge)
             nested = condBr->getTrueDest();
         }
 
-        if (!nested || nested == merge || !branchesDirectlyTo(nested, merge)) {
+        if (!nested || nested == merge || !branchesDirectlyTo(nested, merge) ||
+            getNonTerminatorInstructionCount(nested) != 0) {
             continue;
         }
 
