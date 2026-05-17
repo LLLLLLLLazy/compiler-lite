@@ -17,12 +17,30 @@ bool isLiveInst(RiscV64Inst * inst)
 	return inst != nullptr && !inst->dead && !inst->opcode.empty();
 }
 
+/// @brief 判断是否为仅用于汇编展示的注释伪指令。
+bool isCommentInst(RiscV64Inst * inst)
+{
+	return isLiveInst(inst) && inst->opcode == "#";
+}
+
 InstIt nextLive(InstList & code, InstIt it)
 {
 	if (it != code.end()) {
 		++it;
 	}
 	while (it != code.end() && !isLiveInst(*it)) {
+		++it;
+	}
+	return it;
+}
+
+/// @brief 获取下一条真实机器指令；跳过 dead 指令与可选的 IR 注释。
+InstIt nextMachineInst(InstList & code, InstIt it)
+{
+	if (it != code.end()) {
+		++it;
+	}
+	while (it != code.end() && (!isLiveInst(*it) || isCommentInst(*it))) {
 		++it;
 	}
 	return it;
@@ -129,6 +147,40 @@ bool foldZeroSubCompare(InstList & code)
 		changed = true;
 	}
 	return changed;
+}
+
+bool parseIntImmediate(const std::string & text, int & value)
+{
+	try {
+		std::size_t parsed = 0;
+		const int imm = std::stoi(text, &parsed);
+		if (parsed != text.size()) {
+			return false;
+		}
+		value = imm;
+		return true;
+	} catch (...) {
+		return false;
+	}
+}
+
+bool branchComparesRegisterWithZero(RiscV64Inst * branch,
+	                                const std::string & valueReg,
+	                                const std::string & zeroReg)
+{
+	if (!isLiveInst(branch) || (branch->opcode != "beq" && branch->opcode != "bne") || valueReg.empty() ||
+	    zeroReg.empty()) {
+		return false;
+	}
+
+	return (branch->result == valueReg && branch->arg1 == zeroReg) ||
+	       (branch->result == zeroReg && branch->arg1 == valueReg);
+}
+
+bool isNegateSelf(RiscV64Inst * inst, const std::string & reg)
+{
+	return isLiveInst(inst) && inst->opcode == "subw" && inst->result == reg && inst->arg1 == "zero" &&
+	       inst->arg2 == reg;
 }
 
 /// @brief 融合 fmul.s + fadd.s 为 fmadd.s（以及 fsub 变体）
@@ -531,6 +583,184 @@ bool registerLiveOutOfBlock(const MachineLiveness & info, RiscV64Inst * inst, co
 		return true;
 	}
 	return info.blocks[it->second].liveOut.find(reg) != info.blocks[it->second].liveOut.end();
+}
+
+/// @brief 将 `% ±2^k ==/!= 0` 的 signed-rem 降低序列改写为位测试。
+///
+/// 对于零比较，`x % ±2^k` 是否为 0 只取决于 x 的低 k 位；即便 x 为负数，
+/// 零判定也与 `x & ((1<<k)-1)` 相同。仅在 remainder 结果不会跨出当前
+/// 条件分支继续作为真实余数使用时，才删除完整余数链。
+bool foldPowerOfTwoRemainderZeroBranch(InstList & code)
+{
+	bool changed = false;
+	// 预先构建机器级活跃性分析，用于判断余数寄存器是否跨基本块存活
+	const MachineLiveness liveness = buildMachineLiveness(code);
+
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		// 第一步：匹配符号掩码指令 sraiw biasReg, srcReg, 31
+		// 这是编译器生成的 signed remainder 序列的起始指令，
+		// 将源操作数的符号位扩展到所有位，得到 0 或 -1
+		auto * signMask = *it;
+		if (!isLiveInst(signMask) || signMask->opcode != "sraiw" || signMask->arg2 != "31") {
+			continue;
+		}
+
+		const std::string biasReg = signMask->result;
+		const std::string srcReg = signMask->arg1;
+		if (biasReg.empty() || srcReg.empty()) {
+			continue;
+		}
+
+		// 第二步：依次匹配后续三条指令，构成除法商的计算链：
+		//   srliw biasReg, biasReg, (32-k)   -- 右移得到偏移修正值
+		//   addw  quotientReg, srcReg, biasReg -- 加上偏移修正
+		//   sraiw quotientReg, quotientReg, k  -- 算术右移k位得到商
+		auto biasShiftIt = nextMachineInst(code, it);
+		auto addIt = nextMachineInst(code, biasShiftIt);
+		auto quotientShiftIt = nextMachineInst(code, addIt);
+		if (biasShiftIt == code.end() || addIt == code.end() || quotientShiftIt == code.end()) {
+			continue;
+		}
+
+		auto * biasShift = *biasShiftIt;
+		auto * add = *addIt;
+		auto * quotientShift = *quotientShiftIt;
+		int biasShiftAmount = 0;
+		int quotientShiftAmount = 0;
+		if (!isLiveInst(biasShift) || biasShift->opcode != "srliw" || biasShift->result != biasReg ||
+		    biasShift->arg1 != biasReg || !parseIntImmediate(biasShift->arg2, biasShiftAmount) ||
+		    !isLiveInst(add) || add->opcode != "addw" || add->arg1 != srcReg || add->arg2 != biasReg ||
+		    add->result.empty() || !isLiveInst(quotientShift) || quotientShift->opcode != "sraiw" ||
+		    quotientShift->result != add->result || quotientShift->arg1 != add->result ||
+		    !parseIntImmediate(quotientShift->arg2, quotientShiftAmount)) {
+			continue;
+		}
+
+		const std::string quotientReg = add->result;
+		// 验证移位量合法性：k 在 [1,30] 范围内，且偏移移位量 = 32 - k
+		if (quotientShiftAmount <= 0 || quotientShiftAmount >= 31 ||
+		    biasShiftAmount != 32 - quotientShiftAmount) {
+			continue;
+		}
+
+		// 收集所有需要标记为死代码的指令迭代器
+		auto currentIt = quotientShiftIt;
+		std::vector<InstIt> chainIts = {it, biasShiftIt, addIt, quotientShiftIt};
+
+		// 第三步：可选地匹配负除数的取反指令 subw q, zero, q
+		// 若除数为负数（如 x % -8），编译器会在商计算后插入取反操作
+		bool negativeDivisor = false;
+		auto maybeNegateIt = nextMachineInst(code, currentIt);
+		if (maybeNegateIt != code.end() && isNegateSelf(*maybeNegateIt, quotientReg)) {
+			negativeDivisor = true;
+			chainIts.push_back(maybeNegateIt);
+			currentIt = maybeNegateIt;
+		}
+
+		// 第四步：匹配商乘以除数的左移指令 slliw q, q, k
+		// 这是计算 quotient * divisor = quotient * 2^k 的步骤
+		auto productShiftIt = nextMachineInst(code, currentIt);
+		if (productShiftIt == code.end()) {
+			continue;
+		}
+		auto * productShift = *productShiftIt;
+		int productShiftAmount = 0;
+		if (!isLiveInst(productShift) || productShift->opcode != "slliw" ||
+		    productShift->result != quotientReg || productShift->arg1 != quotientReg ||
+		    !parseIntImmediate(productShift->arg2, productShiftAmount) ||
+		    productShiftAmount != quotientShiftAmount) {
+			continue;
+		}
+		chainIts.push_back(productShiftIt);
+		currentIt = productShiftIt;
+
+		// 若除数为负数，还需匹配第二次取反指令 subw q, zero, q
+		// 用于将 quotient * (-2^k) 的结果取反
+		if (negativeDivisor) {
+			auto secondNegateIt = nextMachineInst(code, currentIt);
+			if (secondNegateIt == code.end() || !isNegateSelf(*secondNegateIt, quotientReg)) {
+				continue;
+			}
+			chainIts.push_back(secondNegateIt);
+			currentIt = secondNegateIt;
+		}
+
+		// 第五步：匹配余数计算指令 subw remainderReg, srcReg, quotientReg
+		// remainder = src - quotient * divisor
+		auto remainderIt = nextMachineInst(code, currentIt);
+		if (remainderIt == code.end()) {
+			continue;
+		}
+		auto * remainder = *remainderIt;
+		if (!isLiveInst(remainder) || remainder->opcode != "subw" || remainder->arg1 != srcReg ||
+		    remainder->arg2 != quotientReg || remainder->result.empty()) {
+			continue;
+		}
+
+		const std::string remainderReg = remainder->result;
+		auto afterRemainderIt = nextMachineInst(code, remainderIt);
+		if (afterRemainderIt == code.end()) {
+			continue;
+		}
+
+		// 第六步：匹配零比较分支指令
+		// 可能的形式：beq/bne remainderReg, zeroReg, label
+		// 其中 zeroReg 可能是 "zero" 寄存器，也可能是 li 加载的 0
+		InstIt zeroMaterializeIt = code.end();
+		InstIt branchIt = code.end();
+		std::string zeroReg;
+		auto * nextInst = *afterRemainderIt;
+		if (isLiveInst(nextInst) && nextInst->opcode == "li" && nextInst->arg1 == "0" &&
+		    !nextInst->result.empty()) {
+			// 零值通过 li 指令材料化到临时寄存器
+			zeroMaterializeIt = afterRemainderIt;
+			zeroReg = nextInst->result;
+			branchIt = nextMachineInst(code, zeroMaterializeIt);
+		} else {
+			// 零值直接使用硬件零寄存器 "zero"
+			zeroReg = "zero";
+			branchIt = afterRemainderIt;
+		}
+		// 安全性检查：余数寄存器不能在基本块出口仍然活跃，
+		// 否则后续代码可能依赖余数的真实值而非仅判断是否为零
+		if (branchIt == code.end() || !branchComparesRegisterWithZero(*branchIt, remainderReg, zeroReg) ||
+		    registerLiveOutOfBlock(liveness, *branchIt, remainderReg)) {
+			continue;
+		}
+
+		// 第七步：执行优化改写
+		// 将整个 signed remainder 计算链标记为死代码
+		for (auto chainIt : chainIts) {
+			(*chainIt)->setDead();
+		}
+
+		// 将余数计算替换为位掩码操作：
+		//   若掩码值 mask = (1<<k)-1 <= 2047（12位立即数范围），使用 andi 指令
+		//   否则使用 slliw 左移指令替代（后续配合其他优化完成掩码计算）
+		const int mask = (1 << quotientShiftAmount) - 1;
+		if (mask <= 2047) {
+			remainder->replace("andi", remainderReg, srcReg, std::to_string(mask));
+		} else {
+			remainder->replace("slliw", remainderReg, srcReg, std::to_string(32 - quotientShiftAmount));
+		}
+
+		// 若零值是通过 li 材料化的临时寄存器，且该寄存器在分支后不再活跃，
+		// 则将分支指令中的临时寄存器替换为 "zero"，并删除 li 指令
+		if (zeroMaterializeIt != code.end() && !registerLiveOutOfBlock(liveness, *branchIt, zeroReg)) {
+			auto * branch = *branchIt;
+			if (branch->result == zeroReg) {
+				branch->result = "zero";
+			}
+			if (branch->arg1 == zeroReg) {
+				branch->arg1 = "zero";
+			}
+			(*zeroMaterializeIt)->setDead();
+		}
+
+		changed = true;
+	}
+
+	return changed;
 }
 
 /// @brief 判断寄存器在当前块内是否先被使用（或遇到控制流边界），再被重定义
@@ -1845,6 +2075,8 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		localChanged = foldInvariantAddressOffsetsIntoRecurrences(code) || localChanged;
 		localChanged = reduceMulByConst(code) || localChanged;
 		localChanged = foldUnitStepIncrements(code) || localChanged;
+		// 2的幂取模零值分支优化：将 x % ±2^k ==/!= 0 的余数计算链替换为位掩码测试
+		localChanged = foldPowerOfTwoRemainderZeroBranch(code) || localChanged;
 		localChanged = foldZeroSubCompare(code) || localChanged;
 		// 折叠立即数/地址材料化后的冗余move：li x,imm; mv y,x -> li y,imm
 		localChanged = foldMaterializationMoves(code) || localChanged;
