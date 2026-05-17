@@ -275,7 +275,7 @@ bool collapseRepeatedInvariantCallLoop(Function * func,
 
         CanonicalLoop loop;
         if (!scev.matchCanonicalLoop(header, loop) || !loop.recurrence || !loop.hasConstInitialValue ||
-            loop.recurrence->getStep() != 1 || loop.tripCount <= 1) {
+            !loop.hasConstTripCount || loop.recurrence->getStep() != 1 || loop.tripCount <= 1) {
             continue;
         }
 
@@ -519,8 +519,8 @@ bool hasPred(BasicBlock * bb, BasicBlock * pred)
 
 int32_t chooseTileSize(int32_t requestedTileSize, const CanonicalLoop & outer, const CanonicalLoop & inner)
 {
-    if (requestedTileSize == 32 && outer.bound->getVal() >= kLargeNestTripCount &&
-        inner.bound->getVal() >= kLargeNestTripCount) {
+    if (requestedTileSize == 32 && outer.hasConstBoundValue && inner.hasConstBoundValue &&
+        outer.boundIntValue >= kLargeNestTripCount && inner.boundIntValue >= kLargeNestTripCount) {
         return kLargeNestTileSize;
     }
 
@@ -530,7 +530,7 @@ int32_t chooseTileSize(int32_t requestedTileSize, const CanonicalLoop & outer, c
 bool matchCanonicalLoop(ScalarEvolution & scev, BasicBlock * header, CanonicalLoop & loop)
 {
     if (!header || !scev.matchCanonicalLoop(header, loop) || !loop.recurrence || !loop.hasConstInitialValue ||
-        loop.initialIntValue != 0 || loop.recurrence->getStep() != 1) {
+        !loop.hasConstTripCount || !loop.boundValue || loop.initialIntValue != 0 || loop.recurrence->getStep() != 1) {
         return false;
     }
     if (loop.tripCount < kMinTileTripCount) {
@@ -1018,7 +1018,7 @@ bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo, ScalarE
     auto * tile = mod->newConstInt32(chooseTileSize(tileSize, outer, inner));
 
     auto * rowTile = new PhiInst(func, outer.induction->getType());
-    auto * rowCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, rowTile, outer.bound, outer.cmp->getType());
+    auto * rowCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, rowTile, outer.boundValue, outer.cmp->getType());
     auto * rowCond = new CondBranchInst(func, rowCmp, rowLimitCheck, outer.exit);
     rowTile->addIncoming(zero, outer.preheader);
     rowHeader->addInstruction(rowTile);
@@ -1028,7 +1028,8 @@ bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo, ScalarE
     rowHeader->linkSuccessor(outer.exit);
 
     auto * rowPlus = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, rowTile, tile, rowTile->getType());
-    auto * rowLimitCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, rowPlus, outer.bound, outer.cmp->getType());
+    auto * rowLimitCmp =
+        new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, rowPlus, outer.boundValue, outer.cmp->getType());
     auto * rowLimitCond = new CondBranchInst(func, rowLimitCmp, rowLimitThen, rowLimitElse);
     rowLimitCheck->addInstruction(rowPlus);
     rowLimitCheck->addInstruction(rowLimitCmp);
@@ -1043,13 +1044,13 @@ bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo, ScalarE
 
     auto * rowLimit = new PhiInst(func, outer.induction->getType());
     rowLimit->addIncoming(rowPlus, rowLimitThen);
-    rowLimit->addIncoming(outer.bound, rowLimitElse);
+    rowLimit->addIncoming(outer.boundValue, rowLimitElse);
     rowLimitMerge->addInstruction(rowLimit);
     rowLimitMerge->addInstruction(new BranchInst(func, colHeader));
     rowLimitMerge->linkSuccessor(colHeader);
 
     auto * colTile = new PhiInst(func, inner.induction->getType());
-    auto * colCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, colTile, inner.bound, inner.cmp->getType());
+    auto * colCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, colTile, inner.boundValue, inner.cmp->getType());
     auto * colCond = new CondBranchInst(func, colCmp, colLimitCheck, rowLatch);
     colTile->addIncoming(zero, rowLimitMerge);
     colHeader->addInstruction(colTile);
@@ -1059,7 +1060,8 @@ bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo, ScalarE
     colHeader->linkSuccessor(rowLatch);
 
     auto * colPlus = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, colTile, tile, colTile->getType());
-    auto * colLimitCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, colPlus, inner.bound, inner.cmp->getType());
+    auto * colLimitCmp =
+        new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, colPlus, inner.boundValue, inner.cmp->getType());
     auto * colLimitCond = new CondBranchInst(func, colLimitCmp, colLimitThen, colLimitElse);
     colLimitCheck->addInstruction(colPlus);
     colLimitCheck->addInstruction(colLimitCmp);
@@ -1074,7 +1076,7 @@ bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo, ScalarE
 
     auto * colLimit = new PhiInst(func, inner.induction->getType());
     colLimit->addIncoming(colPlus, colLimitThen);
-    colLimit->addIncoming(inner.bound, colLimitElse);
+    colLimit->addIncoming(inner.boundValue, colLimitElse);
     colLimitMerge->addInstruction(colLimit);
     colLimitMerge->addInstruction(new BranchInst(func, outer.header));
     colLimitMerge->linkSuccessor(outer.header);

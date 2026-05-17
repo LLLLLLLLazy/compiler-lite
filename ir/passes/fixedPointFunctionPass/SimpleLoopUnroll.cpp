@@ -6,7 +6,9 @@
 #include "SimpleLoopUnroll.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <iterator>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -27,6 +29,7 @@
 #include "Module.h"
 #include "PhiInst.h"
 #include "ScalarEvolution.h"
+#include "SelectInst.h"
 #include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "Value.h"
@@ -56,8 +59,21 @@ bool isCloneableBodyInstruction(Instruction * inst)
            dynamic_cast<LoadInst *>(inst) != nullptr ||
            dynamic_cast<StoreInst *>(inst) != nullptr ||
            dynamic_cast<ZExtInst *>(inst) != nullptr ||
+           dynamic_cast<SelectInst *>(inst) != nullptr ||
            dynamic_cast<SIToFPInst *>(inst) != nullptr ||
            dynamic_cast<FPToSIInst *>(inst) != nullptr;
+}
+
+/// @brief 计算完全展开时某次迭代对应的归纳变量常量值
+bool tryComputeInductionValue(int32_t start, int32_t step, int32_t iteration, int32_t & value)
+{
+    const int64_t result = static_cast<int64_t>(start) + static_cast<int64_t>(step) * iteration;
+    if (result < std::numeric_limits<int32_t>::min() || result > std::numeric_limits<int32_t>::max()) {
+        return false;
+    }
+
+    value = static_cast<int32_t>(result);
+    return true;
 }
 
 } // namespace
@@ -100,8 +116,8 @@ bool SimpleLoopUnroll::tryUnrollHeader(BasicBlock * header, ScalarEvolution & sc
     }
 
     ScalarEvolution::CanonicalLoop loop;
-    if (!scev.matchCanonicalLoop(header, loop) || !loop.hasConstInitialValue || !loop.recurrence ||
-        loop.recurrence->getStep() != 1) {
+    if (!scev.matchCanonicalLoop(header, loop) || !loop.hasConstInitialValue || !loop.hasConstTripCount ||
+        !loop.recurrence || loop.recurrence->getStep() == 0) {
         return false;
     }
 
@@ -136,6 +152,7 @@ bool SimpleLoopUnroll::tryUnrollHeader(BasicBlock * header, ScalarEvolution & sc
     }
 
     const int32_t start = loop.initialIntValue;
+    const int32_t step = loop.recurrence->getStep();
     const int32_t tripCount = loop.tripCount;
     if (tripCount <= 0 || tripCount > kMaxUnrollTripCount) {
         return false;
@@ -177,9 +194,13 @@ bool SimpleLoopUnroll::tryUnrollHeader(BasicBlock * header, ScalarEvolution & sc
 
     for (int32_t iter = 0; iter < tripCount; ++iter) {
         std::unordered_map<Value *, Value *> valueMap;
+        int32_t iterValue = 0;
+        if (!tryComputeInductionValue(start, step, iter, iterValue)) {
+            return false;
+        }
         for (auto * phi : headerPhis) {
             if (phi == induction) {
-                valueMap[phi] = mod->newConstInt32(start + iter);
+                valueMap[phi] = mod->newConstInteger(induction->getType(), iterValue);
             } else {
                 valueMap[phi] = currentValues[phi];
             }
@@ -209,7 +230,11 @@ bool SimpleLoopUnroll::tryUnrollHeader(BasicBlock * header, ScalarEvolution & sc
 
         for (auto * phi : headerPhis) {
             if (phi == induction) {
-                currentValues[phi] = mod->newConstInt32(start + iter + 1);
+                int32_t nextValue = 0;
+                if (!tryComputeInductionValue(start, step, iter + 1, nextValue)) {
+                    return false;
+                }
+                currentValues[phi] = mod->newConstInteger(induction->getType(), nextValue);
                 continue;
             }
 
@@ -274,6 +299,13 @@ Instruction * SimpleLoopUnroll::cloneInstruction(Instruction * inst)
     }
     if (auto * zext = dynamic_cast<ZExtInst *>(inst)) {
         return new ZExtInst(func, zext->getSource(), zext->getType());
+    }
+    if (auto * select = dynamic_cast<SelectInst *>(inst)) {
+        return new SelectInst(func,
+                              select->getCondition(),
+                              select->getTrueValue(),
+                              select->getFalseValue(),
+                              select->getType());
     }
     if (auto * sitofp = dynamic_cast<SIToFPInst *>(inst)) {
         return new SIToFPInst(func, sitofp->getSource(), sitofp->getType());

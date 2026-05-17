@@ -11,6 +11,7 @@
 #include "Module.h"
 #include "fixedPointFunctionPass/CFGSimplify.h"
 #include "fixedPointFunctionPass/ConstProp.h"
+#include "fixedPointFunctionPass/CanonicalizeLoop.h"
 #include "fixedPointFunctionPass/DeadInstElim.h"
 #include "fixedPointFunctionPass/GVN.h"
 #include "fixedPointFunctionPass/InstCombine.h"
@@ -22,8 +23,10 @@
 #include "fixedPointFunctionPass/UnreachableBlockElim.h"
 #include "fixedPointFunctionPass/PureCallLoopCache.h"
 #include "functionPass/ArrayScalarize.h"
+#include "functionPass/LateLoopCFGCleanup.h"
 #include "functionPass/LoopParallelize.h"
 #include "functionPass/Mem2Reg.h"
+#include "functionPass/PhiToSelect.h"
 #include "functionPass/PhiLowering.h"
 #include "functionPass/PureCallCSE.h"
 #include "functionPass/TailRecursionElim.h"
@@ -40,6 +43,8 @@ bool isOptimizableFunction(Function * func)
     return func != nullptr && !func->isBuiltin() && !func->getBlocks().empty();
 }
 
+/// @brief 第二轮 SmallFunctionInline 后的清理流水线，主要针对内联展开后产生的冗余代码进行清理
+/// @param currentModule 
 bool runPostInlineCleanupPipeline(Module * currentModule)
 {
     if (currentModule == nullptr) {
@@ -68,6 +73,32 @@ bool runPostInlineCleanupPipeline(Module * currentModule)
     return changed;
 }
 
+/// @brief 固定点循环优化结束后的晚期 CFG 收尾流水线
+/// @param func 待处理函数
+/// @return true 表示至少有一个 pass 修改了 IR
+bool runPostFixedPointLoopCleanupPipeline(Function * func)
+{
+    if (!isOptimizableFunction(func)) {
+        return false;
+    }
+
+    bool changed = false;
+    bool localChanged = false;
+    do {
+        localChanged = false;
+
+        LateLoopCFGCleanup lateLoopCFGCleanup(func);
+        localChanged = lateLoopCFGCleanup.run() || localChanged;
+
+        CFGSimplify cfgSimplify(func);
+        localChanged = cfgSimplify.run() || localChanged;
+
+        changed = localChanged || changed;
+    } while (localChanged);
+
+    return changed;
+}
+
 } // namespace
 
 /// @brief 构造 pass 管理器
@@ -89,11 +120,6 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return pass.run();
     });
 
-    registerFunctionPass([this](Function * func) {
-        PureCallCSE pass(func, module);
-        return pass.run();
-    });
-
     registerModulePass([](Module * currentModule) {
         SmallFunctionInline pass(currentModule);
         return pass.run();
@@ -101,6 +127,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
 
     registerModulePass([](Module * currentModule) {
         GlobalToLocal pass(currentModule);
+        return pass.run();
+    });
+
+    registerFunctionPass([this](Function * func) {
+        PureCallCSE pass(func, module);
         return pass.run();
     });
 
@@ -150,6 +181,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
     });
 
     registerFixedPointFunctionPass([this](Function * func) {
+        CanonicalizeLoop pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
         LoopTiling pass(func, module);
         return pass.run();
     });
@@ -189,6 +225,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return pass.run();
     });
 
+    registerFixedPointFunctionPass([](Function * func) {
+        PhiToSelect pass(func);
+        return pass.run();
+    });
+
     registerFixedPointFunctionPass([this](Function * func) {
         InstCombine pass(func, module);
         return pass.run();
@@ -219,11 +260,9 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         return pass.run();
     });
 
-    // 循环并行化pass放在定点迭代之后执行，确保分块等变换已稳定
-    // registerPostFixedPointFunctionPass([this](Function * func) {
-    //     LoopParallelize pass(func, module);
-    //     return pass.run();
-    // });
+    registerLateFunctionPass([](Function * func) {
+        return runPostFixedPointLoopCleanupPipeline(func);
+    });
 }
 
 /// @brief 注册后端前置的 phi 降级流水线
@@ -233,6 +272,11 @@ void PassManager::registerPhiLoweringPipeline()
     if (module == nullptr) {
         return;
     }
+
+    registerFunctionPass([](Function * func) {
+        PhiToSelect pass(func);
+        return pass.run();
+    });
 
     registerFunctionPass([this](Function * func) {
         PhiLowering pass(func, module);
@@ -258,7 +302,6 @@ void PassManager::run()
         runner(module);
     }
 
-    // 执行定点迭代pass组：反复运行直到IR不再变化或达到最大迭代轮数
     if (!fixedPointFunctionPasses.empty()) {
         bool changed = false;
         int32_t round = 0;
@@ -268,8 +311,7 @@ void PassManager::run()
         } while (changed && round < maxFixedPointRounds);
     }
 
-    // 定点迭代收敛后，单次执行后置pass组（如循环并行化）
-    runFunctionPassGroup(postFixedPointFunctionPasses);
+    runFunctionPassGroup(lateFunctionPasses);
 }
 
 /// @brief 清空当前已注册的所有 pass
@@ -279,7 +321,7 @@ void PassManager::clear()
     lateModulePasses.clear();
     functionPasses.clear();
     fixedPointFunctionPasses.clear();
-    postFixedPointFunctionPasses.clear();
+    lateFunctionPasses.clear();
     maxFixedPointRounds = 0;
 }
 
@@ -290,7 +332,7 @@ void PassManager::registerModulePass(ModulePassRunner runner)
     modulePasses.push_back(std::move(runner));
 }
 
-/// @brief 注册函数级 pass 之后、定点函数级 pass 之前执行的模块级 pass
+/// @brief 注册定点函数级 pass 之前执行的模块级 pass
 /// @param runner pass 执行器
 void PassManager::registerLateModulePass(ModulePassRunner runner)
 {
@@ -311,11 +353,11 @@ void PassManager::registerFixedPointFunctionPass(FunctionPassRunner runner)
     fixedPointFunctionPasses.push_back(std::move(runner));
 }
 
-/// @brief 注册定点迭代结束后单次执行的函数级 pass
+/// @brief 注册在定点迭代收敛后执行一次的后置函数级 pass
 /// @param runner pass 执行器
-void PassManager::registerPostFixedPointFunctionPass(FunctionPassRunner runner)
+void PassManager::registerLateFunctionPass(FunctionPassRunner runner)
 {
-    postFixedPointFunctionPasses.push_back(std::move(runner));
+    lateFunctionPasses.push_back(std::move(runner));
 }
 
 /// @brief 执行一组函数级 pass

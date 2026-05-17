@@ -196,6 +196,8 @@ set(IR_SRCS
 	ir/Instructions/PhiInst.cpp
 	ir/Instructions/ZExtInst.h
 	ir/Instructions/ZExtInst.cpp
+	ir/Instructions/SelectInst.h
+	ir/Instructions/SelectInst.cpp
 	ir/Instructions/CopyInst.h
 	ir/Instructions/CopyInst.cpp
 	ir/Instructions/GetElementPtrInst.h
@@ -237,6 +239,10 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/LoopTiling.cpp
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.h
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.cpp
+	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.h
+	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.cpp
+	ir/passes/functionPass/LoopRotate.h
+	ir/passes/functionPass/LoopRotate.cpp
 	ir/passes/fixedPointFunctionPass/SimpleLoopUnroll.h
 	ir/passes/fixedPointFunctionPass/SimpleLoopUnroll.cpp
 	ir/passes/toolPass/CFGStateCleanup.h
@@ -257,12 +263,16 @@ set(IR_SRCS
 	ir/analysis/LoopInfo.cpp
 	ir/passes/functionPass/Mem2Reg.h
 	ir/passes/functionPass/Mem2Reg.cpp
+	ir/passes/functionPass/PhiToSelect.h
+	ir/passes/functionPass/PhiToSelect.cpp
 	ir/passes/fixedPointFunctionPass/LICM.h
 	ir/passes/fixedPointFunctionPass/LICM.cpp
 	ir/passes/modulePass/SmallFunctionInline.h
 	ir/passes/modulePass/SmallFunctionInline.cpp
 	ir/passes/functionPass/TailRecursionElim.h
 	ir/passes/functionPass/TailRecursionElim.cpp
+	ir/passes/functionPass/LateLoopCFGCleanup.h
+	ir/passes/functionPass/LateLoopCFGCleanup.cpp
 	ir/passes/functionPass/PhiLowering.h
 	ir/passes/functionPass/PhiLowering.cpp
 	ir/passes/fixedPointFunctionPass/PureCallLoopCache.h

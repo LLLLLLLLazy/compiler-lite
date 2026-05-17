@@ -239,13 +239,11 @@ lb_check:
 				gFrontEndRecursiveDescentParsing = true;
 				break;
 			case 'O':
-				// 仅支持两级：0关闭优化，1开启优化
+				// 0关闭优化，>0开启优化
 				if (std::string(optarg) == "0") {
 					gOptLevel = 0;
-				} else if (std::string(optarg) == "1") {
-					gOptLevel = 1;
 				} else {
-					return -1;
+					gOptLevel = 1;
 				}
 				break;
 			case 't':

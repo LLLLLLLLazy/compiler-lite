@@ -41,6 +41,7 @@
 #include "Module.h"
 #include "PhiInst.h"
 #include "ReturnInst.h"
+#include "SelectInst.h"
 #include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "ZExtInst.h"
@@ -69,14 +70,32 @@ constexpr int32_t kHotSmallMaxInsts = 180;
 constexpr int32_t kHotLoopLeafMaxBlocks = 12;
 /// @brief 循环内热点调用点允许的单层叶子循环函数最大指令数
 constexpr int32_t kHotLoopLeafMaxInsts = 64;
+/// @brief 非热点调用点允许的单层叶子循环函数最大基本块数
+constexpr int32_t kLoopLeafMaxBlocks = 6;
+/// @brief 非热点调用点允许的单层叶子循环函数最大指令数
+constexpr int32_t kLoopLeafMaxInsts = 32;
 /// @brief 循环内热点调用点允许的单层叶子循环函数最大循环体基本块数
 constexpr int32_t kHotLoopLeafMaxBodyBlocks = 8;
 /// @brief 循环内热点调用点允许的单层叶子循环函数最大直接调用点数
 constexpr int32_t kHotLoopLeafMaxCallSites = 8;
+/// @brief 热点循环中的单调用点单层叶子循环函数最大基本块数
+constexpr int32_t kHotSingleUseLoopLeafMaxBlocks = 24;
+/// @brief 热点循环中的单调用点单层叶子循环函数最大指令数
+constexpr int32_t kHotSingleUseLoopLeafMaxInsts = 160;
+/// @brief 热点循环中的单调用点单层叶子循环函数最大循环体基本块数
+constexpr int32_t kHotSingleUseLoopLeafMaxBodyBlocks = 16;
+/// @brief 非热点调用点允许的单层叶子循环函数最大直接调用点数
+constexpr int32_t kLoopLeafMaxCallSites = 4;
 /// @brief 被内联函数的 alloca 总字节数上限，防止栈帧膨胀
 constexpr int32_t kMaxAllocaBytes = 128;
 /// @brief 循环内热点调用点的 alloca 总字节数上限
 constexpr int32_t kHotMaxAllocaBytes = 256;
+/// @brief 热点调用点允许的自递归叶子 helper 最大基本块数
+constexpr int32_t kHotSelfRecursiveLeafMaxBlocks = 10;
+/// @brief 热点调用点允许的自递归叶子 helper 最大指令数
+constexpr int32_t kHotSelfRecursiveLeafMaxInsts = 48;
+/// @brief 热点调用点允许的自递归叶子 helper 最大直接调用点数
+constexpr int32_t kHotSelfRecursiveLeafMaxCallSites = 16;
 
 /// @brief 自然循环摘要
 struct NaturalLoopSummary {
@@ -228,6 +247,76 @@ bool isEligibleHotLoopLeafCallee(Module * mod,
 
     return blockCount <= kHotLoopLeafMaxBlocks && instCount <= kHotLoopLeafMaxInsts &&
            loopSummary.maxLoopBodyBlocks <= kHotLoopLeafMaxBodyBlocks;
+}
+
+bool isEligibleHotSingleUseLoopLeafCallee(Module * mod,
+                                          Function * callee,
+                                          const NaturalLoopSummary & loopSummary,
+                                          int32_t allocaBytes,
+                                          int32_t blockCount,
+                                          int32_t instCount)
+{
+    if (!mod || !callee || loopSummary.loopCount == 0 || loopSummary.loopCount > 2 ||
+        loopSummary.maxDepth > 1) {
+        return false;
+    }
+
+    if (allocaBytes != 0) {
+        return false;
+    }
+
+    if (countDirectCallSites(mod, callee) != 1) {
+        return false;
+    }
+
+    return blockCount <= kHotSingleUseLoopLeafMaxBlocks &&
+           instCount <= kHotSingleUseLoopLeafMaxInsts &&
+           loopSummary.maxLoopBodyBlocks <= kHotSingleUseLoopLeafMaxBodyBlocks;
+}
+
+bool isEligibleLoopLeafCallee(Module * mod,
+                              Function * callee,
+                              const NaturalLoopSummary & loopSummary,
+                              int32_t allocaBytes,
+                              int32_t blockCount,
+                              int32_t instCount)
+{
+    if (!mod || !callee || loopSummary.loopCount != 1 || loopSummary.maxDepth > 1) {
+        return false;
+    }
+
+    if (allocaBytes != 0) {
+        return false;
+    }
+
+    if (countDirectCallSites(mod, callee) > kLoopLeafMaxCallSites) {
+        return false;
+    }
+
+    return blockCount <= kLoopLeafMaxBlocks && instCount <= kLoopLeafMaxInsts &&
+           loopSummary.maxLoopBodyBlocks <= kHotLoopLeafMaxBodyBlocks;
+}
+
+bool isEligibleHotSelfRecursiveLeafCallee(Module * mod,
+                                          Function * callee,
+                                          int32_t allocaBytes,
+                                          int32_t blockCount,
+                                          int32_t instCount)
+{
+    if (!mod || !callee) {
+        return false;
+    }
+
+    if (allocaBytes != 0) {
+        return false;
+    }
+
+    if (countDirectCallSites(mod, callee) > kHotSelfRecursiveLeafMaxCallSites) {
+        return false;
+    }
+
+    return blockCount <= kHotSelfRecursiveLeafMaxBlocks &&
+           instCount <= kHotSelfRecursiveLeafMaxInsts;
 }
 
 using SideEffectAnalyzer = FunctionSideEffectAnalysis;
@@ -485,6 +574,7 @@ bool isSupportedInlineInstruction(Instruction * inst)
            dynamic_cast<LoadInst *>(inst) != nullptr ||
            dynamic_cast<PhiInst *>(inst) != nullptr ||
            dynamic_cast<ReturnInst *>(inst) != nullptr ||
+           dynamic_cast<SelectInst *>(inst) != nullptr ||
            dynamic_cast<SIToFPInst *>(inst) != nullptr ||
            dynamic_cast<StoreInst *>(inst) != nullptr ||
            dynamic_cast<ZExtInst *>(inst) != nullptr;
@@ -617,14 +707,18 @@ bool SmallFunctionInline::inlineFirstCall()
 /// @param call 调用点
 /// @param callLoopDepth 调用点所在循环深度
 /// @return true 表示可以内联该 callee
-bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call, int32_t callLoopDepth) const
+bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call, int32_t callLoopDepth)
 {
     Function * callee = call ? call->getCallee() : nullptr;
     if (!caller || !callee || callee->isBuiltin() || callee == caller || callee->getBlocks().empty()) {
         return false;
     }
 
-    if (callee->getParams().size() > 8 || containsSelfCall(callee)) {
+    if (blockedRecursiveCloneCalls.find(call) != blockedRecursiveCloneCalls.end()) {
+        return false;
+    }
+
+    if (callee->getParams().size() > 8) {
         return false;
     }
 
@@ -651,12 +745,29 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
     int32_t blockCount = static_cast<int32_t>(callee->getBlocks().size());
     int32_t instCount = countInstructions(callee);
     const NaturalLoopSummary loopSummary = analyzeNaturalLoops(callee);
+    const bool selfRecursiveCallee = containsSelfCall(callee);
 
-    if (loopSummary.loopCount > 0) {
+    if (selfRecursiveCallee) {
         if (!hotCallSite || !leafCallee) {
             return false;
         }
-        return isEligibleHotLoopLeafCallee(mod, callee, loopSummary, allocaBytes, blockCount, instCount);
+        return isEligibleHotSelfRecursiveLeafCallee(mod, callee, allocaBytes, blockCount, instCount);
+    }
+
+    if (loopSummary.loopCount > 0) {
+        if (!leafCallee) {
+            return false;
+        }
+        if (hotCallSite) {
+            return isEligibleHotLoopLeafCallee(mod, callee, loopSummary, allocaBytes, blockCount, instCount) ||
+                   isEligibleHotSingleUseLoopLeafCallee(mod,
+                                                        callee,
+                                                        loopSummary,
+                                                        allocaBytes,
+                                                        blockCount,
+                                                        instCount);
+        }
+        return isEligibleLoopLeafCallee(mod, callee, loopSummary, allocaBytes, blockCount, instCount);
     }
 
     // 叶子函数：普通调用点保守，循环内热点调用点使用更宽松阈值。
@@ -722,6 +833,14 @@ Instruction * SmallFunctionInline::cloneInstructionShell(Instruction * inst, Fun
         return new ZExtInst(caller, zext->getSource(), zext->getType());
     }
 
+    if (auto * select = dynamic_cast<SelectInst *>(inst)) {
+        return new SelectInst(caller,
+                              select->getCondition(),
+                              select->getTrueValue(),
+                              select->getFalseValue(),
+                              select->getType());
+    }
+
     if (auto * sitofp = dynamic_cast<SIToFPInst *>(inst)) {
         return new SIToFPInst(caller, sitofp->getSource(), sitofp->getType());
     }
@@ -753,6 +872,7 @@ bool SmallFunctionInline::inlineCall(CallInst * call)
 
     Function * caller = call->getFunction();
     Function * callee = call->getCallee();
+    const bool selfRecursiveCallee = containsSelfCall(callee);
     BasicBlock * callBlock = call->getParentBlock();
     auto & callInsts = callBlock->getInstructions();
     auto callPos = std::find(callInsts.begin(), callInsts.end(), static_cast<Instruction *>(call));
@@ -834,6 +954,13 @@ bool SmallFunctionInline::inlineCall(CallInst * call)
 
         for (int32_t i = 0; i < cloned->getOperandsNum(); ++i) {
             cloned->setOperand(i, mapValue(cloned->getOperand(i)));
+        }
+
+        if (selfRecursiveCallee) {
+            auto * clonedCall = dynamic_cast<CallInst *>(cloned);
+            if (clonedCall && clonedCall->getCallee() == callee) {
+                blockedRecursiveCloneCalls.insert(clonedCall);
+            }
         }
     }
 
