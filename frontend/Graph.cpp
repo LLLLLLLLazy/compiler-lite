@@ -93,7 +93,72 @@ string getNodeName(ast_node * astnode)
 		case ast_operator_type::AST_OP_FUNC_REAL_PARAMS:
 			nodeName = "real-params";
 			break;
-			// TODO 这里追加其它类型的结点，返回对应结点的字符串
+		case ast_operator_type::AST_OP_IF:
+			nodeName = "if";
+			break;
+		case ast_operator_type::AST_OP_WHILE:
+			nodeName = "while";
+			break;
+		case ast_operator_type::AST_OP_FOR:
+			nodeName = "for";
+			break;
+		case ast_operator_type::AST_OP_BREAK:
+			nodeName = "break";
+			break;
+		case ast_operator_type::AST_OP_CONTINUE:
+			nodeName = "continue";
+			break;
+		case ast_operator_type::AST_OP_MUL:
+			nodeName = "*";
+			break;
+		case ast_operator_type::AST_OP_DIV:
+			nodeName = "/";
+			break;
+		case ast_operator_type::AST_OP_MOD:
+			nodeName = "%";
+			break;
+		case ast_operator_type::AST_OP_LT:
+			nodeName = "<";
+			break;
+		case ast_operator_type::AST_OP_GT:
+			nodeName = ">";
+			break;
+		case ast_operator_type::AST_OP_LE:
+			nodeName = "<=";
+			break;
+		case ast_operator_type::AST_OP_GE:
+			nodeName = ">=";
+			break;
+		case ast_operator_type::AST_OP_EQ:
+			nodeName = "==";
+			break;
+		case ast_operator_type::AST_OP_NE:
+			nodeName = "!=";
+			break;
+		case ast_operator_type::AST_OP_LAND:
+			nodeName = "&&";
+			break;
+		case ast_operator_type::AST_OP_LOR:
+			nodeName = "||";
+			break;
+		case ast_operator_type::AST_OP_NEG:
+			nodeName = "neg";
+			break;
+		case ast_operator_type::AST_OP_NOT:
+			nodeName = "!";
+			break;
+		case ast_operator_type::AST_OP_PRE_INC:
+			nodeName = "pre++";
+			break;
+		case ast_operator_type::AST_OP_PRE_DEC:
+			nodeName = "pre--";
+			break;
+		case ast_operator_type::AST_OP_POST_INC:
+			nodeName = "post++";
+			break;
+		case ast_operator_type::AST_OP_POST_DEC:
+			nodeName = "post--";
+			break;
 
 		default:
 			nodeName = "unknown";
