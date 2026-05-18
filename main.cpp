@@ -108,6 +108,11 @@ static bool gRACoalesce = true;
 static bool gRASplit = true;
 
 ///
+/// @brief 机器可读RA统计输出文件
+///
+static std::string gRAStatsJsonFile;
+
+///
 /// @brief 启用竞赛扩展文法
 ///
 static bool gExtendedGrammar = false;
@@ -139,6 +144,10 @@ static struct option long_options[] = {
 	{"ra-callee-saved-fpr", no_argument, nullptr, 'F'},
 	{"ra-coalesce", no_argument, nullptr, 'C'},
 	{"ra-split", no_argument, nullptr, 'P'},
+	{"ra-no-callee-saved-fpr", no_argument, nullptr, 1000},
+	{"ra-no-coalesce", no_argument, nullptr, 1001},
+	{"ra-no-split", no_argument, nullptr, 1002},
+	{"ra-stats-json", required_argument, nullptr, 1003},
 	{nullptr, 0, nullptr, 0}};
 
 /// @brief 显示帮助
@@ -163,6 +172,10 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  --ra-callee-saved-fpr      Enable callee-saved FPR (fs0-fs11) for register allocation\n";
 	std::cout << "  --ra-coalesce              Enable register coalescing to eliminate redundant copies\n";
 	std::cout << "  --ra-split                 Enable live interval splitting to reduce spills\n";
+	std::cout << "  --ra-no-callee-saved-fpr   Disable callee-saved FPR allocation\n";
+	std::cout << "  --ra-no-coalesce           Disable register coalescing\n";
+	std::cout << "  --ra-no-split              Disable live interval splitting\n";
+	std::cout << "  --ra-stats-json=FILE       Write machine-readable register allocation metrics\n";
 }
 
 /// @brief 参数解析与有效性检查
@@ -250,6 +263,18 @@ lb_check:
 				break;
 			case 'P':
 				gRASplit = true;
+				break;
+			case 1000:
+				gRACalleeSavedFPR = false;
+				break;
+			case 1001:
+				gRACoalesce = false;
+				break;
+			case 1002:
+				gRASplit = false;
+				break;
+			case 1003:
+				gRAStatsJsonFile = optarg;
 				break;
 			default:
 				return -1;
@@ -471,7 +496,7 @@ static int compile(std::string inputFile, std::string outputFile)
 		}
 
 		// 使用RISCV64代码生成器生成汇编
-		CodeGeneratorRiscV64 generator(module, gRACalleeSavedFPR, gRACoalesce, gRASplit);
+		CodeGeneratorRiscV64 generator(module, gRACalleeSavedFPR, gRACoalesce, gRASplit, gRAStatsJsonFile);
 		generator.setShowLinearIR(gAsmAlsoShowIR);
 		if (!generator.run(asmOutputFile)) {
 			minic_log(LOG_ERROR, "RISCV64汇编生成错误");
