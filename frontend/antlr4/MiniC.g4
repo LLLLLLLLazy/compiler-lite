@@ -46,10 +46,10 @@ constDecl: constDeclNoSemi T_SEMICOLON;
 // 变量声明，支持变量定义时初始化
 varDecl: varDeclNoSemi T_SEMICOLON;
 
-// 不带分号的常量声明，用于普通声明与 for 初始化子句
+// 不带分号的常量声明，用于普通声明与扩展语法初始化子句
 constDeclNoSemi: T_STATIC? T_CONST basicType constDef (T_COMMA constDef)*;
 
-// 不带分号的变量声明，用于普通声明与 for 初始化子句
+// 不带分号的变量声明，用于普通声明与扩展语法初始化子句
 varDeclNoSemi: T_STATIC? basicType varDef (T_COMMA varDef)*;
 
 // 常量定义
@@ -67,22 +67,36 @@ arrayDefDims: (T_L_BRACK expr T_R_BRACK)+;
 // 初始化值
 initVal: expr | T_L_BRACE (initVal (T_COMMA initVal)*)? T_R_BRACE;
 
-// 目前语句支持return、赋值、分支与循环
+// 目前语句支持return、赋值、分支与循环。
+// 使用 matched/unmatched 形式消除 dangling-else 二义性，避免深层 if-else 链触发 ANTLR 预测退化。
+// statement 是顶层入口，分为 matched（已匹配的，即else与最近的if配对）和 unmatched（未匹配的，即无else或else分支含unmatched）
 statement:
+	matchedStatement	# matchedStatementWrapper
+	| unmatchedStatement	# unmatchedStatementWrapper;
+
+// matched语句：所有if-else都完整配对，不会产生悬挂else
+matchedStatement:
 	T_RETURN expr? T_SEMICOLON			# returnStatement
 	| lVal T_ASSIGN expr T_SEMICOLON	# assignStatement
-	| T_IF T_L_PAREN cond T_R_PAREN statement (T_ELSE statement)? # ifStatement
-	| T_WHILE T_L_PAREN cond T_R_PAREN statement # whileStatement
-	| T_FOR T_L_PAREN forInit? T_SEMICOLON cond? T_SEMICOLON forStep? T_R_PAREN statement # forStatement
+	| T_IF T_L_PAREN cond T_R_PAREN matchedStatement T_ELSE matchedStatement # ifElseMatchedStatement
+	| T_WHILE T_L_PAREN cond T_R_PAREN matchedStatement # whileMatchedStatement
+	| T_FOR T_L_PAREN forInit? T_SEMICOLON cond? T_SEMICOLON forStep? T_R_PAREN matchedStatement # forStatement
 	| T_BREAK T_SEMICOLON				# breakStatement
 	| T_CONTINUE T_SEMICOLON			# continueStatement
 	| block								# blockStatement
 	| expr? T_SEMICOLON					# expressionStatement;
 
-// for 初始化子句，允许声明、赋值或普通表达式
+// unmatched语句：包含未配对的if（无else），或else分支本身是unmatched的
+unmatchedStatement:
+	T_IF T_L_PAREN cond T_R_PAREN statement # ifWithoutElseStatement
+	| T_IF T_L_PAREN cond T_R_PAREN matchedStatement T_ELSE unmatchedStatement # ifElseUnmatchedStatement
+	| T_WHILE T_L_PAREN cond T_R_PAREN unmatchedStatement # whileUnmatchedStatement
+	| T_FOR T_L_PAREN forInit? T_SEMICOLON cond? T_SEMICOLON forStep? T_R_PAREN unmatchedStatement # forUnmatchedStatement;
+
+// 扩展语法：for 初始化子句，允许声明、赋值或普通表达式，仅在 -e 时生效
 forInit: constDeclNoSemi | varDeclNoSemi | lVal T_ASSIGN expr | expr;
 
-// for 步进子句，允许赋值或普通表达式
+// 扩展语法：for 步进子句，允许赋值或普通表达式，仅在 -e 时生效
 forStep: lVal T_ASSIGN expr | expr;
 
 // 普通表达式文法 Exp : LOrExp
