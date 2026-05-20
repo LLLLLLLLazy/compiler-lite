@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "ILocRiscV64.h"
@@ -35,15 +36,6 @@ bool isLabelReferenceInst(const RiscV64Inst * inst)
 	return inst != nullptr && !inst->dead &&
 		   (inst->opcode == "j" || inst->opcode == "jal" || inst->opcode == "beq" || inst->opcode == "bne" ||
 			inst->opcode == "blt" || inst->opcode == "bge" || inst->opcode == "bltu" || inst->opcode == "bgeu");
-}
-
-/// @brief 判断指令是否引用了指定标签
-/// @param inst 指令
-/// @param label 标签名
-/// @return 是否引用了该标签
-bool referencesLabel(const RiscV64Inst * inst, const std::string & label)
-{
-	return inst->result == label || inst->arg1 == label || inst->arg2 == label || inst->addition == label;
 }
 
 /// @brief 判断指令是否为最终有效的机器指令（非dead、非注释、非标签）
@@ -260,29 +252,34 @@ RegAllocInfo & ILocRiscV64::getRegAllocInfo(Value * val)
 }
 
 /// @brief 删除无用的Label指令
+/// 优化策略：先收集所有被跳转指令引用的内部标签，再遍历标签指令，
+/// 将未被引用的标签标记为dead，避免O(n^2)的逐标签遍历。
 void ILocRiscV64::deleteUnusedLabel()
 {
-	std::list<RiscV64Inst *> labelInsts;
-	for (RiscV64Inst * inst: code) {
-		if (isInternalLabelInst(inst)) {
-			labelInsts.push_back(inst);
+	// 收集所有被跳转/分支指令引用的内部标签（以".L"开头）
+	std::unordered_set<std::string> referencedLabels;
+	auto collectLabel = [&referencedLabels](const std::string & operand) {
+		if (!operand.empty() && operand.rfind(".L", 0) == 0) {
+			referencedLabels.insert(operand);
 		}
+	};
+
+	// 遍历所有跳转/分支指令，收集其引用的标签
+	for (RiscV64Inst * inst: code) {
+		if (!isLabelReferenceInst(inst)) {
+			continue;
+		}
+
+		collectLabel(inst->result);
+		collectLabel(inst->arg1);
+		collectLabel(inst->arg2);
+		collectLabel(inst->addition);
 	}
 
-	// 检测Label指令是否在被使用，也就是是否有跳转到该Label的指令
-	// 如果没有使用，则设置为dead
-	for (RiscV64Inst * labelInst: labelInsts) {
-		bool labelUsed = false;
-
-		for (RiscV64Inst * inst: code) {
-			if (isLabelReferenceInst(inst) && referencesLabel(inst, labelInst->opcode)) {
-				labelUsed = true;
-				break;
-			}
-		}
-
-		if (!labelUsed) {
-			labelInst->setDead();
+	// 将未被任何跳转指令引用的内部标签标记为dead
+	for (RiscV64Inst * inst: code) {
+		if (isInternalLabelInst(inst) && referencedLabels.find(inst->opcode) == referencedLabels.end()) {
+			inst->setDead();
 		}
 	}
 }
