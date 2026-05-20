@@ -699,9 +699,9 @@ void CodeGeneratorRiscV64::emitMtRuntime()
 	std::fprintf(fp, "\tbnez a0,.L_minic_mt_child_exit\n");
 	std::fprintf(fp, "\tla t0,__minic_mt_done\n");
 	std::fprintf(fp, ".L_minic_mt_parent_wait:\n");
-	std::fprintf(fp, "\tfence r,rw\n");
-	std::fprintf(fp, "\tlw t1,0(t0)\n");
+	std::fprintf(fp, "\tlw t1,0(t0)\n");  // 先加载标志位
 	std::fprintf(fp, "\tbeqz t1,.L_minic_mt_parent_wait\n");
+	std::fprintf(fp, "\tfence r,rw\n");  // acquire语义：读到非零值后，确保后续读操作看到子线程的写入
 	std::fprintf(fp, "\tret\n");
 	std::fprintf(fp, ".L_minic_mt_child_exit:\n");
 	std::fprintf(fp, "\tla t0,__minic_mt_done\n");
@@ -833,10 +833,10 @@ void CodeGeneratorRiscV64::emitMtRuntime()
 	std::fprintf(fp, "\tmv s0,t1\n");
 	std::fprintf(fp, "\tla a5,__minic_mt4_gate\n");
 	std::fprintf(fp, ".L_minic_mt4_child_wait:\n");
-	std::fprintf(fp, "\tfence r,rw\n");
-	std::fprintf(fp, "\tlw a4,0(a5)\n");
+	std::fprintf(fp, "\tlw a4,0(a5)\n");  // 先加载门控标志
 	std::fprintf(fp, "\tbeqz a4,.L_minic_mt4_child_wait\n");
 	std::fprintf(fp, "\tblt a4,zero,.L_minic_mt4_child_cancel\n");
+	std::fprintf(fp, "\tfence r,rw\n");  // acquire语义：门控为正后，确保后续读操作看到主线程的写入
 	std::fprintf(fp, "\tmv a0,t0\n");
 	std::fprintf(fp, "\tret\n");
 	std::fprintf(fp, ".L_minic_mt4_child_cancel:\n");
@@ -855,28 +855,29 @@ void CodeGeneratorRiscV64::emitMtRuntime()
 	std::fprintf(fp, ".size __mtthreadcount4, .-__mtthreadcount4\n");
 
 	// ---- __mtstorei32: 线程安全地存储32位结果 ----
-	// a0=结果索引, a1=结果值；写入后执行fence确保可见性
+	// a0=结果索引, a1=结果值；用release顺序发布结果
 	std::fprintf(fp, ".align 2\n");
 	std::fprintf(fp, ".type __mtstorei32, %%function\n");
 	std::fprintf(fp, "__mtstorei32:\n");
 	std::fprintf(fp, "\tla t0,__minic_mt4_result\n");
 	std::fprintf(fp, "\tslli t1,a0,2\n");
 	std::fprintf(fp, "\tadd t0,t0,t1\n");
-	std::fprintf(fp, "\tsw a1,0(t0)\n");
-	std::fprintf(fp, "\tfence rw,w\n");
+	std::fprintf(fp, "\tfence rw,w\n");  // release语义：确保之前的写操作对其他线程可见
+	std::fprintf(fp, "\tsw a1,0(t0)\n");  // 写入结果值
+	std::fprintf(fp, "\tfence rw,rw\n");  // 全序屏障：确保写入完成后后续操作不会被重排到写入之前
 	std::fprintf(fp, "\tret\n");
 	std::fprintf(fp, ".size __mtstorei32, .-__mtstorei32\n");
 
 	// ---- __mtloadi32: 线程安全地加载32位结果 ----
-	// a0=结果索引；加载前执行fence确保读到最新值
+	// a0=结果索引；加载后用acquire顺序约束后续访问
 	std::fprintf(fp, ".align 2\n");
 	std::fprintf(fp, ".type __mtloadi32, %%function\n");
 	std::fprintf(fp, "__mtloadi32:\n");
 	std::fprintf(fp, "\tla t0,__minic_mt4_result\n");
 	std::fprintf(fp, "\tslli t1,a0,2\n");
 	std::fprintf(fp, "\tadd t0,t0,t1\n");
-	std::fprintf(fp, "\tfence r,rw\n");
-	std::fprintf(fp, "\tlw a0,0(t0)\n");
+	std::fprintf(fp, "\tlw a0,0(t0)\n");  // 加载结果值
+	std::fprintf(fp, "\tfence r,rw\n");  // acquire语义：确保加载后的读操作看到写入线程的写入
 	std::fprintf(fp, "\tret\n");
 	std::fprintf(fp, ".size __mtloadi32, .-__mtloadi32\n");
 
@@ -896,9 +897,9 @@ void CodeGeneratorRiscV64::emitMtRuntime()
 	std::fprintf(fp, "\tslli t4,t2,2\n");
 	std::fprintf(fp, "\tadd t5,t3,t4\n");
 	std::fprintf(fp, ".L_minic_mt4_parent_wait:\n");
-	std::fprintf(fp, "\tfence r,rw\n");
-	std::fprintf(fp, "\tlw t6,0(t5)\n");
+	std::fprintf(fp, "\tlw t6,0(t5)\n");  // 加载子线程完成标志
 	std::fprintf(fp, "\tbeqz t6,.L_minic_mt4_parent_wait\n");
+	std::fprintf(fp, "\tfence r,rw\n");  // acquire语义：确认子线程完成后，确保读到子线程的所有写入
 	std::fprintf(fp, "\taddi t2,t2,1\n");
 	std::fprintf(fp, "\tj .L_minic_mt4_parent_next\n");
 	std::fprintf(fp, ".L_minic_mt4_parent_done:\n");

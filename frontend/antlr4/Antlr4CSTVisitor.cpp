@@ -328,32 +328,23 @@ std::any MiniCCSTVisitor::visitConstDecl(MiniCParser::ConstDeclContext * ctx)
 }
 
 /// @brief 非终结运算符statement中的遍历
+/// 直接委托给子节点（matchedStatement或unmatchedStatement），避免手动类型分发
 /// @param ctx CST上下文
 std::any MiniCCSTVisitor::visitStatement(MiniCParser::StatementContext * ctx)
 {
-	// 识别的文法产生式：statement: T_ID T_ASSIGN expr T_SEMICOLON  # assignStatement
-	// | T_RETURN expr T_SEMICOLON # returnStatement
-	// | block  # blockStatement
-	// | expr ? T_SEMICOLON #expressionStatement;
-	if (Instanceof(assignCtx, MiniCParser::AssignStatementContext *, ctx)) {
-		return visitAssignStatement(assignCtx);
-	} else if (Instanceof(returnCtx, MiniCParser::ReturnStatementContext *, ctx)) {
-		return visitReturnStatement(returnCtx);
-	} else if (Instanceof(ifCtx, MiniCParser::IfStatementContext *, ctx)) {
-		return visitIfStatement(ifCtx);
-	} else if (Instanceof(whileCtx, MiniCParser::WhileStatementContext *, ctx)) {
-		return visitWhileStatement(whileCtx);
-	} else if (Instanceof(breakCtx, MiniCParser::BreakStatementContext *, ctx)) {
-		return visitBreakStatement(breakCtx);
-	} else if (Instanceof(continueCtx, MiniCParser::ContinueStatementContext *, ctx)) {
-		return visitContinueStatement(continueCtx);
-	} else if (Instanceof(blockCtx, MiniCParser::BlockStatementContext *, ctx)) {
-		return visitBlockStatement(blockCtx);
-	} else if (Instanceof(exprCtx, MiniCParser::ExpressionStatementContext *, ctx)) {
-		return visitExpressionStatement(exprCtx);
-	}
+	return visit(ctx->children.front());
+}
 
-	return nullptr;
+/// @brief matched语句包装节点的遍历，委托给matchedStatement
+std::any MiniCCSTVisitor::visitMatchedStatementWrapper(MiniCParser::MatchedStatementWrapperContext * ctx)
+{
+	return visit(ctx->matchedStatement());
+}
+
+/// @brief unmatched语句包装节点的遍历，委托给unmatchedStatement
+std::any MiniCCSTVisitor::visitUnmatchedStatementWrapper(MiniCParser::UnmatchedStatementWrapperContext * ctx)
+{
+	return visit(ctx->unmatchedStatement());
 }
 
 ///
@@ -375,23 +366,54 @@ std::any MiniCCSTVisitor::visitReturnStatement(MiniCParser::ReturnStatementConte
 	return ast_node::New(ast_operator_type::AST_OP_RETURN, exprNode);
 }
 
-std::any MiniCCSTVisitor::visitIfStatement(MiniCParser::IfStatementContext * ctx)
+/// @brief if-else匹配语句的遍历（matched：then和else分支都是matched语句）
+/// 文法：T_IF cond matchedStatement T_ELSE matchedStatement
+std::any MiniCCSTVisitor::visitIfElseMatchedStatement(MiniCParser::IfElseMatchedStatementContext * ctx)
 {
 	auto condNode = std::any_cast<ast_node *>(visitCond(ctx->cond()));
-	auto thenNode = ensureStatementNode(std::any_cast<ast_node *>(visitStatement(ctx->statement(0))));
-
-	ast_node * elseNode = nullptr;
-	if (ctx->statement().size() > 1) {
-		elseNode = ensureStatementNode(std::any_cast<ast_node *>(visitStatement(ctx->statement(1))));
-	}
+	auto thenNode = ensureStatementNode(std::any_cast<ast_node *>(visit(ctx->matchedStatement(0))));
+	auto elseNode = ensureStatementNode(std::any_cast<ast_node *>(visit(ctx->matchedStatement(1))));
 
 	return ast_node::New(ast_operator_type::AST_OP_IF, condNode, thenNode, elseNode);
 }
 
-std::any MiniCCSTVisitor::visitWhileStatement(MiniCParser::WhileStatementContext * ctx)
+/// @brief 无else的if语句遍历（unmatched：if没有else分支）
+/// 文法：T_IF cond statement
+std::any MiniCCSTVisitor::visitIfWithoutElseStatement(MiniCParser::IfWithoutElseStatementContext * ctx)
 {
 	auto condNode = std::any_cast<ast_node *>(visitCond(ctx->cond()));
-	auto bodyNode = ensureStatementNode(std::any_cast<ast_node *>(visitStatement(ctx->statement())));
+	auto thenNode = ensureStatementNode(std::any_cast<ast_node *>(visitStatement(ctx->statement())));
+
+	return ast_node::New(ast_operator_type::AST_OP_IF, condNode, thenNode, nullptr);
+}
+
+/// @brief if-else非匹配语句的遍历（unmatched：then是matched，else是unmatched）
+/// 文法：T_IF cond matchedStatement T_ELSE unmatchedStatement
+std::any MiniCCSTVisitor::visitIfElseUnmatchedStatement(MiniCParser::IfElseUnmatchedStatementContext * ctx)
+{
+	auto condNode = std::any_cast<ast_node *>(visitCond(ctx->cond()));
+	auto thenNode = ensureStatementNode(std::any_cast<ast_node *>(visit(ctx->matchedStatement())));
+	auto elseNode = ensureStatementNode(std::any_cast<ast_node *>(visit(ctx->unmatchedStatement())));
+
+	return ast_node::New(ast_operator_type::AST_OP_IF, condNode, thenNode, elseNode);
+}
+
+/// @brief while匹配语句的遍历（matched：循环体是matched语句）
+/// 文法：T_WHILE cond matchedStatement
+std::any MiniCCSTVisitor::visitWhileMatchedStatement(MiniCParser::WhileMatchedStatementContext * ctx)
+{
+	auto condNode = std::any_cast<ast_node *>(visitCond(ctx->cond()));
+	auto bodyNode = ensureStatementNode(std::any_cast<ast_node *>(visit(ctx->matchedStatement())));
+
+	return ast_node::New(ast_operator_type::AST_OP_WHILE, condNode, bodyNode);
+}
+
+/// @brief while非匹配语句的遍历（unmatched：循环体是unmatched语句）
+/// 文法：T_WHILE cond unmatchedStatement
+std::any MiniCCSTVisitor::visitWhileUnmatchedStatement(MiniCParser::WhileUnmatchedStatementContext * ctx)
+{
+	auto condNode = std::any_cast<ast_node *>(visitCond(ctx->cond()));
+	auto bodyNode = ensureStatementNode(std::any_cast<ast_node *>(visit(ctx->unmatchedStatement())));
 
 	return ast_node::New(ast_operator_type::AST_OP_WHILE, condNode, bodyNode);
 }

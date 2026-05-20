@@ -6,6 +6,7 @@
 #include "PhiToSelect.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,58 @@ struct SelectMatch {
     Value * trueValue = nullptr;
     Value * falseValue = nullptr;
 };
+
+// PhiToSelect转换的规模上限阈值，超过此规模的函数跳过转换以避免编译时间爆炸
+constexpr std::size_t kPhiToSelectMaxBlocks = 512;       // 最大基本块数
+constexpr std::size_t kPhiToSelectMaxInstructions = 8000; // 最大指令数
+constexpr std::size_t kPhiToSelectMaxPhis = 512;         // 最大前缀phi指令数
+
+/// @brief 函数规模统计信息，用于判断是否跳过PhiToSelect转换
+struct FunctionScale {
+    std::size_t blocks = 0;        // 基本块数量
+    std::size_t instructions = 0;  // 指令总数
+    std::size_t leadingPhis = 0;   // 基本块前缀phi指令总数
+};
+
+/// @brief 收集函数的规模统计信息
+/// @param func 待统计的函数
+/// @return 函数规模信息
+FunctionScale collectFunctionScale(Function * func)
+{
+    FunctionScale scale;
+    if (!func) {
+        return scale;
+    }
+
+    for (auto * bb : func->getBlocks()) {
+        ++scale.blocks;
+        // 统计基本块前缀中的phi指令（phi指令必须位于基本块开头）
+        bool inLeadingPhiPrefix = true;
+        for (auto * inst : bb->getInstructions()) {
+            ++scale.instructions;
+            if (!inLeadingPhiPrefix) {
+                continue;
+            }
+
+            if (dynamic_cast<PhiInst *>(inst) != nullptr) {
+                ++scale.leadingPhis;
+            } else {
+                inLeadingPhiPrefix = false;
+            }
+        }
+    }
+
+    return scale;
+}
+
+/// @brief 判断函数规模是否超过PhiToSelect转换的上限
+/// @param scale 函数规模信息
+/// @return 超过上限返回true，应跳过转换
+bool isTooLargeForPhiToSelect(const FunctionScale & scale)
+{
+    return scale.blocks > kPhiToSelectMaxBlocks || scale.instructions > kPhiToSelectMaxInstructions ||
+           scale.leadingPhis > kPhiToSelectMaxPhis;
+}
 
 /// @brief 判断一条指令是否适合在 select 提升过程中被提前
 /// @param inst 待检查的指令
@@ -658,6 +711,60 @@ bool tryMatchPhi(PhiInst * phi, const DominatorTree & domTree, SelectMatch & mat
            tryMatchDiamond(merge, first, second, domTree, match);
 }
 
+/// @brief 将一个基本块开头可匹配的 phi 转为 select
+/// @param func 所属函数
+/// @param bb 待处理基本块
+/// @param domTree 当前函数的支配树
+/// @return true 表示该块中至少转换了一个 phi
+bool convertLeadingPhisToSelects(Function * func, BasicBlock * bb, const DominatorTree & domTree)
+{
+    if (!func || !bb) {
+        return false;
+    }
+
+    auto & insts = bb->getInstructions();
+    std::vector<PhiInst *> phis;
+    for (auto * inst : insts) {
+        auto * phi = dynamic_cast<PhiInst *>(inst);
+        if (!phi) {
+            break;
+        }
+        phis.push_back(phi);
+    }
+
+    if (phis.empty()) {
+        return false;
+    }
+
+    auto insertPos = std::find_if(insts.begin(), insts.end(), [](Instruction * inst) {
+        return dynamic_cast<PhiInst *>(inst) == nullptr;
+    });
+
+    bool changed = false;
+    for (auto * phi : phis) {
+        SelectMatch match;
+        if (!tryMatchPhi(phi, domTree, match)) {
+            continue;
+        }
+
+        auto * select = new SelectInst(func, match.condition, match.trueValue, match.falseValue, phi->getType());
+        select->setParentBlock(bb);
+        insts.insert(insertPos, select);
+
+        phi->replaceAllUseWith(select);
+        phi->clearOperands();
+
+        auto phiPos = std::find(insts.begin(), insts.end(), static_cast<Instruction *>(phi));
+        if (phiPos != insts.end()) {
+            insts.erase(phiPos);
+        }
+        delete phi;
+        changed = true;
+    }
+
+    return changed;
+}
+
 } // namespace
 
 /// @brief 构造一个 phi-to-select 转换器
@@ -670,6 +777,11 @@ PhiToSelect::PhiToSelect(Function * _func) : func(_func)
 bool PhiToSelect::run()
 {
     if (!func || func->isBuiltin() || func->getBlocks().empty()) {
+        return false;
+    }
+
+    // 函数规模过大时跳过转换，避免编译时间爆炸
+    if (isTooLargeForPhiToSelect(collectFunctionScale(func))) {
         return false;
     }
 
@@ -687,47 +799,7 @@ bool PhiToSelect::run()
         }
 
         for (auto * bb : func->getBlocks()) {
-            auto & insts = bb->getInstructions();
-            std::vector<PhiInst *> phis;
-            for (auto * inst : insts) {
-                auto * phi = dynamic_cast<PhiInst *>(inst);
-                if (!phi) {
-                    break;
-                }
-                phis.push_back(phi);
-            }
-
-            if (phis.empty()) {
-                continue;
-            }
-
-            auto insertPos = std::find_if(insts.begin(), insts.end(), [](Instruction * inst) {
-                return dynamic_cast<PhiInst *>(inst) == nullptr;
-            });
-
-            bool blockChanged = false;
-            for (auto * phi : phis) {
-                SelectMatch match;
-                if (!tryMatchPhi(phi, domTree, match)) {
-                    continue;
-                }
-
-                auto * select = new SelectInst(func, match.condition, match.trueValue, match.falseValue, phi->getType());
-                select->setParentBlock(bb);
-                insts.insert(insertPos, select);
-
-                phi->replaceAllUseWith(select);
-                phi->clearOperands();
-
-                auto phiPos = std::find(insts.begin(), insts.end(), static_cast<Instruction *>(phi));
-                if (phiPos != insts.end()) {
-                    insts.erase(phiPos);
-                }
-                delete phi;
-                blockChanged = true;
-            }
-
-            if (!blockChanged) {
+            if (!convertLeadingPhisToSelects(func, bb, domTree)) {
                 continue;
             }
 

@@ -61,16 +61,29 @@ arrayDefDims: (T_L_BRACK expr T_R_BRACK)+;
 // 初始化值
 initVal: expr | T_L_BRACE (initVal (T_COMMA initVal)*)? T_R_BRACE;
 
-// 目前语句支持return、赋值、分支与循环
+// 目前语句支持return、赋值、分支与循环。
+// 使用 matched/unmatched 形式消除 dangling-else 二义性，避免深层 if-else 链触发 ANTLR 预测退化。
+// statement 是顶层入口，分为 matched（已匹配的，即else与最近的if配对）和 unmatched（未匹配的，即无else或else分支含unmatched）
 statement:
+	matchedStatement	# matchedStatementWrapper
+	| unmatchedStatement	# unmatchedStatementWrapper;
+
+// matched语句：所有if-else都完整配对，不会产生悬挂else
+matchedStatement:
 	T_RETURN expr? T_SEMICOLON			# returnStatement
 	| lVal T_ASSIGN expr T_SEMICOLON	# assignStatement
-	| T_IF T_L_PAREN cond T_R_PAREN statement (T_ELSE statement)? # ifStatement
-	| T_WHILE T_L_PAREN cond T_R_PAREN statement # whileStatement
+	| T_IF T_L_PAREN cond T_R_PAREN matchedStatement T_ELSE matchedStatement # ifElseMatchedStatement
+	| T_WHILE T_L_PAREN cond T_R_PAREN matchedStatement # whileMatchedStatement
 	| T_BREAK T_SEMICOLON				# breakStatement
 	| T_CONTINUE T_SEMICOLON			# continueStatement
 	| block								# blockStatement
 	| expr? T_SEMICOLON					# expressionStatement;
+
+// unmatched语句：包含未配对的if（无else），或else分支本身是unmatched的
+unmatchedStatement:
+	T_IF T_L_PAREN cond T_R_PAREN statement # ifWithoutElseStatement
+	| T_IF T_L_PAREN cond T_R_PAREN matchedStatement T_ELSE unmatchedStatement # ifElseUnmatchedStatement
+	| T_WHILE T_L_PAREN cond T_R_PAREN unmatchedStatement # whileUnmatchedStatement;
 
 // 普通表达式文法 Exp : LOrExp
 expr: lOrExp;

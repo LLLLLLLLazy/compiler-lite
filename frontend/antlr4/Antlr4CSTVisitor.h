@@ -91,16 +91,27 @@ protected:
 	/// @return AST的节点
 	std::any visitStatement(MiniCParser::StatementContext * ctx);
 
+	/// @brief matched/unmatched statement 包装节点的遍历
+	/// 用于消除dangling-else二义性后的文法分发
+	std::any visitMatchedStatementWrapper(MiniCParser::MatchedStatementWrapperContext * ctx) override;
+	std::any visitUnmatchedStatementWrapper(MiniCParser::UnmatchedStatementWrapperContext * ctx) override;
+
 	/// @brief 非终结运算符statement中的returnStatement的遍历
 	/// @param ctx CST上下文
 	/// @return AST的节点
 	std::any visitReturnStatement(MiniCParser::ReturnStatementContext * ctx) override;
 
-	/// @brief if/if-else 语句的遍历
-	std::any visitIfStatement(MiniCParser::IfStatementContext * ctx) override;
+	/// @brief if-else匹配语句的遍历（then和else都是matched语句）
+	std::any visitIfElseMatchedStatement(MiniCParser::IfElseMatchedStatementContext * ctx) override;
+	/// @brief 无else的if语句遍历（unmatched）
+	std::any visitIfWithoutElseStatement(MiniCParser::IfWithoutElseStatementContext * ctx) override;
+	/// @brief if-else非匹配语句的遍历（then是matched，else是unmatched）
+	std::any visitIfElseUnmatchedStatement(MiniCParser::IfElseUnmatchedStatementContext * ctx) override;
 
-	/// @brief while 语句的遍历
-	std::any visitWhileStatement(MiniCParser::WhileStatementContext * ctx) override;
+	/// @brief while匹配语句的遍历（循环体是matched语句）
+	std::any visitWhileMatchedStatement(MiniCParser::WhileMatchedStatementContext * ctx) override;
+	/// @brief while非匹配语句的遍历（循环体是unmatched语句）
+	std::any visitWhileUnmatchedStatement(MiniCParser::WhileUnmatchedStatementContext * ctx) override;
 
 	/// @brief 条件表达式的遍历
 	std::any visitCond(MiniCParser::CondContext * ctx) override;
