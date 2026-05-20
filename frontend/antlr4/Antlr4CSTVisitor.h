@@ -1,18 +1,6 @@
 ///
 /// @file Antlr4CSTVisitor.h
 /// @brief Antlr4的具体语法树的遍历产生AST
-/// @author zenglj (zenglj@live.com)
-/// @version 1.1
-/// @date 2024-11-23
-///
-/// @copyright Copyright (c) 2024
-///
-/// @par 修改日志:
-/// <table>
-/// <tr><th>Date       <th>Version <th>Author  <th>Description
-/// <tr><td>2024-09-29 <td>1.0     <td>zenglj  <td>新建
-/// <tr><td>2024-11-23 <td>1.1     <td>zenglj  <td>表达式版增强
-/// </table>
 ///
 #pragma once
 
