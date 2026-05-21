@@ -310,6 +310,7 @@ bool CodeGeneratorRiscV64::run()
 	return true;
 }
 
+
 /// @brief 生成汇编文件头部，输出RISC-V64架构属性
 void CodeGeneratorRiscV64::genHeader()
 {

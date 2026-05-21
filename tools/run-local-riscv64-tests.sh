@@ -395,10 +395,27 @@ run_riscv64_check() {
 	fi
 
 	# clang compiles source directly to riscv64 -> link -> qemu run
-	# Preprocess .sy: replace starttime/stoptime with _sysy_starttime/_sysy_stoptime
-	# to match the runtime library symbols, then compile with clang and link with sylib.c
+	# Preprocess .sy: rewrite starttime()/stoptime() to the runtime entry points
+	# with the expected line-number argument, then compile with clang and link with sylib.c
 	local llvm_all_cfile="${result_dir}/${testcase}.llvm_all.c"
-	if sed 's/\bstarttime\b/_sysy_starttime/g; s/\bstoptime\b/_sysy_stoptime/g' "${cfile}" > "${llvm_all_cfile}" 2>/dev/null && \
+	if {
+		cat <<'EOF'
+int getint(void);
+int getch(void);
+int getarray(int a[]);
+float getfloat(void);
+int getfarray(float a[]);
+void putint(int a);
+void putch(int a);
+void putarray(int n, int a[]);
+void putfloat(float a);
+void putfarray(int n, float a[]);
+void putf(char a[], ...);
+void _sysy_starttime(int lineno);
+void _sysy_stoptime(int lineno);
+EOF
+		sed -E 's/\<starttime\>[[:space:]]*\([[:space:]]*\)/_sysy_starttime(__LINE__)/g; s/\<stoptime\>[[:space:]]*\([[:space:]]*\)/_sysy_stoptime(__LINE__)/g' "${cfile}"
+	} > "${llvm_all_cfile}" 2>/dev/null && \
 	   timeout --foreground "${RISCV64_TIMEOUT}" "${CLANG_BIN}" --target=riscv64-linux-gnu -O"${llvm_opt_level}" -Wno-override-module -c -o "${llvm_all_obj}" "${llvm_all_cfile}" >/dev/null 2>&1 && \
 	   timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" -static -o "${llvm_all_exe}" "${llvm_all_obj}" "${RUNTIME_LIB}" >/dev/null 2>&1; then
 		t0=$(date +%s%N)

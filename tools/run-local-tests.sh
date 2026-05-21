@@ -46,6 +46,8 @@ Suites:
   2026              -> tests/2026_function
   2026_perf         -> tests/2026_performance
   2026_performance  -> tests/2026_performance
+  for_loop          -> tests/for_loop
+    static_test       -> tests/static_test (+ compile_fail in llvmir mode)
   all               -> all suites above
 
 Environment:
@@ -135,6 +137,12 @@ suite_dir_from_key() {
         2026_perf|2026_performance)
             echo "2026_performance"
             ;;
+        for_loop)
+            echo "for_loop"
+            ;;
+        static_test)
+            echo "static_test"
+            ;;
         *)
             return 1
             ;;
@@ -160,6 +168,12 @@ infer_suite_from_testcase() {
             ;;
         2026_perf_*)
             echo "2026_performance"
+            ;;
+        for_loop_*)
+            echo "for_loop"
+            ;;
+        static_*)
+            echo "static_test"
             ;;
         *)
             return 1
@@ -425,6 +439,54 @@ run_testcase() {
     fi
 }
 
+run_compile_fail_testcase() {
+    local case_root="$1"
+    local testcase="$2"
+    local cfile="${case_root}/${testcase}.c"
+    local source_name
+    local output_file="${TMP_DIR}/${testcase}.compile_fail.ll"
+    source_name=$(basename "${cfile}")
+
+    if [[ ! -f "${cfile}" ]]; then
+        echo "${cfile} not found"
+        NG_NUM=$((NG_NUM + 1))
+        return
+    fi
+
+    if timeout --foreground "${TEST_TIMEOUT}" \
+        "${MINIC_BIN}" -S "${frontend_args[@]}" -L -o "${output_file}" "${cfile}" >/dev/null 2>&1; then
+        echo "${source_name} NG [compile-fail]"
+        NG_NUM=$((NG_NUM + 1))
+        return
+    fi
+
+    echo "${source_name} OK [compile-fail]"
+    OK_NUM=$((OK_NUM + 1))
+}
+
+run_static_compile_fail_suite() {
+    local case_root="${TEST_ROOT}/static_test/compile_fail"
+    local cfile=""
+    local testcase=""
+
+    if [[ ! -d "${case_root}" ]]; then
+        echo "${case_root} not found"
+        NG_NUM=$((NG_NUM + 1))
+        return
+    fi
+
+    while IFS= read -r testcase; do
+        run_compile_fail_testcase "${case_root}" "${testcase}"
+    done < <(
+        find "${case_root}" -maxdepth 1 -type f -name '*.c' |
+            while IFS= read -r cfile; do
+                testcase=$(basename "${cfile}")
+                echo "${testcase%.*}"
+            done |
+            sort -u
+    )
+}
+
 run_suite() {
     local suite_dir="$1"
     local case_root="${TEST_ROOT}/${suite_dir}"
@@ -441,6 +503,10 @@ run_suite() {
             done |
             sort -u
     )
+
+    if [[ "${suite_dir}" == "static_test" && ( "${TEST_MODE}" == "llvmir" || "${TEST_MODE}" == "all" ) ]]; then
+        run_static_compile_fail_suite
+    fi
 }
 
 if [[ ! -x "${MINIC_BIN}" ]]; then
@@ -489,6 +555,8 @@ elif [[ "${suite_key}" == "all" ]]; then
     run_suite "2025_performance"
     run_suite "2026_function"
     run_suite "2026_performance"
+    run_suite "for_loop"
+    run_suite "static_test"
 else
     suite_dir=$(suite_dir_from_key "${suite_key}") || \
         fail_with_usage "Unknown suite: ${suite_key}"

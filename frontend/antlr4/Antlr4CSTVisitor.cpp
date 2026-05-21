@@ -1,18 +1,6 @@
 ///
 /// @file Antlr4CSTVisitor.cpp
 /// @brief Antlr4的具体语法树的遍历产生AST
-/// @author zenglj (zenglj@live.com)
-/// @version 1.1
-/// @date 2024-11-23
-///
-/// @copyright Copyright (c) 2024
-///
-/// @par 修改日志:
-/// <table>
-/// <tr><th>Date       <th>Version <th>Author  <th>Description
-/// <tr><td>2024-09-29 <td>1.0     <td>zenglj  <td>新建
-/// <tr><td>2024-11-23 <td>1.1     <td>zenglj  <td>表达式版增强
-/// </table>
 ///
 
 #include <stdexcept>
@@ -113,6 +101,7 @@ ast_node * materializeDeclNode(type_attr typeAttr, ast_node * specNode)
 	auto * typeNode = ast_node::create_type_node(typeAttr);
 	auto * declNode = ast_node::New(ast_operator_type::AST_OP_VAR_DECL, typeNode);
 	declNode->isConst = specNode->isConst;
+	declNode->isStatic = specNode->isStatic;
 	for (auto * child: specNode->sons) {
 		declNode->insert_son_node(child);
 	}
@@ -313,14 +302,22 @@ std::any MiniCCSTVisitor::visitBlockItem(MiniCParser::BlockItemContext * ctx)
 
 std::any MiniCCSTVisitor::visitConstDecl(MiniCParser::ConstDeclContext * ctx)
 {
+	return visitConstDeclNoSemi(ctx->constDeclNoSemi());
+}
+
+std::any MiniCCSTVisitor::visitConstDeclNoSemi(MiniCParser::ConstDeclNoSemiContext * ctx)
+{
 	auto * stmtNode = ast_node::New(ast_operator_type::AST_OP_DECL_STMT);
 	stmtNode->isConst = true;
+	stmtNode->isStatic = ctx->T_STATIC() != nullptr;
 
 	type_attr typeAttr = std::any_cast<type_attr>(visitBasicType(ctx->basicType()));
 	for (auto * defCtx: ctx->constDef()) {
 		auto * specNode = std::any_cast<ast_node *>(visitConstDef(defCtx));
+		specNode->isStatic = stmtNode->isStatic;
 		auto * declNode = materializeDeclNode(typeAttr, specNode);
 		declNode->isConst = true;
+		declNode->isStatic = stmtNode->isStatic;
 		stmtNode->insert_son_node(declNode);
 	}
 
@@ -416,6 +413,59 @@ std::any MiniCCSTVisitor::visitWhileUnmatchedStatement(MiniCParser::WhileUnmatch
 	auto bodyNode = ensureStatementNode(std::any_cast<ast_node *>(visit(ctx->unmatchedStatement())));
 
 	return ast_node::New(ast_operator_type::AST_OP_WHILE, condNode, bodyNode);
+}
+
+std::any MiniCCSTVisitor::visitForStatement(MiniCParser::ForStatementContext * ctx)
+{
+	ast_node * initNode = nullptr;
+	if (ctx->forInit()) {
+		initNode = std::any_cast<ast_node *>(visitForInit(ctx->forInit()));
+	} else {
+		initNode = makeEmptyStmtNode();
+	}
+
+	ast_node * condNode = nullptr;
+	if (ctx->cond()) {
+		condNode = std::any_cast<ast_node *>(visitCond(ctx->cond()));
+	} else {
+		condNode = ast_node::New(digit_int_attr{1, (int64_t) ctx->T_FOR()->getSymbol()->getLine()});
+	}
+
+	ast_node * stepNode = nullptr;
+	if (ctx->forStep()) {
+		stepNode = std::any_cast<ast_node *>(visitForStep(ctx->forStep()));
+	} else {
+		stepNode = makeEmptyStmtNode();
+	}
+
+	auto bodyNode = ensureStatementNode(std::any_cast<ast_node *>(visitStatement(ctx->statement())));
+	return ast_node::New(ast_operator_type::AST_OP_FOR, initNode, condNode, stepNode, bodyNode);
+}
+
+std::any MiniCCSTVisitor::visitForInit(MiniCParser::ForInitContext * ctx)
+{
+	if (ctx->constDeclNoSemi()) {
+		return visitConstDeclNoSemi(ctx->constDeclNoSemi());
+	}
+	if (ctx->varDeclNoSemi()) {
+		return visitVarDeclNoSemi(ctx->varDeclNoSemi());
+	}
+	if (ctx->lVal()) {
+		auto * lvalNode = std::any_cast<ast_node *>(visitLVal(ctx->lVal()));
+		auto * exprNode = std::any_cast<ast_node *>(visitExpr(ctx->expr()));
+		return ast_node::New(ast_operator_type::AST_OP_ASSIGN, lvalNode, exprNode);
+	}
+	return visitExpr(ctx->expr());
+}
+
+std::any MiniCCSTVisitor::visitForStep(MiniCParser::ForStepContext * ctx)
+{
+	if (ctx->lVal()) {
+		auto * lvalNode = std::any_cast<ast_node *>(visitLVal(ctx->lVal()));
+		auto * exprNode = std::any_cast<ast_node *>(visitExpr(ctx->expr()));
+		return ast_node::New(ast_operator_type::AST_OP_ASSIGN, lvalNode, exprNode);
+	}
+	return visitExpr(ctx->expr());
 }
 
 std::any MiniCCSTVisitor::visitCond(MiniCParser::CondContext * ctx)
@@ -679,7 +729,9 @@ std::any MiniCCSTVisitor::visitMulOp(MiniCParser::MulOpContext * ctx)
 
 std::any MiniCCSTVisitor::visitUnaryExp(MiniCParser::UnaryExpContext * ctx)
 {
-	// 识别文法产生式：unaryExp: primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN | unaryOp unaryExp;
+	// 识别文法产生式：
+	// unaryExp: primaryExp | T_ID '(' realParamList? ')' | unaryOp unaryExp
+	//         | ('++' | '--') lVal | lVal ('++' | '--');
 
 	if (ctx->primaryExp()) {
 		// 普通表达式
@@ -709,6 +761,23 @@ std::any MiniCCSTVisitor::visitUnaryExp(MiniCParser::UnaryExpContext * ctx)
 		}
 
 		return ast_node::New(op, operand);
+	} else if (auto * lvalCtx = ctx->getRuleContext<MiniCParser::LValContext>(0)) {
+		ast_node * operand = std::any_cast<ast_node *>(visitLVal(lvalCtx));
+		const bool prefix = !ctx->children.empty() && (ctx->children.front()->getText() == "++" ||
+		                                               ctx->children.front()->getText() == "--");
+		const bool inc = !ctx->children.empty() && (prefix ? ctx->children.front()->getText() == "++"
+		                                                   : ctx->children.back()->getText() == "++");
+
+		if (prefix && inc) {
+			return ast_node::New(ast_operator_type::AST_OP_PRE_INC, operand);
+		}
+		if (prefix) {
+			return ast_node::New(ast_operator_type::AST_OP_PRE_DEC, operand);
+		}
+		if (inc) {
+			return ast_node::New(ast_operator_type::AST_OP_POST_INC, operand);
+		}
+		return ast_node::New(ast_operator_type::AST_OP_POST_DEC, operand);
 	} else {
 		return nullptr;
 	}
@@ -771,16 +840,23 @@ std::any MiniCCSTVisitor::visitLVal(MiniCParser::LValContext * ctx)
 
 std::any MiniCCSTVisitor::visitVarDecl(MiniCParser::VarDeclContext * ctx)
 {
-	// varDecl: basicType varDef (T_COMMA varDef)* T_SEMICOLON;
+	return visitVarDeclNoSemi(ctx->varDeclNoSemi());
+}
+
+std::any MiniCCSTVisitor::visitVarDeclNoSemi(MiniCParser::VarDeclNoSemiContext * ctx)
+{
+	// varDeclNoSemi: T_STATIC? basicType varDef (T_COMMA varDef)*;
 
 	// 声明语句节点
 	ast_node * stmt_node = ast_node::New(ast_operator_type::AST_OP_DECL_STMT);
+	stmt_node->isStatic = ctx->T_STATIC() != nullptr;
 
 	// 类型节点
 	type_attr typeAttr = std::any_cast<type_attr>(visitBasicType(ctx->basicType()));
 
 	for (auto & varCtx: ctx->varDef()) {
 		ast_node * specNode = std::any_cast<ast_node *>(visitVarDef(varCtx));
+		specNode->isStatic = stmt_node->isStatic;
 		stmt_node->insert_son_node(materializeDeclNode(typeAttr, specNode));
 	}
 

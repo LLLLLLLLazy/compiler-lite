@@ -59,6 +59,12 @@ jobs:
       - name: Run float regression tests
         run: bash ./tools/run-float-regression.sh
 
+      - name: Run for-loop RISCV64 asm regression tests
+        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh for_loop
+
+      - name: Run static RISCV64 asm regression tests
+        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh static_test
+
       - name: Run 2023 LLVM IR full test suite
         run: MINIC_TEST_MODE=llvmir MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh 2023
 

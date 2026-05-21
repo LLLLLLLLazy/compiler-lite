@@ -41,10 +41,16 @@ blockItemList: blockItem+;
 blockItem: statement | decl;
 
 // 常量声明
-constDecl: T_CONST basicType constDef (T_COMMA constDef)* T_SEMICOLON;
+constDecl: constDeclNoSemi T_SEMICOLON;
 
 // 变量声明，支持变量定义时初始化
-varDecl: basicType varDef (T_COMMA varDef)* T_SEMICOLON;
+varDecl: varDeclNoSemi T_SEMICOLON;
+
+// 不带分号的常量声明，用于普通声明与 for 初始化子句
+constDeclNoSemi: T_STATIC? T_CONST basicType constDef (T_COMMA constDef)*;
+
+// 不带分号的变量声明，用于普通声明与 for 初始化子句
+varDeclNoSemi: T_STATIC? basicType varDef (T_COMMA varDef)*;
 
 // 常量定义
 constDef: T_ID arrayDefDims? T_ASSIGN initVal;
@@ -74,6 +80,7 @@ matchedStatement:
 	| lVal T_ASSIGN expr T_SEMICOLON	# assignStatement
 	| T_IF T_L_PAREN cond T_R_PAREN matchedStatement T_ELSE matchedStatement # ifElseMatchedStatement
 	| T_WHILE T_L_PAREN cond T_R_PAREN matchedStatement # whileMatchedStatement
+	| T_FOR T_L_PAREN forInit? T_SEMICOLON cond? T_SEMICOLON forStep? T_R_PAREN matchedStatement # forMatchedStatement
 	| T_BREAK T_SEMICOLON				# breakStatement
 	| T_CONTINUE T_SEMICOLON			# continueStatement
 	| block								# blockStatement
@@ -83,7 +90,14 @@ matchedStatement:
 unmatchedStatement:
 	T_IF T_L_PAREN cond T_R_PAREN statement # ifWithoutElseStatement
 	| T_IF T_L_PAREN cond T_R_PAREN matchedStatement T_ELSE unmatchedStatement # ifElseUnmatchedStatement
-	| T_WHILE T_L_PAREN cond T_R_PAREN unmatchedStatement # whileUnmatchedStatement;
+	| T_WHILE T_L_PAREN cond T_R_PAREN unmatchedStatement # whileUnmatchedStatement
+	| T_FOR T_L_PAREN forInit? T_SEMICOLON cond? T_SEMICOLON forStep? T_R_PAREN unmatchedStatement # forUnmatchedStatement;
+
+// for 初始化子句，允许声明、赋值或普通表达式
+forInit: constDeclNoSemi | varDeclNoSemi | lVal T_ASSIGN expr | expr;
+
+// for 步进子句，允许赋值或普通表达式
+forStep: lVal T_ASSIGN expr | expr;
 
 // 普通表达式文法 Exp : LOrExp
 expr: lOrExp;
@@ -122,7 +136,12 @@ mulExp: unaryExp (mulOp unaryExp)*;
 mulOp: T_MUL | T_DIV | T_MOD;
 
 // 一元表达式
-unaryExp: primaryExp | T_ID T_L_PAREN realParamList? T_R_PAREN | unaryOp unaryExp;
+unaryExp:
+	primaryExp
+	| T_ID T_L_PAREN realParamList? T_R_PAREN
+	| unaryOp unaryExp
+	| (T_INC | T_DEC) lVal
+	| lVal (T_INC | T_DEC);
 
 // 单目运算符
 unaryOp: T_ADD | T_SUB | T_NOT;
@@ -167,15 +186,19 @@ T_MOD: '%';
 T_NOT: '!';
 T_LAND: '&&';
 T_LOR: '||';
+T_INC: '++';
+T_DEC: '--';
 
 // 要注意关键字同样也属于T_ID，因此必须放在T_ID的前面，否则会识别成T_ID
 T_IF: 'if';
 T_ELSE: 'else';
 T_WHILE: 'while';
+T_FOR: 'for';
 T_BREAK: 'break';
 T_CONTINUE: 'continue';
 T_RETURN: 'return';
 T_CONST: 'const';
+T_STATIC: 'static';
 T_INT: 'int';
 T_FLOAT: 'float';
 T_VOID: 'void';

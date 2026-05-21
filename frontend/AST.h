@@ -1,18 +1,6 @@
 ﻿///
 /// @file AST.h
 /// @brief 抽象语法树AST管理的头文件
-/// @author zenglj (zenglj@live.com)
-/// @version 1.1
-/// @date 2024-11-23
-///
-/// @copyright Copyright (c) 2024
-///
-/// @par 修改日志:
-/// <table>
-/// <tr><th>Date       <th>Version <th>Author  <th>Description
-/// <tr><td>2024-11-21 <td>1.0     <td>zenglj  <td>新做
-/// <tr><td>2024-11-23 <td>1.1     <td>zenglj  <td>表达式版增强
-/// </table>
 ///
 #pragma once
 
@@ -80,6 +68,9 @@ enum class ast_operator_type : int {
 
 	/// @brief while 语句运算符
 	AST_OP_WHILE,
+
+	/// @brief for 语句运算符
+	AST_OP_FOR,
 
 	/// @brief break 语句运算符
 	AST_OP_BREAK,
@@ -149,6 +140,18 @@ enum class ast_operator_type : int {
 
 	/// @brief 单目运算符! (逻辑非)
 	AST_OP_NOT,
+
+	/// @brief 前置自增运算符++
+	AST_OP_PRE_INC,
+
+	/// @brief 前置自减运算符--
+	AST_OP_PRE_DEC,
+
+	/// @brief 后置自增运算符++
+	AST_OP_POST_INC,
+
+	/// @brief 后置自减运算符--
+	AST_OP_POST_DEC,
 
 	/// @brief 最大标识符，表示非法运算符
 	AST_OP_MAX,
@@ -371,6 +374,9 @@ public:
 
 	/// @brief 当前声明是否为 const 声明
 	bool isConst = false;
+
+	/// @brief 当前声明是否为 static 声明
+	bool isStatic = false;
 
 	/// @brief 数组形参是否省略了第一维
 	bool firstDimOmitted = false;

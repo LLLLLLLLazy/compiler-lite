@@ -33,6 +33,9 @@ protected:
 	bool run() override;
 
 	/// @brief 生成汇编文件头部（架构属性等）
+	bool run() override;
+
+	/// @brief 生成汇编文件头部（架构属性等）
 	void genHeader() override;
 
 	/// @brief 生成数据段（全局变量）
@@ -70,6 +73,7 @@ private:
 	/// @brief 输出内置循环并行运行时汇编
 	void emitMtRuntime();
 
+
 	/// @brief 将本模块的寄存器分配评测指标写为JSON
 	/// @return 写入是否成功；若未配置输出路径则直接返回true
 	bool writeRAStatsJson() const;
@@ -83,6 +87,7 @@ private:
 		std::vector<int> usedCalleeSavedFPRs;  ///< 实际使用的callee-saved FPR编号
 		RiscV64CodegenStats codegenStats;      ///< 代码生成统计（指令数、栈访问数等）
 	};
+
 
 	/// @brief Greedy寄存器分配器实例
 	GreedyRegAllocator greedyAllocator;

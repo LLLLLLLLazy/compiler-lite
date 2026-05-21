@@ -58,6 +58,9 @@ private:
     /// @brief 生成 while 循环对应的 IR
     bool visitWhile(ast_node * node);
 
+    /// @brief 生成 for 循环对应的 IR
+    bool visitFor(ast_node * node);
+
     /// @brief 生成 break 语句对应的 IR
     bool visitBreak(ast_node * node);
 
@@ -72,6 +75,9 @@ private:
 
     /// @brief 生成单个变量声明对应的 IR
     bool visitVarDecl(ast_node * node);
+
+    /// @brief 生成局部 static 变量对应的全局存储
+    bool visitStaticLocalVarDecl(ast_node * node);
 
     /// @brief 生成左值对应的地址
     Value * visitLValueAddress(ast_node * node);
@@ -160,6 +166,9 @@ private:
     /// @brief 生成逻辑非表达式对应的 IR
     Value * emitNot(ast_node * node);
 
+    /// @brief 生成自增/自减表达式对应的 IR
+    Value * emitIncDec(ast_node * node, bool increment, bool prefix);
+
     /// @brief 生成整数逻辑非表达式对应的 IR
     Value * emitIntNot(Value * operand);
 
@@ -244,6 +253,8 @@ private:
 
     // 记录 LocalVariable/FormalParam 到对应栈槽的映射
     std::unordered_map<Value *, AllocaInst *> varAllocaMap;
+    std::unordered_map<Value *, GlobalVariable *> staticLocalMap;
+    std::size_t nextStaticLocalId = 0;
 
     std::vector<BasicBlock *> breakTargets;
     std::vector<BasicBlock *> continueTargets;
