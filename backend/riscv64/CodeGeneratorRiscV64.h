@@ -33,9 +33,6 @@ protected:
 	bool run() override;
 
 	/// @brief 生成汇编文件头部（架构属性等）
-	bool run() override;
-
-	/// @brief 生成汇编文件头部（架构属性等）
 	void genHeader() override;
 
 	/// @brief 生成数据段（全局变量）

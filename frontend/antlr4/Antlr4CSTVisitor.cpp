@@ -415,7 +415,7 @@ std::any MiniCCSTVisitor::visitWhileUnmatchedStatement(MiniCParser::WhileUnmatch
 	return ast_node::New(ast_operator_type::AST_OP_WHILE, condNode, bodyNode);
 }
 
-std::any MiniCCSTVisitor::visitForStatement(MiniCParser::ForStatementContext * ctx)
+std::any MiniCCSTVisitor::visitForMatchedStatement(MiniCParser::ForMatchedStatementContext * ctx)
 {
 	ast_node * initNode = nullptr;
 	if (ctx->forInit()) {
@@ -438,7 +438,34 @@ std::any MiniCCSTVisitor::visitForStatement(MiniCParser::ForStatementContext * c
 		stepNode = makeEmptyStmtNode();
 	}
 
-	auto bodyNode = ensureStatementNode(std::any_cast<ast_node *>(visitStatement(ctx->statement())));
+	auto bodyNode = ensureStatementNode(std::any_cast<ast_node *>(visit(ctx->matchedStatement())));
+	return ast_node::New(ast_operator_type::AST_OP_FOR, initNode, condNode, stepNode, bodyNode);
+}
+
+std::any MiniCCSTVisitor::visitForUnmatchedStatement(MiniCParser::ForUnmatchedStatementContext * ctx)
+{
+	ast_node * initNode = nullptr;
+	if (ctx->forInit()) {
+		initNode = std::any_cast<ast_node *>(visitForInit(ctx->forInit()));
+	} else {
+		initNode = makeEmptyStmtNode();
+	}
+
+	ast_node * condNode = nullptr;
+	if (ctx->cond()) {
+		condNode = std::any_cast<ast_node *>(visitCond(ctx->cond()));
+	} else {
+		condNode = ast_node::New(digit_int_attr{1, (int64_t) ctx->T_FOR()->getSymbol()->getLine()});
+	}
+
+	ast_node * stepNode = nullptr;
+	if (ctx->forStep()) {
+		stepNode = std::any_cast<ast_node *>(visitForStep(ctx->forStep()));
+	} else {
+		stepNode = makeEmptyStmtNode();
+	}
+
+	auto bodyNode = ensureStatementNode(std::any_cast<ast_node *>(visit(ctx->unmatchedStatement())));
 	return ast_node::New(ast_operator_type::AST_OP_FOR, initNode, condNode, stepNode, bodyNode);
 }
 

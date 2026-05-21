@@ -104,8 +104,10 @@ protected:
 	/// @brief while非匹配语句的遍历（循环体是unmatched语句）
 	std::any visitWhileUnmatchedStatement(MiniCParser::WhileUnmatchedStatementContext * ctx) override;
 
-	/// @brief for 语句的遍历
-	std::any visitForStatement(MiniCParser::ForStatementContext * ctx) override;
+	/// @brief for 匹配语句的遍历（循环体是matched语句）
+	std::any visitForMatchedStatement(MiniCParser::ForMatchedStatementContext * ctx) override;
+	/// @brief for 非匹配语句的遍历（循环体是unmatched语句）
+	std::any visitForUnmatchedStatement(MiniCParser::ForUnmatchedStatementContext * ctx) override;
 
 	/// @brief for 初始化子句的遍历
 	std::any visitForInit(MiniCParser::ForInitContext * ctx) override;
