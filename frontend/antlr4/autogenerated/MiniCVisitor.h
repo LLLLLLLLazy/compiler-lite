@@ -57,13 +57,17 @@ public:
 
     virtual std::any visitInitVal(MiniCParser::InitValContext *context) = 0;
 
+    virtual std::any visitMatchedStatementWrapper(MiniCParser::MatchedStatementWrapperContext *context) = 0;
+
+    virtual std::any visitUnmatchedStatementWrapper(MiniCParser::UnmatchedStatementWrapperContext *context) = 0;
+
     virtual std::any visitReturnStatement(MiniCParser::ReturnStatementContext *context) = 0;
 
     virtual std::any visitAssignStatement(MiniCParser::AssignStatementContext *context) = 0;
 
-    virtual std::any visitIfStatement(MiniCParser::IfStatementContext *context) = 0;
+    virtual std::any visitIfElseMatchedStatement(MiniCParser::IfElseMatchedStatementContext *context) = 0;
 
-    virtual std::any visitWhileStatement(MiniCParser::WhileStatementContext *context) = 0;
+    virtual std::any visitWhileMatchedStatement(MiniCParser::WhileMatchedStatementContext *context) = 0;
 
     virtual std::any visitForStatement(MiniCParser::ForStatementContext *context) = 0;
 
@@ -74,6 +78,14 @@ public:
     virtual std::any visitBlockStatement(MiniCParser::BlockStatementContext *context) = 0;
 
     virtual std::any visitExpressionStatement(MiniCParser::ExpressionStatementContext *context) = 0;
+
+    virtual std::any visitIfWithoutElseStatement(MiniCParser::IfWithoutElseStatementContext *context) = 0;
+
+    virtual std::any visitIfElseUnmatchedStatement(MiniCParser::IfElseUnmatchedStatementContext *context) = 0;
+
+    virtual std::any visitWhileUnmatchedStatement(MiniCParser::WhileUnmatchedStatementContext *context) = 0;
+
+    virtual std::any visitForUnmatchedStatement(MiniCParser::ForUnmatchedStatementContext *context) = 0;
 
     virtual std::any visitForInit(MiniCParser::ForInitContext *context) = 0;
 

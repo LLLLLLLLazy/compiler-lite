@@ -15,6 +15,7 @@
 #include "fixedPointFunctionPass/LICM.h"
 #include "fixedPointFunctionPass/LoopStrengthReduce.h"
 #include "fixedPointFunctionPass/LoopTiling.h"
+#include "fixedPointFunctionPass/LoopVectorize.h"
 #include "fixedPointFunctionPass/LocalMemoryOpt.h"
 #include "fixedPointFunctionPass/SimpleLoopUnroll.h"
 #include "fixedPointFunctionPass/UnreachableBlockElim.h"
@@ -104,7 +105,8 @@ PassManager::PassManager(Module * _module) : module(_module)
 
 /// @brief 注册默认优化流水线
 /// @param optLevel 优化级别
-void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
+/// @param enableRVVLoopVectorize 是否启用 RVV 循环向量化
+void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool enableRVVLoopVectorize)
 {
     clear();
     if (module == nullptr || optLevel <= 0) {
@@ -195,6 +197,14 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel)
         GVN pass(func, module);
         return pass.run();
     });
+
+    if (enableRVVLoopVectorize) {
+        // RVV 向量化放在循环规范化/强度削减之后，输入循环形态更稳定。
+        registerFixedPointFunctionPass([this](Function * func) {
+            LoopVectorize pass(func, module);
+            return pass.run();
+        });
+    }
 
     registerFixedPointFunctionPass([this](Function * func) {
         SimpleLoopUnroll pass(func, module);

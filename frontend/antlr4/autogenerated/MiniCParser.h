@@ -29,11 +29,12 @@ public:
     RuleBlock = 7, RuleBlockItemList = 8, RuleBlockItem = 9, RuleConstDecl = 10, 
     RuleVarDecl = 11, RuleConstDeclNoSemi = 12, RuleVarDeclNoSemi = 13, 
     RuleConstDef = 14, RuleBasicType = 15, RuleVarDef = 16, RuleArrayDefDims = 17, 
-    RuleInitVal = 18, RuleStatement = 19, RuleForInit = 20, RuleForStep = 21, 
-    RuleExpr = 22, RuleCond = 23, RuleLOrExp = 24, RuleLAndExp = 25, RuleEqExp = 26, 
-    RuleEqOp = 27, RuleRelExp = 28, RuleRelOp = 29, RuleAddExp = 30, RuleAddOp = 31, 
-    RuleMulExp = 32, RuleMulOp = 33, RuleUnaryExp = 34, RuleUnaryOp = 35, 
-    RulePrimaryExp = 36, RuleRealParam = 37, RuleRealParamList = 38, RuleLVal = 39
+    RuleInitVal = 18, RuleStatement = 19, RuleMatchedStatement = 20, RuleUnmatchedStatement = 21, 
+    RuleForInit = 22, RuleForStep = 23, RuleExpr = 24, RuleCond = 25, RuleLOrExp = 26, 
+    RuleLAndExp = 27, RuleEqExp = 28, RuleEqOp = 29, RuleRelExp = 30, RuleRelOp = 31, 
+    RuleAddExp = 32, RuleAddOp = 33, RuleMulExp = 34, RuleMulOp = 35, RuleUnaryExp = 36, 
+    RuleUnaryOp = 37, RulePrimaryExp = 38, RuleRealParam = 39, RuleRealParamList = 40, 
+    RuleLVal = 41
   };
 
   explicit MiniCParser(antlr4::TokenStream *input);
@@ -73,6 +74,8 @@ public:
   class ArrayDefDimsContext;
   class InitValContext;
   class StatementContext;
+  class MatchedStatementContext;
+  class UnmatchedStatementContext;
   class ForInitContext;
   class ForStepContext;
   class ExprContext;
@@ -411,31 +414,79 @@ public:
    
   };
 
-  class  WhileStatementContext : public StatementContext {
+  class  UnmatchedStatementWrapperContext : public StatementContext {
   public:
-    WhileStatementContext(StatementContext *ctx);
+    UnmatchedStatementWrapperContext(StatementContext *ctx);
 
-    antlr4::tree::TerminalNode *T_WHILE();
-    antlr4::tree::TerminalNode *T_L_PAREN();
-    CondContext *cond();
-    antlr4::tree::TerminalNode *T_R_PAREN();
-    StatementContext *statement();
+    UnmatchedStatementContext *unmatchedStatement();
 
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
-  class  BlockStatementContext : public StatementContext {
+  class  MatchedStatementWrapperContext : public StatementContext {
   public:
-    BlockStatementContext(StatementContext *ctx);
+    MatchedStatementWrapperContext(StatementContext *ctx);
+
+    MatchedStatementContext *matchedStatement();
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+  };
+
+  StatementContext* statement();
+
+  class  MatchedStatementContext : public antlr4::ParserRuleContext {
+  public:
+    MatchedStatementContext(antlr4::ParserRuleContext *parent, size_t invokingState);
+   
+    MatchedStatementContext() = default;
+    void copyFrom(MatchedStatementContext *context);
+    using antlr4::ParserRuleContext::copyFrom;
+
+    virtual size_t getRuleIndex() const override;
+
+   
+  };
+
+  class  BlockStatementContext : public MatchedStatementContext {
+  public:
+    BlockStatementContext(MatchedStatementContext *ctx);
 
     BlockContext *block();
 
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
-  class  AssignStatementContext : public StatementContext {
+  class  IfElseMatchedStatementContext : public MatchedStatementContext {
   public:
-    AssignStatementContext(StatementContext *ctx);
+    IfElseMatchedStatementContext(MatchedStatementContext *ctx);
+
+    antlr4::tree::TerminalNode *T_IF();
+    antlr4::tree::TerminalNode *T_L_PAREN();
+    CondContext *cond();
+    antlr4::tree::TerminalNode *T_R_PAREN();
+    std::vector<MatchedStatementContext *> matchedStatement();
+    MatchedStatementContext* matchedStatement(size_t i);
+    antlr4::tree::TerminalNode *T_ELSE();
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+  };
+
+  class  WhileMatchedStatementContext : public MatchedStatementContext {
+  public:
+    WhileMatchedStatementContext(MatchedStatementContext *ctx);
+
+    antlr4::tree::TerminalNode *T_WHILE();
+    antlr4::tree::TerminalNode *T_L_PAREN();
+    CondContext *cond();
+    antlr4::tree::TerminalNode *T_R_PAREN();
+    MatchedStatementContext *matchedStatement();
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+  };
+
+  class  AssignStatementContext : public MatchedStatementContext {
+  public:
+    AssignStatementContext(MatchedStatementContext *ctx);
 
     LValContext *lVal();
     antlr4::tree::TerminalNode *T_ASSIGN();
@@ -445,16 +496,16 @@ public:
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
-  class  ForStatementContext : public StatementContext {
+  class  ForStatementContext : public MatchedStatementContext {
   public:
-    ForStatementContext(StatementContext *ctx);
+    ForStatementContext(MatchedStatementContext *ctx);
 
     antlr4::tree::TerminalNode *T_FOR();
     antlr4::tree::TerminalNode *T_L_PAREN();
     std::vector<antlr4::tree::TerminalNode *> T_SEMICOLON();
     antlr4::tree::TerminalNode* T_SEMICOLON(size_t i);
     antlr4::tree::TerminalNode *T_R_PAREN();
-    StatementContext *statement();
+    MatchedStatementContext *matchedStatement();
     ForInitContext *forInit();
     CondContext *cond();
     ForStepContext *forStep();
@@ -462,9 +513,9 @@ public:
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
-  class  BreakStatementContext : public StatementContext {
+  class  BreakStatementContext : public MatchedStatementContext {
   public:
-    BreakStatementContext(StatementContext *ctx);
+    BreakStatementContext(MatchedStatementContext *ctx);
 
     antlr4::tree::TerminalNode *T_BREAK();
     antlr4::tree::TerminalNode *T_SEMICOLON();
@@ -472,9 +523,9 @@ public:
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
-  class  ContinueStatementContext : public StatementContext {
+  class  ContinueStatementContext : public MatchedStatementContext {
   public:
-    ContinueStatementContext(StatementContext *ctx);
+    ContinueStatementContext(MatchedStatementContext *ctx);
 
     antlr4::tree::TerminalNode *T_CONTINUE();
     antlr4::tree::TerminalNode *T_SEMICOLON();
@@ -482,9 +533,9 @@ public:
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
-  class  ExpressionStatementContext : public StatementContext {
+  class  ExpressionStatementContext : public MatchedStatementContext {
   public:
-    ExpressionStatementContext(StatementContext *ctx);
+    ExpressionStatementContext(MatchedStatementContext *ctx);
 
     antlr4::tree::TerminalNode *T_SEMICOLON();
     ExprContext *expr();
@@ -492,9 +543,9 @@ public:
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
-  class  ReturnStatementContext : public StatementContext {
+  class  ReturnStatementContext : public MatchedStatementContext {
   public:
-    ReturnStatementContext(StatementContext *ctx);
+    ReturnStatementContext(MatchedStatementContext *ctx);
 
     antlr4::tree::TerminalNode *T_RETURN();
     antlr4::tree::TerminalNode *T_SEMICOLON();
@@ -503,22 +554,80 @@ public:
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
-  class  IfStatementContext : public StatementContext {
+  MatchedStatementContext* matchedStatement();
+
+  class  UnmatchedStatementContext : public antlr4::ParserRuleContext {
   public:
-    IfStatementContext(StatementContext *ctx);
+    UnmatchedStatementContext(antlr4::ParserRuleContext *parent, size_t invokingState);
+   
+    UnmatchedStatementContext() = default;
+    void copyFrom(UnmatchedStatementContext *context);
+    using antlr4::ParserRuleContext::copyFrom;
+
+    virtual size_t getRuleIndex() const override;
+
+   
+  };
+
+  class  IfElseUnmatchedStatementContext : public UnmatchedStatementContext {
+  public:
+    IfElseUnmatchedStatementContext(UnmatchedStatementContext *ctx);
 
     antlr4::tree::TerminalNode *T_IF();
     antlr4::tree::TerminalNode *T_L_PAREN();
     CondContext *cond();
     antlr4::tree::TerminalNode *T_R_PAREN();
-    std::vector<StatementContext *> statement();
-    StatementContext* statement(size_t i);
+    MatchedStatementContext *matchedStatement();
     antlr4::tree::TerminalNode *T_ELSE();
+    UnmatchedStatementContext *unmatchedStatement();
 
     virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
   };
 
-  StatementContext* statement();
+  class  WhileUnmatchedStatementContext : public UnmatchedStatementContext {
+  public:
+    WhileUnmatchedStatementContext(UnmatchedStatementContext *ctx);
+
+    antlr4::tree::TerminalNode *T_WHILE();
+    antlr4::tree::TerminalNode *T_L_PAREN();
+    CondContext *cond();
+    antlr4::tree::TerminalNode *T_R_PAREN();
+    UnmatchedStatementContext *unmatchedStatement();
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+  };
+
+  class  IfWithoutElseStatementContext : public UnmatchedStatementContext {
+  public:
+    IfWithoutElseStatementContext(UnmatchedStatementContext *ctx);
+
+    antlr4::tree::TerminalNode *T_IF();
+    antlr4::tree::TerminalNode *T_L_PAREN();
+    CondContext *cond();
+    antlr4::tree::TerminalNode *T_R_PAREN();
+    StatementContext *statement();
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+  };
+
+  class  ForUnmatchedStatementContext : public UnmatchedStatementContext {
+  public:
+    ForUnmatchedStatementContext(UnmatchedStatementContext *ctx);
+
+    antlr4::tree::TerminalNode *T_FOR();
+    antlr4::tree::TerminalNode *T_L_PAREN();
+    std::vector<antlr4::tree::TerminalNode *> T_SEMICOLON();
+    antlr4::tree::TerminalNode* T_SEMICOLON(size_t i);
+    antlr4::tree::TerminalNode *T_R_PAREN();
+    UnmatchedStatementContext *unmatchedStatement();
+    ForInitContext *forInit();
+    CondContext *cond();
+    ForStepContext *forStep();
+
+    virtual std::any accept(antlr4::tree::ParseTreeVisitor *visitor) override;
+  };
+
+  UnmatchedStatementContext* unmatchedStatement();
 
   class  ForInitContext : public antlr4::ParserRuleContext {
   public:

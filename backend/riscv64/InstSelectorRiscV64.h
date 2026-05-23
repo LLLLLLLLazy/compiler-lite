@@ -159,6 +159,20 @@ private:
 	void translate_copy(Instruction * inst);
 	/// @brief 翻译元素地址计算指令
 	void translate_gep(Instruction * inst);
+	/// @brief 翻译RVV vsetvl
+	void translate_vsetvl(Instruction * inst);
+	/// @brief 翻译RVV向量load
+	void translate_vload(Instruction * inst);
+	/// @brief 翻译RVV向量store
+	void translate_vstore(Instruction * inst);
+	/// @brief 翻译RVV标量广播
+	void translate_vsplat(Instruction * inst);
+	/// @brief 翻译RVV向量二元运算
+	void translate_vbinary(Instruction * inst);
+	/// @brief 翻译RVV向量归约
+	void translate_vreduce(Instruction * inst);
+	/// @brief 翻译RVV lane0提取
+	void translate_vextract(Instruction * inst);
 	/// @brief 翻译二元运算指令的通用实现
 	/// @param inst IR指令
 	/// @param op RISC-V汇编操作码（如"add", "sub"）
@@ -212,6 +226,9 @@ private:
 	/// @brief 获取Value分配的浮点结果寄存器编号
 	int getFloatResultReg(Value * val) const;
 
+	/// @brief 获取Value分配的向量结果寄存器编号
+	int getVectorResultReg(Value * val, Instruction * inst) const;
+
 	/// @brief 获取 Value 在当前指令处的位置敏感分配信息
 	RegAllocInfo getAllocInfo(Value * val, Instruction * inst) const;
 
@@ -221,8 +238,10 @@ private:
 	/// @brief 按位置敏感分配信息加载/保存 Value
 	void loadValueToReg(int reg, Value * val, Instruction * inst);
 	void loadFloatValueToReg(int reg, Value * val, int tmpReg, Instruction * inst);
+	void loadVectorValueToReg(int reg, Value * val, Instruction * inst);
 	void storeValueFromReg(Value * val, int srcReg, int tmpReg, Instruction * inst);
 	void storeFloatValueFromReg(Value * val, int srcReg, int tmpReg, Instruction * inst);
+	void storeVectorValueFromReg(Value * val, int srcReg, Instruction * inst);
 
 	/// @brief 获取只读操作数所在寄存器，必要时借用临时寄存器加载
 	/// @param val 操作数
@@ -254,6 +273,12 @@ private:
 
 	/// @brief 将浮点寄存器值存储到Value的目标位置
 	void storeFloatResult(Value * val, int srcReg, Instruction * inst = nullptr);
+
+	/// @brief 将向量寄存器值存储到Value的目标位置
+	void storeVectorResult(Value * val, int srcReg, Instruction * inst = nullptr);
+
+	/// @brief 获取向量操作数所在寄存器，必要时从栈槽重载到scratchReg
+	int loadVectorOperand(Value * val, Instruction * inst, int scratchReg);
 
 	/// @brief 借用临时浮点寄存器
 	int borrowFloatTemp(Instruction * inst, const std::set<int> & excludeRegs = {});

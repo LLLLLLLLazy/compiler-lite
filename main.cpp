@@ -108,6 +108,16 @@ static bool gRACoalesce = true;
 static bool gRASplit = true;
 
 ///
+/// @brief 机器可读RA统计输出文件
+///
+static std::string gRAStatsJsonFile;
+
+///
+/// @brief RISC-V64 RVV 支持，默认开启；可用 --riscv64-rvv=off 手动关闭
+///
+static bool gRiscV64RVV = true;
+
+///
 /// @brief 启用竞赛扩展文法
 ///
 static bool gExtendedGrammar = false;
@@ -139,6 +149,11 @@ static struct option long_options[] = {
 	{"ra-callee-saved-fpr", no_argument, nullptr, 'F'},
 	{"ra-coalesce", no_argument, nullptr, 'C'},
 	{"ra-split", no_argument, nullptr, 'P'},
+	{"ra-no-callee-saved-fpr", no_argument, nullptr, 1000},
+	{"ra-no-coalesce", no_argument, nullptr, 1001},
+	{"ra-no-split", no_argument, nullptr, 1002},
+	{"ra-stats-json", required_argument, nullptr, 1003},
+	{"riscv64-rvv", required_argument, nullptr, 1004},
 	{nullptr, 0, nullptr, 0}};
 
 /// @brief 显示帮助
@@ -153,7 +168,7 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -T, --ast                  Output abstract syntax tree\n";
 	std::cout << "  -I, --ir                   Output structured IR\n";
 	std::cout << "  -L, --llvmir               Output LLVM IR (.ll)\n";
-	std::cout << "  -e, --extended-grammar     Enable extended grammar: Exp -> LOrExp, Cond -> Exp\n";
+	std::cout << "  -e, --extended-grammar     Enable extended grammar\n";
 	std::cout << "  -A, --antlr4               Deprecated, now always use Antlr4\n";
 	std::cout << "  -D, --recursive-descent    Deprecated, now always use Antlr4\n";
 	std::cout << "  -O, --optimize=LEVEL       Set optimization level (0: off, 1: on)\n";
@@ -163,6 +178,11 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  --ra-callee-saved-fpr      Enable callee-saved FPR (fs0-fs11) for register allocation\n";
 	std::cout << "  --ra-coalesce              Enable register coalescing to eliminate redundant copies\n";
 	std::cout << "  --ra-split                 Enable live interval splitting to reduce spills\n";
+	std::cout << "  --ra-no-callee-saved-fpr   Disable callee-saved FPR allocation\n";
+	std::cout << "  --ra-no-coalesce           Disable register coalescing\n";
+	std::cout << "  --ra-no-split              Disable live interval splitting\n";
+	std::cout << "  --ra-stats-json=FILE       Write machine-readable register allocation metrics\n";
+	std::cout << "  --riscv64-rvv=on|off       Enable or disable RVV codegen (default: on)\n";
 }
 
 /// @brief 参数解析与有效性检查
@@ -210,7 +230,7 @@ lb_check:
 				gShowLLVMIR = true;
 				break;
 			case 'e':
-				// 启用竞赛扩展文法
+				// 启用扩展文法
 				gExtendedGrammar = true;
 				break;
 			case 'A':
@@ -251,6 +271,31 @@ lb_check:
 			case 'P':
 				gRASplit = true;
 				break;
+			case 1000:
+				gRACalleeSavedFPR = false;
+				break;
+			case 1001:
+				gRACoalesce = false;
+				break;
+			case 1002:
+				gRASplit = false;
+				break;
+			case 1003:
+				gRAStatsJsonFile = optarg;
+				break;
+			case 1004: {
+				std::string value = optarg;
+				// RVV 影响两处：优化流水线是否插入 LoopVectorize，以及汇编 arch 属性。
+				if (value == "on") {
+					gRiscV64RVV = true;
+				} else if (value == "off") {
+					gRiscV64RVV = false;
+				} else {
+					minic_log(LOG_ERROR, "--riscv64-rvv 仅支持 on 或 off");
+					return -1;
+				}
+				break;
+			}
 			default:
 				return -1;
 				break; /* no break */
@@ -409,7 +454,8 @@ static int compile(std::string inputFile, std::string outputFile)
 		// LLVM IR 优化
 		if (gOptLevel > 0) {
 			PassManager passManager(module);
-			passManager.registerDefaultOptimizationPipeline(gOptLevel);
+			// 输出 LLVM IR 时不插入自定义 RVV IR，避免 .ll 路径出现后端专用指令。
+			passManager.registerDefaultOptimizationPipeline(gOptLevel, gRiscV64RVV && !gShowLLVMIR);
 			passManager.run();
 		}
 
@@ -471,7 +517,7 @@ static int compile(std::string inputFile, std::string outputFile)
 		}
 
 		// 使用RISCV64代码生成器生成汇编
-		CodeGeneratorRiscV64 generator(module, gRACalleeSavedFPR, gRACoalesce, gRASplit);
+		CodeGeneratorRiscV64 generator(module, gRiscV64RVV, gRACalleeSavedFPR, gRACoalesce, gRASplit, gRAStatsJsonFile);
 		generator.setShowLinearIR(gAsmAlsoShowIR);
 		if (!generator.run(asmOutputFile)) {
 			minic_log(LOG_ERROR, "RISCV64汇编生成错误");

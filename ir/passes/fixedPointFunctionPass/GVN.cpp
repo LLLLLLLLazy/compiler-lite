@@ -41,6 +41,7 @@
 #include "StoreInst.h"
 #include "Type.h"
 #include "Value.h"
+#include "VectorInst.h"
 #include "ZExtInst.h"
 
 namespace {
@@ -134,6 +135,12 @@ public:
             return;
         }
 
+        if (dynamic_cast<VectorStoreInst *>(inst) != nullptr) {
+            // 向量 store 目前没有细粒度 MemoryLocation，按全局内存版本失效处理。
+            state.globalVersion = idIt->second;
+            return;
+        }
+
         auto * call = dynamic_cast<CallInst *>(inst);
         if (call && !purity.isPure(call->getCallee())) {
             state.globalVersion = idIt->second;
@@ -165,6 +172,12 @@ private:
         for (auto * bb : func->getBlocks()) {
             for (auto * inst : bb->getInstructions()) {
                 if (dynamic_cast<StoreInst *>(inst) != nullptr) {
+                    clobberIds[inst] = nextId++;
+                    continue;
+                }
+
+                if (dynamic_cast<VectorStoreInst *>(inst) != nullptr) {
+                    // 与普通非纯调用一样为向量 store 分配 clobber id。
                     clobberIds[inst] = nextId++;
                     continue;
                 }

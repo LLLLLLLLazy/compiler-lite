@@ -91,6 +91,14 @@ public:
     return visitChildren(ctx);
   }
 
+  virtual std::any visitMatchedStatementWrapper(MiniCParser::MatchedStatementWrapperContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
+  virtual std::any visitUnmatchedStatementWrapper(MiniCParser::UnmatchedStatementWrapperContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
   virtual std::any visitReturnStatement(MiniCParser::ReturnStatementContext *ctx) override {
     return visitChildren(ctx);
   }
@@ -99,11 +107,11 @@ public:
     return visitChildren(ctx);
   }
 
-  virtual std::any visitIfStatement(MiniCParser::IfStatementContext *ctx) override {
+  virtual std::any visitIfElseMatchedStatement(MiniCParser::IfElseMatchedStatementContext *ctx) override {
     return visitChildren(ctx);
   }
 
-  virtual std::any visitWhileStatement(MiniCParser::WhileStatementContext *ctx) override {
+  virtual std::any visitWhileMatchedStatement(MiniCParser::WhileMatchedStatementContext *ctx) override {
     return visitChildren(ctx);
   }
 
@@ -124,6 +132,22 @@ public:
   }
 
   virtual std::any visitExpressionStatement(MiniCParser::ExpressionStatementContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
+  virtual std::any visitIfWithoutElseStatement(MiniCParser::IfWithoutElseStatementContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
+  virtual std::any visitIfElseUnmatchedStatement(MiniCParser::IfElseUnmatchedStatementContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
+  virtual std::any visitWhileUnmatchedStatement(MiniCParser::WhileUnmatchedStatementContext *ctx) override {
+    return visitChildren(ctx);
+  }
+
+  virtual std::any visitForUnmatchedStatement(MiniCParser::ForUnmatchedStatementContext *ctx) override {
     return visitChildren(ctx);
   }
 
