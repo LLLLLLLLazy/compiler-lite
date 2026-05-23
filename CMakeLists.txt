@@ -160,6 +160,8 @@ set(IR_SRCS
 	ir/Types/PointerType.cpp
 	ir/Types/ArrayType.h
 	ir/Types/ArrayType.cpp
+	ir/Types/VectorType.h
+	ir/Types/VectorType.cpp
 	ir/Values/ConstInteger.h
 	ir/Values/ConstInteger.cpp
 	ir/Values/ConstFloat.h
@@ -202,6 +204,8 @@ set(IR_SRCS
 	ir/Instructions/CopyInst.cpp
 	ir/Instructions/GetElementPtrInst.h
 	ir/Instructions/GetElementPtrInst.cpp
+	ir/Instructions/VectorInst.h
+	ir/Instructions/VectorInst.cpp
 	ir/Type.h
 	ir/analysis/DominatorTree.h
 	ir/analysis/DominatorTree.cpp
@@ -239,6 +243,8 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/LoopTiling.cpp
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.h
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.cpp
+	ir/passes/fixedPointFunctionPass/LoopVectorize.h
+	ir/passes/fixedPointFunctionPass/LoopVectorize.cpp
 	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.h
 	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.cpp
 	ir/passes/functionPass/LoopRotate.h

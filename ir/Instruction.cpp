@@ -61,8 +61,10 @@ bool Instruction::hasResultValue()
 bool Instruction::mayReadMemory() const
 {
     switch (op) {
+        // 标量/向量 load 和 call 都会读取内存状态。
         case IRInstOperator::IRINST_OP_LOAD:
         case IRInstOperator::IRINST_OP_CALL:
+        case IRInstOperator::IRINST_OP_VLOAD:
             return true;
 
         default:
@@ -75,8 +77,10 @@ bool Instruction::mayReadMemory() const
 bool Instruction::mayWriteMemory() const
 {
     switch (op) {
+        // 标量/向量 store 和 call 都会改写内存状态。
         case IRInstOperator::IRINST_OP_STORE:
         case IRInstOperator::IRINST_OP_CALL:
+        case IRInstOperator::IRINST_OP_VSTORE:
             return true;
 
         default:
@@ -94,8 +98,10 @@ bool Instruction::mayHaveSideEffects() const
     }
 
     switch (op) {
+        // store 型 RVV 指令必须保留，即使结果值没有 use。
         case IRInstOperator::IRINST_OP_STORE:
         case IRInstOperator::IRINST_OP_CALL:
+        case IRInstOperator::IRINST_OP_VSTORE:
             return true;
 
         default:
@@ -139,6 +145,11 @@ bool Instruction::isSpeculatable() const
         case IRInstOperator::IRINST_OP_SELECT:
         case IRInstOperator::IRINST_OP_COPY:
         case IRInstOperator::IRINST_OP_GEP:
+        case IRInstOperator::IRINST_OP_VSETVL:
+        case IRInstOperator::IRINST_OP_VSPLAT:
+        case IRInstOperator::IRINST_OP_VBINARY:
+        case IRInstOperator::IRINST_OP_VREDUCE:
+        case IRInstOperator::IRINST_OP_VEXTRACT:
             return true;
 
         default:

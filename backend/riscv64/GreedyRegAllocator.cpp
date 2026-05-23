@@ -74,6 +74,7 @@ void GreedyRegAllocator::allocate(Function * func)
 	allocationSegments.clear();
 	allocatedGprLiveRanges.clear();
 	allocatedFprLiveRanges.clear();
+	allocatedVectorLiveRanges.clear();
 	splitTransfers.clear();
 	splitStackValues.clear();
 	spilledValues.clear();
@@ -86,6 +87,7 @@ void GreedyRegAllocator::allocate(Function * func)
 	outgoingArgBytes = 0;
 	availableRegs.clear();
 	availableFloatRegs.clear();
+	availableVectorRegs.clear();
 
 	// 内建函数不需要寄存器分配
 	if (func == nullptr || func->isBuiltin()) {
@@ -95,6 +97,7 @@ void GreedyRegAllocator::allocate(Function * func)
 	// 构建可用物理寄存器池
 	availableRegs = buildRegisterPool(func);
 	availableFloatRegs = buildFloatRegisterPool(func);
+	availableVectorRegs = buildVectorRegisterPool(func);
 
 	// [Callee-saved FPR] 扩展 FPR 池
 	if (fprEnabler_) {
@@ -412,8 +415,8 @@ bool GreedyRegAllocator::tryAssignFreeReg(LiveInterval * interval,
 	}
 
 	// 获取当前区间所有干涉邻居已占用的寄存器集合
-	const bool wantFloat = isFloatInterval(interval);
-	std::set<int> usedRegs = getInterferingRegsForClass(node, intervals, graph, wantFloat);
+	const RegisterClass wantedClass = registerClassFor(interval);
+	std::set<int> usedRegs = getInterferingRegsForClass(node, intervals, graph, wantedClass);
 	for (int reg: registerPoolFor(interval)) {
 		if (!canAssignReg(interval, reg)) {
 			continue;
@@ -450,7 +453,7 @@ bool GreedyRegAllocator::tryEvictAndAssign(LiveInterval * interval,
 		return false;
 	}
 
-	const bool wantFloat = isFloatInterval(interval);
+	const RegisterClass wantedClass = registerClassFor(interval);
 	for (int reg: registerPoolFor(interval)) {
 		if (!canAssignReg(interval, reg)) {
 			continue;
@@ -466,7 +469,7 @@ bool GreedyRegAllocator::tryEvictAndAssign(LiveInterval * interval,
 			}
 
 			auto * neighbor = intervals[neighborIdx];
-			if (neighbor == nullptr || isFloatInterval(neighbor) != wantFloat || neighbor->getPhysReg() != reg) {
+			if (neighbor == nullptr || registerClassFor(neighbor) != wantedClass || neighbor->getPhysReg() != reg) {
 				continue;
 			}
 
@@ -580,6 +583,20 @@ std::vector<int> GreedyRegAllocator::buildFloatRegisterPool(Function * func) con
 	return regs;
 }
 
+/// @brief 构建 RVV 向量寄存器分配池。
+///
+/// v0 预留给后续 mask/predicate 指令，v30-v31 预留给指令选择阶段处理向量溢出和临时值。
+std::vector<int> GreedyRegAllocator::buildVectorRegisterPool(Function * func) const
+{
+	(void) func;
+
+	std::vector<int> regs;
+	for (int reg = 1; reg <= 29; ++reg) {
+		regs.push_back(reg);
+	}
+	return regs;
+}
+
 /// @brief 判断活跃区间是否对应float SSA值。
 bool GreedyRegAllocator::isFloatInterval(LiveInterval * interval)
 {
@@ -587,20 +604,47 @@ bool GreedyRegAllocator::isFloatInterval(LiveInterval * interval)
 	return value != nullptr && value->getType() != nullptr && value->getType()->isFloatType();
 }
 
-/// @brief 根据区间类型选择GPR或FPR寄存器池。
+/// @brief 判断活跃区间是否对应 RVV 向量 SSA 值。
+bool GreedyRegAllocator::isVectorInterval(LiveInterval * interval)
+{
+	Value * value = interval != nullptr ? interval->getVReg() : nullptr;
+	return value != nullptr && value->getType() != nullptr && value->getType()->isVectorType();
+}
+
+/// @brief 根据 Value 类型映射到对应的物理寄存器文件。
+GreedyRegAllocator::RegisterClass GreedyRegAllocator::registerClassFor(LiveInterval * interval)
+{
+	if (isVectorInterval(interval)) {
+		return RegisterClass::Vector;
+	}
+	if (isFloatInterval(interval)) {
+		return RegisterClass::Fpr;
+	}
+	return RegisterClass::Gpr;
+}
+
+/// @brief 根据区间类型选择GPR、FPR或VR寄存器池。
 const std::vector<int> & GreedyRegAllocator::registerPoolFor(LiveInterval * interval) const
 {
-	return isFloatInterval(interval) ? availableFloatRegs : availableRegs;
+	switch (registerClassFor(interval)) {
+		case RegisterClass::Fpr:
+			return availableFloatRegs;
+		case RegisterClass::Vector:
+			return availableVectorRegs;
+		case RegisterClass::Gpr:
+		default:
+			return availableRegs;
+	}
 }
 
 /// @brief 收集同寄存器文件内的干涉寄存器。
 ///
-/// GPR和FPR都用0-31编号，编号相同不代表同一个物理资源，因此干涉集合必须按类别过滤。
+/// GPR、FPR和VR都用0-31编号，编号相同不代表同一个物理资源，因此干涉集合必须按类别过滤。
 std::set<int> GreedyRegAllocator::getInterferingRegsForClass(
 	int node,
 	const std::vector<LiveInterval *> & intervals,
 	InterferenceGraph * graph,
-	bool wantFloat) const
+	RegisterClass wantedClass) const
 {
 	std::set<int> regs;
 	if (graph == nullptr) {
@@ -613,7 +657,7 @@ std::set<int> GreedyRegAllocator::getInterferingRegsForClass(
 		}
 
 		auto * neighbor = intervals[neighborIdx];
-		if (neighbor == nullptr || isFloatInterval(neighbor) != wantFloat) {
+		if (neighbor == nullptr || registerClassFor(neighbor) != wantedClass) {
 			continue;
 		}
 
@@ -648,7 +692,8 @@ static bool sameRegAllocInfo(const RegAllocInfo & lhs, const RegAllocInfo & rhs)
 	       lhs.baseRegId == rhs.baseRegId &&
 	       lhs.offset == rhs.offset &&
 	       lhs.hasStackSlot == rhs.hasStackSlot &&
-	       lhs.isFloatReg == rhs.isFloatReg;
+	       lhs.isFloatReg == rhs.isFloatReg &&
+	       lhs.isVectorReg == rhs.isVectorReg;
 }
 
 /// @brief 判断活跃区间是否覆盖任一函数调用点
@@ -686,6 +731,11 @@ bool GreedyRegAllocator::intervalCrossesCall(LiveInterval * interval) const
 /// @return 是否可分配
 bool GreedyRegAllocator::canAssignReg(LiveInterval * interval, int reg) const
 {
+	if (isVectorInterval(interval)) {
+		// 当前尚未保存/恢复跨调用的向量寄存器，跨 call 的向量值统一走栈槽。
+		(void) reg;
+		return !intervalCrossesCall(interval);
+	}
 	if (isFloatInterval(interval)) {
 		// 首轮FPR池只含caller-saved寄存器；跨调用值必须溢出，避免被callee clobber。
 		if (!isCallerSavedFloatReg(reg)) {
@@ -779,7 +829,11 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 		Value * value = interval->getVReg();
 		RegAllocInfo info;
 		if (interval->getPhysReg() != -1) {
-			if (isFloatInterval(interval)) {
+			// 同一个 regId 在不同寄存器文件中含义不同，回填时必须保留类别标记。
+			if (isVectorInterval(interval)) {
+				info.setVectorReg(interval->getPhysReg());
+				allocatedVectorLiveRanges[interval->getPhysReg()].push_back({interval->getStart(), interval->getEnd()});
+			} else if (isFloatInterval(interval)) {
 				info.setFloatReg(interval->getPhysReg());
 				allocatedFprLiveRanges[interval->getPhysReg()].push_back({interval->getStart(), interval->getEnd()});
 			} else {
@@ -799,6 +853,9 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 		std::sort(ranges.begin(), ranges.end());
 	}
 	for (auto & [_, ranges] : allocatedFprLiveRanges) {
+		std::sort(ranges.begin(), ranges.end());
+	}
+	for (auto & [_, ranges] : allocatedVectorLiveRanges) {
 		std::sort(ranges.begin(), ranges.end());
 	}
 
@@ -830,6 +887,7 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 			const auto & prev = segments[i - 1];
 			const auto & curr = segments[i];
 			if (prev.end == curr.start && !sameRegAllocInfo(prev.info, curr.info)) {
+				// 分裂点两侧位置不同，指令选择阶段需要在该编号处补搬运。
 				splitTransfers.push_back({value, curr.start});
 				needsTransferStackSlot = true;
 			}
@@ -862,6 +920,9 @@ void GreedyRegAllocator::rebuildStats()
 			} else if (segment.info.hasFloatReg()) {
 				++stats.assignedRegIntervals;
 				++stats.assignedFprIntervals;
+			} else if (segment.info.hasVectorReg()) {
+				++stats.assignedRegIntervals;
+				++stats.assignedVrIntervals;
 			} else {
 				++stats.spilledIntervals;
 			}

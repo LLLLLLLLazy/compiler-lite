@@ -153,7 +153,8 @@ def expected_matches(case: Case, stdout: bytes, exit_code: int) -> bool:
 
 def run_executable(tools: dict[str, str], exe_path: Path, case: Case, timeout: int) -> subprocess.CompletedProcess[bytes]:
     input_bytes = case.input_path.read_bytes() if case.input_path is not None else None
-    return run_command([tools["qemu"], str(exe_path)], timeout, input_bytes=input_bytes)
+    qemu_cmd = [tools["qemu"]] + tools.get("qemu_cpu_args", [])
+    return run_command(qemu_cmd + [str(exe_path)], timeout, input_bytes=input_bytes)
 
 
 def measure_text_size(obj_path: Path) -> int | None:
@@ -595,6 +596,32 @@ def main() -> int:
     configs = selected_configs(args)
 
     qemu = args.qemu or (shutil.which("qemu-riscv64-static") or shutil.which("qemu-riscv64") or "")
+
+    # 检测 QEMU 是否支持 RVV 向量扩展（优先 QEMU 9.x+ 的 rv64,v=true 语法，回退旧版 rv64gcv）
+    qemu_cpu_args: list[str] = []
+    if qemu:
+        try:
+            subprocess.run(
+                [qemu, "-cpu", "rv64,v=true", "-version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=5,
+            )
+            qemu_cpu_args = ["-cpu", "rv64,v=true"]
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            try:
+                subprocess.run(
+                    [qemu, "-cpu", "rv64gcv", "-version"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=True,
+                    timeout=5,
+                )
+                qemu_cpu_args = ["-cpu", "rv64gcv"]
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+
     tools = {
         "minic": resolve_tool(args.minic_bin, repo_root),
         "runtime_lib": resolve_tool(args.runtime_lib, repo_root),
@@ -603,6 +630,7 @@ def main() -> int:
         "gcc": args.riscv64_gcc,
         "objdump": args.objdump_bin,
         "qemu": qemu,
+        "qemu_cpu_args": qemu_cpu_args,
     }
     if not Path(tools["minic"]).exists():
         raise SystemExit(f"minic not found: {tools['minic']}")

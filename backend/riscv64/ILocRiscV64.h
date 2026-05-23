@@ -36,11 +36,17 @@ struct RegAllocInfo {
 	/// @brief 分配的寄存器是否来自浮点寄存器文件
 	bool isFloatReg = false;
 
+	/// @brief 分配的寄存器是否来自 RVV 向量寄存器文件
+	bool isVectorReg = false;
+
 	/// @brief 判断是否分配了通用寄存器
-	bool hasReg() const { return regId != -1 && !isFloatReg; }
+	bool hasReg() const { return regId != -1 && !isFloatReg && !isVectorReg; }
 
 	/// @brief 判断是否分配了浮点寄存器
 	bool hasFloatReg() const { return regId != -1 && isFloatReg; }
+
+	/// @brief 判断是否分配了向量寄存器
+	bool hasVectorReg() const { return regId != -1 && isVectorReg; }
 
 	/// @brief 判断是否分配了任意物理寄存器
 	bool hasAnyReg() const { return regId != -1; }
@@ -50,6 +56,7 @@ struct RegAllocInfo {
 	{
 		regId = reg;
 		isFloatReg = false;
+		isVectorReg = false;
 	}
 
 	/// @brief 设置浮点寄存器分配
@@ -57,6 +64,15 @@ struct RegAllocInfo {
 	{
 		regId = reg;
 		isFloatReg = true;
+		isVectorReg = false;
+	}
+
+	/// @brief 设置向量寄存器分配
+	void setVectorReg(int32_t reg)
+	{
+		regId = reg;
+		isFloatReg = false;
+		isVectorReg = true;
 	}
 
 	/// @brief 设置栈位置

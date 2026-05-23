@@ -14,8 +14,13 @@ MODE=${MINIC_FLOAT_TEST_MODE:-"all"}
 CLANG_BIN=${CLANG_BIN:-"clang"}
 RISCV64_GCC_BIN=${RISCV64_GCC_BIN:-"riscv64-linux-gnu-gcc"}
 QEMU_RISCV64_BIN=${QEMU_RISCV64_BIN:-""}
+QEMU_RISCV64_CPU=${QEMU_RISCV64_CPU:-""}
+QEMU_RISCV64_ARGS=${QEMU_RISCV64_ARGS:-""}
 LL_OPT_LEVEL=${MINIC_FLOAT_LL_OPT_LEVEL:-"1"}
 ASM_OPT_LEVEL=${MINIC_FLOAT_ASM_OPT_LEVEL:-"1"}
+
+# QEMU 会解析 QEMU_* 环境变量；避免 QEMU_VERSION 触发 -version 输出污染测试 stdout。
+unset QEMU_VERSION
 
 if [[ -z "${QEMU_RISCV64_BIN}" ]]; then
 	if command -v qemu-riscv64-static >/dev/null 2>&1; then
@@ -23,6 +28,18 @@ if [[ -z "${QEMU_RISCV64_BIN}" ]]; then
 	else
 		QEMU_RISCV64_BIN="qemu-riscv64"
 	fi
+fi
+
+QEMU_RISCV64_CPU_ARGS=()
+if [[ -n "${QEMU_RISCV64_CPU}" ]]; then
+	QEMU_RISCV64_CPU_ARGS=(-cpu "${QEMU_RISCV64_CPU}")
+elif [[ -n "${QEMU_RISCV64_ARGS}" ]]; then
+	read -r -a QEMU_RISCV64_CPU_ARGS <<< "${QEMU_RISCV64_ARGS}"
+elif "${QEMU_RISCV64_BIN}" -cpu rv64,v=true -version >/dev/null 2>&1; then
+	# 检测 QEMU 是否支持 RVV 向量扩展（优先 QEMU 9.x+ 的 rv64,v=true 语法，回退旧版 rv64gcv）
+	QEMU_RISCV64_CPU_ARGS=(-cpu rv64,v=true)
+elif "${QEMU_RISCV64_BIN}" -cpu rv64gcv -version >/dev/null 2>&1; then
+	QEMU_RISCV64_CPU_ARGS=(-cpu rv64gcv)
 fi
 
 OK_NUM=0
@@ -61,6 +78,8 @@ Environment:
   CLANG_BIN=clang
   RISCV64_GCC_BIN=riscv64-linux-gnu-gcc
   QEMU_RISCV64_BIN=qemu-riscv64-static
+  QEMU_RISCV64_CPU=rv64,v=true
+  QEMU_RISCV64_ARGS="..."
 USAGE
 }
 
@@ -217,10 +236,10 @@ run_asm_check() {
 	fi
 
 	if [[ -f "${infile}" ]]; then
-		"${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
+		"${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_CPU_ARGS[@]}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	else
-		"${QEMU_RISCV64_BIN}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
+		"${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_CPU_ARGS[@]}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	fi
 
