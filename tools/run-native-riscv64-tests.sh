@@ -6,56 +6,35 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 
 MINIC_BIN=${MINIC_BIN:-"${REPO_ROOT}/build/minic"}
-RISCV64_GCC_BIN=${RISCV64_GCC_BIN:-"riscv64-linux-gnu-gcc"}
-QEMU_RISCV64_BIN=${QEMU_RISCV64_BIN:-""}
-QEMU_RISCV64_CPU=${QEMU_RISCV64_CPU:-""}
+RISCV64_GCC_BIN=${RISCV64_GCC_BIN:-"gcc"}
 TEST_ROOT=${MINIC_TEST_ROOT:-"${REPO_ROOT}/tests"}
 RUNTIME_LIB=${MINIC_RUNTIME_LIB:-"${REPO_ROOT}/tests/libsysy_riscv.a"}
-RUNTIME_SOURCE=${MINIC_RUNTIME_SOURCE:-"${REPO_ROOT}/tests/sylib.c"}
-CLANG_BIN=${CLANG_BIN:-"clang"}
 FRONTEND=${MINIC_FRONTEND:-"antlr"}
 TEST_MODE=${MINIC_RISCV64_TEST_MODE:-"asm"}
 RISCV64_TIMEOUT=${MINIC_RISCV64_TIMEOUT:-30}
 MINIC_RISCV64_RVV=${MINIC_RISCV64_RVV:-"on"}
-QEMU_RISCV64_ARGS=${QEMU_RISCV64_ARGS:-""}
-
-# QEMU 会解析 QEMU_* 环境变量；避免 QEMU_VERSION 触发 -version 输出污染测试 stdout。
-unset QEMU_VERSION
-
-if [[ -z "${QEMU_RISCV64_BIN}" ]]; then
-	if command -v qemu-riscv64-static >/dev/null 2>&1; then
-		QEMU_RISCV64_BIN="qemu-riscv64-static"
-	else
-		QEMU_RISCV64_BIN="qemu-riscv64"
-	fi
-fi
-
-QEMU_RISCV64_EXTRA_ARGS=()
-if [[ -n "${QEMU_RISCV64_CPU}" ]]; then
-	QEMU_RISCV64_EXTRA_ARGS=(-cpu "${QEMU_RISCV64_CPU}")
-elif [[ -n "${QEMU_RISCV64_ARGS}" ]]; then
-	# 手动传给 QEMU 的参数；不做自动探测或自动回退。
-	read -r -a QEMU_RISCV64_EXTRA_ARGS <<< "${QEMU_RISCV64_ARGS}"
-fi
+PARALLEL_JOBS=${MINIC_RISCV64_PARALLEL:-1}
+LINK_STATIC=${MINIC_RISCV64_LINK_STATIC:-1}
+EXTRA_GCC_ARGS=${MINIC_RISCV64_GCC_ARGS:-""}
+SKIP_RVV_PROBE=${MINIC_RISCV64_SKIP_RVV_PROBE:-0}
 
 OK_NUM=0
 NG_NUM=0
 TOTAL_RUN=0
-TOTAL_MINIC_IR_LLVM_RUN=0
-TOTAL_LLVM_ALL_RUN=0
 STATUS_COL_WIDTH=50
-PARALLEL_JOBS=${MINIC_RISCV64_PARALLEL:-$(echo 4)}
 
-TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/minic-rv64-tests.XXXXXX")
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/minic-rv64-native-tests.XXXXXX")
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 usage() {
 	cat <<'USAGE'
 Usage:
-  ./tools/run-local-riscv64-tests.sh
-  ./tools/run-local-riscv64-tests.sh <suite>
-  ./tools/run-local-riscv64-tests.sh <suite> <testcase>
-  ./tools/run-local-riscv64-tests.sh <testcase>
+  ./tools/run-native-riscv64-tests.sh
+  ./tools/run-native-riscv64-tests.sh <suite>
+  ./tools/run-native-riscv64-tests.sh <suite> <testcase>
+  ./tools/run-native-riscv64-tests.sh <testcase>
+
+Run on a riscv64 Linux board directly. No QEMU is used.
 
 Suites:
   2023              -> tests/2023_function
@@ -70,25 +49,23 @@ Suites:
 Environment:
   MINIC_BIN=./build/minic
   MINIC_FRONTEND=antlr|recursive|default
-  MINIC_RISCV64_TEST_MODE=asm       Generate RISCV64 asm, link, run, compare .out md5 (default)
-  MINIC_RISCV64_TEST_MODE=assemble  Generate RISCV64 asm and assemble only
+  MINIC_RISCV64_TEST_MODE=asm       Generate asm, link, run natively, compare .out md5 (default)
+  MINIC_RISCV64_TEST_MODE=assemble  Generate asm and assemble only
   MINIC_RISCV64_TIMEOUT=30          Per-step timeout passed to timeout(1)
-  MINIC_RISCV64_PARALLEL=N          Number of parallel jobs (default: nproc or 4)
+  MINIC_RISCV64_PARALLEL=1          Number of parallel jobs; keep 1 for stable perf timings
   MINIC_RISCV64_RVV=on|off          Pass --riscv64-rvv to minic (default: on)
-  QEMU_RISCV64_CPU=rv64,v=true      Preferred qemu -cpu value
-  QEMU_RISCV64_ARGS="..."           Extra qemu args, e.g. -cpu rv64,v=true
-  RISCV64_GCC_BIN=riscv64-linux-gnu-gcc
-  QEMU_RISCV64_BIN=qemu-riscv64-static
+  MINIC_RISCV64_LINK_STATIC=1|0     Link with -static by default
+  MINIC_RISCV64_GCC_ARGS="..."      Extra gcc args, e.g. "-mabi=lp64d"
+  MINIC_RISCV64_SKIP_RVV_PROBE=1    Skip the native RVV availability probe
+  RISCV64_GCC_BIN=gcc               Native compiler on the board
   MINIC_TEST_ROOT=./tests
   MINIC_RUNTIME_LIB=./tests/libsysy_riscv.a
-  MINIC_RUNTIME_SOURCE=./tests/sylib.c
-  CLANG_BIN=clang
 
 Examples:
-  ./tools/run-local-riscv64-tests.sh 2023 2023_func_00_main
-  ./tools/run-local-riscv64-tests.sh 2023
-  ./tools/run-local-riscv64-tests.sh 2025 2025_func_009_BFS.sy
-  MINIC_RISCV64_TEST_MODE=assemble ./tools/run-local-riscv64-tests.sh 2023_func_00_main
+  ./tools/run-native-riscv64-tests.sh 2025
+  ./tools/run-native-riscv64-tests.sh 2025_perf
+  ./tools/run-native-riscv64-tests.sh 2025_perf 2025_perf_h-2-01.c
+  MINIC_RISCV64_RVV=off ./tools/run-native-riscv64-tests.sh 2025_perf
 USAGE
 }
 
@@ -130,10 +107,22 @@ case "${MINIC_RISCV64_RVV}" in
 		;;
 esac
 
+# 将脚本级 RVV 开关同时传给 minic 和本机 gcc，保证生成、汇编、链接的目标一致。
 rvv_args=(--riscv64-rvv="${MINIC_RISCV64_RVV}")
 gcc_arch_args=(-march="rv64gc")
 if [[ "${MINIC_RISCV64_RVV}" == "on" ]]; then
 	gcc_arch_args=(-march="rv64gcv")
+fi
+if [[ -n "${EXTRA_GCC_ARGS}" ]]; then
+	read -r -a extra_gcc_args <<< "${EXTRA_GCC_ARGS}"
+	gcc_arch_args+=("${extra_gcc_args[@]}")
+fi
+
+link_args=()
+if [[ "${LINK_STATIC}" == "1" ]]; then
+	link_args=(-static)
+elif [[ "${LINK_STATIC}" != "0" ]]; then
+	fail_with_usage "Unknown MINIC_RISCV64_LINK_STATIC: ${LINK_STATIC}"
 fi
 
 suite_dir_from_key() {
@@ -207,17 +196,14 @@ find_source_file() {
 	esac
 
 	testcase=$(strip_source_ext "${testcase_arg}")
-
 	if [[ -f "${case_root}/${testcase}.c" ]]; then
 		echo "${case_root}/${testcase}.c"
 		return 0
 	fi
-
 	if [[ -f "${case_root}/${testcase}.sy" ]]; then
 		echo "${case_root}/${testcase}.sy"
 		return 0
 	fi
-
 	return 1
 }
 
@@ -238,34 +224,26 @@ write_result_file() {
 	else
 		: > "${result_file}"
 	fi
-
 	printf '%s\n' "${exit_code}" >> "${result_file}"
 }
 
 compute_md5() {
 	local file="$1"
-
 	if command -v md5sum >/dev/null 2>&1; then
 		md5sum "${file}" | awk '{print $1}'
 		return 0
 	fi
-
 	if command -v md5 >/dev/null 2>&1; then
 		md5 -q "${file}"
 		return 0
 	fi
-
 	echo ""
 	return 1
 }
 
-## @brief Compare two text files after normalizing CRLF line endings to LF
-# @param $1 First file path
-# @param $2 Second file path
 normalized_text_files_equal() {
 	local lhs="$1"
 	local rhs="$2"
-
 	cmp -s <(sed 's/\r$//' "${lhs}") <(sed 's/\r$//' "${rhs}")
 }
 
@@ -276,17 +254,96 @@ file_size_bytes() {
 tail_bytes_hex() {
 	local file="$1"
 	local bytes
-
 	bytes=$(tail -c 16 "${file}" 2>/dev/null | od -An -tx1 -v | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
 	if [[ -z "${bytes}" ]]; then
 		echo "<empty>"
 		return 0
 	fi
-
 	echo "${bytes}"
 }
 
-run_riscv64_check() {
+cpuinfo_has_full_rvv() {
+	if [[ ! -r /proc/cpuinfo ]]; then
+		return 2
+	fi
+
+	# Linux 暴露的 isa 字段若没有 v 扩展，运行 RVV 指令通常会直接 SIGILL。
+	local line isa base saw_isa=0
+	while IFS= read -r line; do
+		case "${line}" in
+			isa[[:space:]]*:*)
+				saw_isa=1
+				isa="${line#*:}"
+				isa="${isa//[[:space:]]/}"
+				base="${isa%%_*}"
+				if [[ "${base}" == rv64*v* ]]; then
+					return 0
+				fi
+				;;
+		esac
+	done < /proc/cpuinfo
+
+	if [[ "${saw_isa}" == "1" ]]; then
+		return 1
+	fi
+	return 2
+}
+
+check_native_rvv_available() {
+	if [[ "${MINIC_RISCV64_RVV}" != "on" || "${TEST_MODE}" == "assemble" || "${SKIP_RVV_PROBE}" == "1" ]]; then
+		return 0
+	fi
+
+	# 先查 cpuinfo，再执行最小 RVV 探针，区分工具链不支持和硬件/内核不支持。
+	if cpuinfo_has_full_rvv; then
+		:
+	else
+		local cpuinfo_status=$?
+		if [[ "${cpuinfo_status}" == "1" ]]; then
+			echo "RVV requested, but /proc/cpuinfo does not advertise the full RISC-V V extension." >&2
+			echo "This board/kernel will raise SIGILL for code compiled with --riscv64-rvv=on." >&2
+			echo "Use MINIC_RISCV64_RVV=off, or run on hardware and a kernel with RVV enabled." >&2
+			echo "Relevant /proc/cpuinfo isa lines:" >&2
+			grep -E '^isa[[:space:]]*:' /proc/cpuinfo >&2 || true
+			exit 1
+		fi
+	fi
+
+	local probe_s="${TMP_DIR}/rvv-probe.s"
+	local probe_exe="${TMP_DIR}/rvv-probe"
+	local probe_stderr="${TMP_DIR}/rvv-probe.stderr"
+
+	# 探针只执行 vsetvli，足以验证当前机器能否进入 RVV 指令路径。
+	cat > "${probe_s}" <<'EOF'
+	.text
+	.globl _start
+_start:
+	vsetvli zero, zero, e32, m1, ta, ma
+	li a7, 93
+	li a0, 0
+	ecall
+EOF
+
+	if ! "${RISCV64_GCC_BIN}" "${gcc_arch_args[@]}" -nostdlib -static -o "${probe_exe}" "${probe_s}" > /dev/null 2> "${probe_stderr}"; then
+		echo "RVV probe compile/link failed. Toolchain may not support ${gcc_arch_args[*]}." >&2
+		sed -n '1,8p' "${probe_stderr}" >&2
+		exit 1
+	fi
+
+	timeout --foreground 5 "${probe_exe}" > /dev/null 2> "${probe_stderr}"
+	local probe_status=$?
+	if [[ "${probe_status}" -ne 0 ]]; then
+		echo "RVV requested, but a native RVV probe failed with exit status ${probe_status}." >&2
+		echo "Status 132 normally means SIGILL: CPU or kernel cannot execute RVV instructions." >&2
+		echo "Use MINIC_RISCV64_RVV=off, or run on hardware and a kernel with RVV enabled." >&2
+		if [[ -s "${probe_stderr}" ]]; then
+			sed -n '1,8p' "${probe_stderr}" >&2
+		fi
+		exit 1
+	fi
+}
+
+run_native_check() {
 	local cfile="$1"
 	local infile="$2"
 	local outfile="$3"
@@ -302,70 +359,71 @@ run_riscv64_check() {
 	local result_file="${result_dir}/${testcase}.rv64.result"
 	local exit_code=0
 	local t0 t1 t_compile=0 t_assemble=0 t_link=0 t_run=0
-	local t_minic_ir_llvm_run="N/A"
-	local t_llvm_all_run="N/A"
 	source_name=$(basename "${cfile}")
 
-	# 根据测试类型选择优化级别：性能测试开启优化，功能测试关闭优化
 	local opt_level="0"
 	if [[ "${is_perf_test}" == "1" ]]; then
+		# 性能测试默认开启 O1，和 QEMU 版回归脚本保持一致。
 		opt_level="1"
 	fi
 
-	# compile
 	t0=$(date +%s%N)
 	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" "${rvv_args[@]}" -O"${opt_level}" -t RISCV64 -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
 		t1=$(date +%s%N)
 		t_compile=$(( (t1 - t0) / 1000000 ))
-		echo "${source_name} compile NG [riscv64]  compile=${t_compile}ms"
+		echo "${source_name} compile NG [riscv64-native]  compile=${t_compile}ms"
 		return 1
 	fi
 	t1=$(date +%s%N)
 	t_compile=$(( (t1 - t0) / 1000000 ))
 
 	if [[ ! -s "${asmfile}" ]]; then
-		echo "${asmfile} not generated [riscv64]  compile=${t_compile}ms"
+		echo "${asmfile} not generated [riscv64-native]  compile=${t_compile}ms"
 		return 1
 	fi
 
-	# assemble
 	if [[ "${TEST_MODE}" == "assemble" ]]; then
 		t0=$(date +%s%N)
 		if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" "${gcc_arch_args[@]}" -c -o "${objfile}" "${asmfile}" >/dev/null 2>&1; then
 			t1=$(date +%s%N)
 			t_assemble=$(( (t1 - t0) / 1000000 ))
-			echo "${source_name} assemble NG [riscv64]  compile=${t_compile}ms assemble=${t_assemble}ms"
+			echo "${source_name} assemble NG [riscv64-native]  compile=${t_compile}ms assemble=${t_assemble}ms"
 			return 1
 		fi
 		t1=$(date +%s%N)
 		t_assemble=$(( (t1 - t0) / 1000000 ))
-
-		printf "%-${STATUS_COL_WIDTH}s %s\n" "${source_name} OK [riscv64-assemble]" "compile=${t_compile}ms assemble=${t_assemble}ms"
+		printf "%-${STATUS_COL_WIDTH}s %s\n" "${source_name} OK [riscv64-native-assemble]" "compile=${t_compile}ms assemble=${t_assemble}ms"
 		return 0
 	fi
 
-	# link
 	t0=$(date +%s%N)
-	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" "${gcc_arch_args[@]}" -static -o "${exe_file}" "${asmfile}" "${RUNTIME_LIB}" >/dev/null 2>&1; then
+	if ! timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" "${gcc_arch_args[@]}" "${link_args[@]}" -o "${exe_file}" "${asmfile}" "${RUNTIME_LIB}" >/dev/null 2>&1; then
 		t1=$(date +%s%N)
 		t_link=$(( (t1 - t0) / 1000000 ))
-		echo "${source_name} link NG [riscv64]  compile=${t_compile}ms link=${t_link}ms"
+		echo "${source_name} link NG [riscv64-native]  compile=${t_compile}ms link=${t_link}ms"
 		return 1
 	fi
 	t1=$(date +%s%N)
 	t_link=$(( (t1 - t0) / 1000000 ))
 
-	# run
 	t0=$(date +%s%N)
 	if [[ -f "${infile}" ]]; then
-		timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
+		timeout --foreground "${RISCV64_TIMEOUT}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	else
-		timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
+		timeout --foreground "${RISCV64_TIMEOUT}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
 		exit_code=$?
 	fi
 	t1=$(date +%s%N)
 	t_run=$(( (t1 - t0) / 1000000 ))
+
+	if [[ "${exit_code}" -eq 132 ]]; then
+		echo "${source_name} SIGILL [riscv64-native]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
+		echo "  Illegal instruction while running native binary."
+		echo "  If MINIC_RISCV64_RVV=on, this usually means the board/kernel cannot execute RVV instructions."
+		echo "  Retry with MINIC_RISCV64_RVV=off, or use an RVV-capable board and kernel."
+		return 1
+	fi
 
 	write_result_file "${output_file}" "${exit_code}" "${result_file}"
 
@@ -383,100 +441,16 @@ run_riscv64_check() {
 		if ! normalized_text_files_equal "${result_file}" "${outfile}"; then
 			actual_size=$(file_size_bytes "${result_file}")
 			expected_size=$(file_size_bytes "${outfile}")
-			echo "${source_name} NG [riscv64]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
+			echo "${source_name} NG [riscv64-native]  compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
 			echo "  expected md5=${expected_md5} size=${expected_size} tail16=$(tail_bytes_hex "${outfile}")"
 			echo "  actual   md5=${actual_md5} size=${actual_size} tail16=$(tail_bytes_hex "${result_file}")"
 			return 1
 		fi
 	fi
 
-	# llvm baselines:
-	# - minic_ir_llvm: minic generates LLVM IR, clang compiles to riscv64, link, run under qemu
-	# - llvm_all: clang compiles source directly to riscv64, link, run under qemu
-	local llfile="${result_dir}/${testcase}.rv64.ll"
-	local minic_ir_llvm_obj="${result_dir}/${testcase}.minic_ir_llvm.rv64.o"
-	local minic_ir_llvm_exe="${result_dir}/${testcase}.minic_ir_llvm.rv64"
-	local minic_ir_llvm_output="${result_dir}/${testcase}.minic_ir_llvm.rv64.output"
-	local minic_ir_llvm_stderr="${result_dir}/${testcase}.minic_ir_llvm.rv64.stderr"
-	local llvm_all_obj="${result_dir}/${testcase}.llvm_all.rv64.o"
-	local llvm_all_exe="${result_dir}/${testcase}.llvm_all.rv64"
-	local llvm_all_output="${result_dir}/${testcase}.llvm_all.rv64.output"
-	local llvm_all_stderr="${result_dir}/${testcase}.llvm_all.rv64.stderr"
-	local llvm_opt_level="0"
-	if [[ "${is_perf_test}" == "1" ]]; then
-		llvm_opt_level="2"
-	fi
-
-	# minic IR -> llvm compile & link -> qemu run
-	if timeout --foreground "${RISCV64_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" "${rvv_args[@]}" -O"${opt_level}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1 && \
-	   [[ -s "${llfile}" ]] && \
-	   timeout --foreground "${RISCV64_TIMEOUT}" "${CLANG_BIN}" --target=riscv64-linux-gnu -O"${llvm_opt_level}" -Wno-override-module -c -o "${minic_ir_llvm_obj}" "${llfile}" >/dev/null 2>&1 && \
-	   timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" "${gcc_arch_args[@]}" -static -o "${minic_ir_llvm_exe}" "${minic_ir_llvm_obj}" "${RUNTIME_LIB}" >/dev/null 2>&1; then
-		t0=$(date +%s%N)
-		if [[ -f "${infile}" ]]; then
-			timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${minic_ir_llvm_exe}" < "${infile}" > "${minic_ir_llvm_output}" 2> "${minic_ir_llvm_stderr}"
-		else
-			timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${minic_ir_llvm_exe}" > "${minic_ir_llvm_output}" 2> "${minic_ir_llvm_stderr}"
-		fi
-		local minic_ir_llvm_status=$?
-		if [[ "${minic_ir_llvm_status}" -ne 124 && "${minic_ir_llvm_status}" -ne 125 && "${minic_ir_llvm_status}" -ne 126 && "${minic_ir_llvm_status}" -ne 127 ]]; then
-			t1=$(date +%s%N)
-			t_minic_ir_llvm_run=$(( (t1 - t0) / 1000000 ))
-		fi
-	fi
-
-	# clang compiles source directly to riscv64 -> link -> qemu run
-	# Preprocess .sy: rewrite starttime()/stoptime() to the runtime entry points
-	# with the expected line-number argument, then compile with clang and link with sylib.c
-	local llvm_all_cfile="${result_dir}/${testcase}.llvm_all.c"
-	if {
-		cat <<'EOF'
-int getint(void);
-int getch(void);
-int getarray(int a[]);
-float getfloat(void);
-int getfarray(float a[]);
-void putint(int a);
-void putch(int a);
-void putarray(int n, int a[]);
-void putfloat(float a);
-void putfarray(int n, float a[]);
-void putf(char a[], ...);
-void _sysy_starttime(int lineno);
-void _sysy_stoptime(int lineno);
-EOF
-		sed -E 's/\<starttime\>[[:space:]]*\([[:space:]]*\)/_sysy_starttime(__LINE__)/g; s/\<stoptime\>[[:space:]]*\([[:space:]]*\)/_sysy_stoptime(__LINE__)/g' "${cfile}"
-	} > "${llvm_all_cfile}" 2>/dev/null && \
-	   timeout --foreground "${RISCV64_TIMEOUT}" "${CLANG_BIN}" --target=riscv64-linux-gnu -O"${llvm_opt_level}" -Wno-override-module -c -o "${llvm_all_obj}" "${llvm_all_cfile}" >/dev/null 2>&1 && \
-	   timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" "${gcc_arch_args[@]}" -static -o "${llvm_all_exe}" "${llvm_all_obj}" "${RUNTIME_LIB}" >/dev/null 2>&1; then
-		t0=$(date +%s%N)
-		if [[ -f "${infile}" ]]; then
-			timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${llvm_all_exe}" < "${infile}" > "${llvm_all_output}" 2> "${llvm_all_stderr}"
-		else
-			timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${llvm_all_exe}" > "${llvm_all_output}" 2> "${llvm_all_stderr}"
-		fi
-		local llvm_all_status=$?
-		if [[ "${llvm_all_status}" -ne 124 && "${llvm_all_status}" -ne 125 && "${llvm_all_status}" -ne 126 && "${llvm_all_status}" -ne 127 ]]; then
-			t1=$(date +%s%N)
-			t_llvm_all_run=$(( (t1 - t0) / 1000000 ))
-		fi
-	fi
-
-	local summary_file="${result_dir}/${testcase}.summary"
-	printf '%s\n' "${t_run}" "${t_minic_ir_llvm_run}" "${t_llvm_all_run}" > "${summary_file}"
-
-	local minic_ir_llvm_run_text="${t_minic_ir_llvm_run}"
-	local llvm_all_run_text="${t_llvm_all_run}"
-	if [[ "${minic_ir_llvm_run_text}" != "N/A" ]]; then
-		minic_ir_llvm_run_text="${minic_ir_llvm_run_text}ms"
-	fi
-	if [[ "${llvm_all_run_text}" != "N/A" ]]; then
-		llvm_all_run_text="${llvm_all_run_text}ms"
-	fi
-
-	printf "%-${STATUS_COL_WIDTH}s %s\n" "${source_name} OK [riscv64]" \
-		"compile=${t_compile}ms link=${t_link}ms run=${t_run}ms minic_ir_llvm_run=${minic_ir_llvm_run_text} llvm_all_run=${llvm_all_run_text}"
-
+	printf '%s\n' "${t_run}" > "${result_dir}/${testcase}.summary"
+	printf "%-${STATUS_COL_WIDTH}s %s\n" "${source_name} OK [riscv64-native]" \
+		"compile=${t_compile}ms link=${t_link}ms run=${t_run}ms"
 	return 0
 }
 
@@ -491,7 +465,6 @@ run_testcase() {
 	local infile="${case_root}/${testcase}.in"
 	local outfile="${case_root}/${testcase}.out"
 
-	# 判断是否是性能测试（suite_dir 包含 "performance"）
 	local is_perf_test="0"
 	if [[ "${suite_dir}" == *"performance"* ]]; then
 		is_perf_test="1"
@@ -509,15 +482,9 @@ run_testcase() {
 
 	local result_dir="${TMP_DIR}/${testcase}"
 	mkdir -p "${result_dir}"
-
-	if run_riscv64_check "${cfile}" "${infile}" "${outfile}" "${testcase}" "${is_perf_test}" "${result_dir}"; then
-		return 0
-	else
-		return 1
-	fi
+	run_native_check "${cfile}" "${infile}" "${outfile}" "${testcase}" "${is_perf_test}" "${result_dir}"
 }
 
-# Worker function: runs a single testcase in a subshell, writes result to a status file
 run_testcase_worker() {
 	local suite_dir="$1"
 	local testcase_arg="$2"
@@ -543,14 +510,13 @@ run_testcase_worker() {
 		printf 'NG\n' > "${status_file}"
 		return 0
 	fi
-
 	if [[ "${TEST_MODE}" == "asm" && ! -f "${outfile}" ]]; then
 		echo "${outfile} not found" > "${status_file}.out"
 		printf 'NG\n' > "${status_file}"
 		return 0
 	fi
 
-	if run_riscv64_check "${cfile}" "${infile}" "${outfile}" "${testcase}" "${is_perf_test}" "${result_dir}" > "${status_file}.out" 2>&1; then
+	if run_native_check "${cfile}" "${infile}" "${outfile}" "${testcase}" "${is_perf_test}" "${result_dir}" > "${status_file}.out" 2>&1; then
 		printf 'OK\n' > "${status_file}"
 	else
 		printf 'NG\n' > "${status_file}"
@@ -561,11 +527,9 @@ run_testcase_worker() {
 run_suite() {
 	local suite_dir="$1"
 	local case_root="${TEST_ROOT}/${suite_dir}"
-	local cfile=""
-	local testcase=""
-
-	# Collect all testcases
+	local testcase
 	local -a testcases=()
+
 	while IFS= read -r testcase; do
 		testcases+=("${testcase}")
 	done < <(
@@ -577,60 +541,29 @@ run_suite() {
 			sort -u
 	)
 
-	if [[ ${#testcases[@]} -eq 0 ]]; then
-		return
-	fi
+	local -a active_pids=()
+	local -a active_tcs=()
 
-	local total=${#testcases[@]}
-	local done_count=0
-	local launched=0
-
-	# Associative array: pid -> testcase
-	declare -A pid_map
-
-	# Process a completed testcase: print output, accumulate counters
 	collect_one() {
 		local tc="$1"
 		local result_dir="${TMP_DIR}/${tc}"
 		local status_file="${result_dir}/status"
-
-		# Print captured output
 		if [[ -f "${status_file}.out" ]]; then
 			cat "${status_file}.out"
 		fi
-
-		if [[ -f "${status_file}" ]]; then
-			local status
-			status=$(cat "${status_file}")
-			if [[ "${status}" == "OK" ]]; then
-				OK_NUM=$((OK_NUM + 1))
-				# Accumulate timing from summary file
-				local summary_file="${result_dir}/${tc}.summary"
-				if [[ -f "${summary_file}" ]]; then
-					local t_run_val t_minic_ir_llvm_val t_llvm_all_val
-					{
-						read -r t_run_val
-						read -r t_minic_ir_llvm_val
-						read -r t_llvm_all_val
-					} < "${summary_file}"
-					TOTAL_RUN=$((TOTAL_RUN + t_run_val))
-					if [[ "${t_minic_ir_llvm_val}" != "N/A" ]]; then
-						TOTAL_MINIC_IR_LLVM_RUN=$((TOTAL_MINIC_IR_LLVM_RUN + t_minic_ir_llvm_val))
-					fi
-					if [[ "${t_llvm_all_val}" != "N/A" ]]; then
-						TOTAL_LLVM_ALL_RUN=$((TOTAL_LLVM_ALL_RUN + t_llvm_all_val))
-					fi
-				fi
-			else
-				NG_NUM=$((NG_NUM + 1))
+		if [[ -f "${status_file}" && "$(cat "${status_file}")" == "OK" ]]; then
+			OK_NUM=$((OK_NUM + 1))
+			local summary_file="${result_dir}/${tc}.summary"
+			if [[ -f "${summary_file}" ]]; then
+				local t_run_val
+				read -r t_run_val < "${summary_file}"
+				TOTAL_RUN=$((TOTAL_RUN + t_run_val))
 			fi
 		else
 			NG_NUM=$((NG_NUM + 1))
 		fi
-		done_count=$((done_count + 1))
 	}
 
-	# Check for any completed workers and collect their results
 	drain_completed() {
 		local -a remaining_pids=()
 		local -a remaining_tcs=()
@@ -651,29 +584,18 @@ run_suite() {
 		active_tcs=("${remaining_tcs[@]+"${remaining_tcs[@]}"}")
 	}
 
-	local -a active_pids=()
-	local -a active_tcs=()
-
 	for tc in "${testcases[@]}"; do
-		# Launch worker
 		run_testcase_worker "${suite_dir}" "${tc}" &
 		active_pids+=($!)
 		active_tcs+=("${tc}")
-		launched=$((launched + 1))
-
-		# If at capacity, wait for at least one to finish
-		if [[ ${#active_pids[@]} -ge ${PARALLEL_JOBS} ]]; then
-			# Poll until a slot frees up
-			while [[ ${#active_pids[@]} -ge ${PARALLEL_JOBS} ]]; do
-				drain_completed
-				if [[ ${#active_pids[@]} -ge ${PARALLEL_JOBS} ]]; then
-					sleep 0.1
-				fi
-			done
-		fi
+		while [[ ${#active_pids[@]} -ge ${PARALLEL_JOBS} ]]; do
+			drain_completed
+			if [[ ${#active_pids[@]} -ge ${PARALLEL_JOBS} ]]; then
+				sleep 0.1
+			fi
+		done
 	done
 
-	# Wait for all remaining workers, collecting results as they finish
 	while [[ ${#active_pids[@]} -gt 0 ]]; do
 		drain_completed
 		if [[ ${#active_pids[@]} -gt 0 ]]; then
@@ -685,38 +607,30 @@ run_suite() {
 if [[ ! -x "${MINIC_BIN}" ]]; then
 	fail_with_usage "Compiler not found: ${MINIC_BIN}. Please build the project first."
 fi
-
-echo "Parallel jobs: ${PARALLEL_JOBS}"
-
 if ! command -v "${RISCV64_GCC_BIN}" >/dev/null 2>&1; then
-	fail_with_usage "riscv64 gcc not found: ${RISCV64_GCC_BIN}"
+	fail_with_usage "native gcc not found: ${RISCV64_GCC_BIN}"
 fi
-
 if [[ "${TEST_MODE}" == "asm" ]]; then
-	if ! command -v "${QEMU_RISCV64_BIN}" >/dev/null 2>&1; then
-		fail_with_usage "qemu riscv64 not found: ${QEMU_RISCV64_BIN}"
-	fi
-
 	if ! command -v md5sum >/dev/null 2>&1 && ! command -v md5 >/dev/null 2>&1; then
 		fail_with_usage "md5 tool not found: need md5sum or md5"
 	fi
-
 	if [[ ! -f "${RUNTIME_LIB}" ]]; then
 		fail_with_usage "Runtime archive not found: ${RUNTIME_LIB}"
 	fi
 fi
 
-if ! command -v "${CLANG_BIN}" >/dev/null 2>&1; then
-	fail_with_usage "clang not found: ${CLANG_BIN}"
+machine=$(uname -m 2>/dev/null || true)
+if [[ "${machine}" != "riscv64" && "${MINIC_RISCV64_NATIVE_ALLOW_NON_RISCV:-0}" != "1" ]]; then
+	fail_with_usage "This native runner must be executed on riscv64; uname -m=${machine}"
 fi
 
-if [[ ! -f "${RUNTIME_SOURCE}" ]]; then
-	fail_with_usage "Runtime source not found: ${RUNTIME_SOURCE}"
-fi
+check_native_rvv_available
+
+echo "Native riscv64 runner, no QEMU"
+echo "Parallel jobs: ${PARALLEL_JOBS}"
 
 suite_key="all"
 single_testcase=""
-
 if [[ $# -gt 2 ]]; then
 	fail_with_usage "Too many arguments."
 elif [[ $# -eq 2 ]]; then
@@ -733,8 +647,7 @@ fi
 if [[ -n "${single_testcase}" && "${suite_key}" == "all" ]]; then
 	suite_dir=$(infer_suite_from_testcase "${single_testcase}") || \
 		fail_with_usage "Cannot infer suite from testcase: ${single_testcase}"
-	run_testcase "${suite_dir}" "${single_testcase}"
-	if [[ $? -eq 0 ]]; then
+	if run_testcase "${suite_dir}" "${single_testcase}"; then
 		OK_NUM=$((OK_NUM + 1))
 	else
 		NG_NUM=$((NG_NUM + 1))
@@ -748,10 +661,8 @@ elif [[ "${suite_key}" == "all" ]]; then
 else
 	suite_dir=$(suite_dir_from_key "${suite_key}") || \
 		fail_with_usage "Unknown suite: ${suite_key}"
-
 	if [[ -n "${single_testcase}" ]]; then
-		run_testcase "${suite_dir}" "${single_testcase}"
-		if [[ $? -eq 0 ]]; then
+		if run_testcase "${suite_dir}" "${single_testcase}"; then
 			OK_NUM=$((OK_NUM + 1))
 		else
 			NG_NUM=$((NG_NUM + 1))
@@ -762,7 +673,7 @@ else
 fi
 
 echo "OK number=${OK_NUM}, NG number=${NG_NUM}"
-echo "total_run=${TOTAL_RUN}ms, total_minic_ir_llvm_run=${TOTAL_MINIC_IR_LLVM_RUN}ms, total_llvm_all_run=${TOTAL_LLVM_ALL_RUN}ms"
+echo "total_run=${TOTAL_RUN}ms"
 
 if [[ ${NG_NUM} -ne 0 ]]; then
 	exit 1

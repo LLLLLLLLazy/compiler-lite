@@ -44,6 +44,7 @@ struct RegAllocStats {
 	int assignedRegIntervals = 0;
 	int assignedGprIntervals = 0;
 	int assignedFprIntervals = 0;
+	int assignedVrIntervals = 0;
 	int spilledIntervals = 0;
 	int spilledValues = 0;
 	int estimatedReloads = 0;
@@ -154,6 +155,12 @@ public:
 		return availableFloatRegs;
 	}
 
+	/// @brief 获取可用向量寄存器池
+	const std::vector<int> & getAvailableVectorRegs() const
+	{
+		return availableVectorRegs;
+	}
+
 	/// @brief 获取指令编号映射（Instruction* -> 编号）
 	/// @return 指令编号映射
 	const std::map<class Instruction *, int> & getInstNumbering() const
@@ -184,6 +191,12 @@ public:
 	const std::unordered_map<int, std::vector<std::pair<int, int>>> & getAllocatedFprLiveRanges() const
 	{
 		return allocatedFprLiveRanges;
+	}
+
+	/// @brief 获取VR活跃段反向索引
+	const std::unordered_map<int, std::vector<std::pair<int, int>>> & getAllocatedVectorLiveRanges() const
+	{
+		return allocatedVectorLiveRanges;
 	}
 
 	/// @brief 获取 split 边界处需要插入搬运的位置
@@ -268,8 +281,24 @@ private:
 	/// @brief 构建可用浮点物理寄存器池
 	std::vector<int> buildFloatRegisterPool(Function * func) const;
 
+	/// @brief 构建可用向量物理寄存器池
+	std::vector<int> buildVectorRegisterPool(Function * func) const;
+
 	/// @brief 判断活跃区间是否应分配浮点寄存器
 	static bool isFloatInterval(LiveInterval * interval);
+
+	/// @brief 判断活跃区间是否应分配向量寄存器
+	static bool isVectorInterval(LiveInterval * interval);
+
+	/// @brief 后端三套寄存器文件分类，避免 GPR/FPR/VR 共享编号时误判冲突
+	enum class RegisterClass {
+		Gpr,
+		Fpr,
+		Vector,
+	};
+
+	/// @brief 根据活跃区间的 IR 类型选择寄存器文件
+	static RegisterClass registerClassFor(LiveInterval * interval);
 
 	/// @brief 获取活跃区间对应类别的可用寄存器池
 	const std::vector<int> & registerPoolFor(LiveInterval * interval) const;
@@ -279,7 +308,7 @@ private:
 		int node,
 		const std::vector<LiveInterval *> & intervals,
 		InterferenceGraph * graph,
-		bool wantFloat) const;
+		RegisterClass wantedClass) const;
 
 	/// @brief 判断物理寄存器是否为调用者保存寄存器
 	/// @param reg 物理寄存器编号
@@ -321,15 +350,19 @@ private:
 	/// @brief 可用浮点物理寄存器编号列表
 	std::vector<int> availableFloatRegs;
 
+	/// @brief 可用向量物理寄存器编号列表
+	std::vector<int> availableVectorRegs;
+
 	/// @brief 寄存器分配映射表：Value* -> RegAllocInfo
 	std::unordered_map<Value *, RegAllocInfo> allocationMap;
 
 	/// @brief 位置敏感分配段：Value* -> 多个 [start,end) 分配结果
 	std::unordered_map<Value *, std::vector<RegAllocSegment>> allocationSegments;
 
-	/// @brief GPR/FPR活跃段反向索引
+	/// @brief GPR/FPR/VR活跃段反向索引，供临时寄存器借用时避让已分配值
 	std::unordered_map<int, std::vector<std::pair<int, int>>> allocatedGprLiveRanges;
 	std::unordered_map<int, std::vector<std::pair<int, int>>> allocatedFprLiveRanges;
+	std::unordered_map<int, std::vector<std::pair<int, int>>> allocatedVectorLiveRanges;
 
 	/// @brief split边界搬运点
 	std::vector<RegAllocSplitTransfer> splitTransfers;

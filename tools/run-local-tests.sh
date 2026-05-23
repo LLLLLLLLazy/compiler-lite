@@ -12,9 +12,15 @@ FRONTEND=${MINIC_FRONTEND:-"antlr"}
 TEST_MODE=${MINIC_TEST_MODE:-"llvmir"}
 CLANG_BIN=${CLANG_BIN:-"clang"}
 TEST_TIMEOUT=${MINIC_TEST_TIMEOUT:-30}
+TEST_EXTRA_ARGS=${MINIC_TEST_EXTRA_ARGS:-""}
 ASM_TARGET=${MINIC_ASM_TARGET:-"RISCV64"}
 RISCV64_GCC_BIN=${RISCV64_GCC_BIN:-"riscv64-linux-gnu-gcc"}
 QEMU_RISCV64_BIN=${QEMU_RISCV64_BIN:-""}
+QEMU_RISCV64_CPU=${QEMU_RISCV64_CPU:-""}
+QEMU_RISCV64_ARGS=${QEMU_RISCV64_ARGS:-""}
+
+# QEMU 会解析 QEMU_* 环境变量；避免 QEMU_VERSION 触发 -version 输出污染测试 stdout。
+unset QEMU_VERSION
 
 if [[ -z "${QEMU_RISCV64_BIN}" ]]; then
     if command -v qemu-riscv64-static >/dev/null 2>&1; then
@@ -22,6 +28,18 @@ if [[ -z "${QEMU_RISCV64_BIN}" ]]; then
     else
         QEMU_RISCV64_BIN="qemu-riscv64"
     fi
+fi
+
+QEMU_RISCV64_CPU_ARGS=()
+if [[ -n "${QEMU_RISCV64_CPU}" ]]; then
+    QEMU_RISCV64_CPU_ARGS=(-cpu "${QEMU_RISCV64_CPU}")
+elif [[ -n "${QEMU_RISCV64_ARGS}" ]]; then
+    read -r -a QEMU_RISCV64_CPU_ARGS <<< "${QEMU_RISCV64_ARGS}"
+elif "${QEMU_RISCV64_BIN}" -cpu rv64,v=true -version >/dev/null 2>&1; then
+    # 检测 QEMU 是否支持 RVV 向量扩展（优先 QEMU 9.x+ 的 rv64,v=true 语法，回退旧版 rv64gcv）
+    QEMU_RISCV64_CPU_ARGS=(-cpu rv64,v=true)
+elif "${QEMU_RISCV64_BIN}" -cpu rv64gcv -version >/dev/null 2>&1; then
+    QEMU_RISCV64_CPU_ARGS=(-cpu rv64gcv)
 fi
 
 OK_NUM=0
@@ -47,23 +65,24 @@ Suites:
   2026_perf         -> tests/2026_performance
   2026_performance  -> tests/2026_performance
   for_loop          -> tests/for_loop
-    static_test       -> tests/static_test (+ compile_fail in llvmir mode)
+  static_test       -> tests/static_test (+ compile_fail in llvmir mode)
   all               -> all suites above
 
 Environment:
   MINIC_FRONTEND=antlr      Use ANTLR frontend (default)
   MINIC_FRONTEND=recursive  Use recursive-descent frontend
   MINIC_FRONTEND=default    Use compiler default frontend
-    MINIC_RUNTIME_SOURCE=./tests/sylib.c
+  MINIC_RUNTIME_SOURCE=./tests/sylib.c
 
-  MINIC_TEST_MODE=llvmir    Verify generated LLVM IR via clang (default)
-  MINIC_TEST_MODE=asm       Verify generated target assembly via cross-compile + qemu
-  MINIC_TEST_MODE=ast       Verify AST image generation
-  MINIC_TEST_MODE=all       Run llvmir + asm + ast checks together
-  MINIC_TEST_TIMEOUT=30     Per-step timeout passed to timeout(1)
-  MINIC_ASM_TARGET=RISCV64  Assembly backend target (default and only supported target)
-  RISCV64_GCC_BIN=...       RISC-V cross compiler for asm mode
-  QEMU_RISCV64_BIN=...      RISC-V user-mode emulator for asm mode
+  MINIC_TEST_MODE=llvmir     Verify generated LLVM IR via clang (default)
+  MINIC_TEST_MODE=asm        Verify generated target assembly via cross-compile + qemu
+  MINIC_TEST_MODE=ast        Verify AST image generation
+  MINIC_TEST_MODE=all        Run llvmir + asm + ast checks together
+  MINIC_TEST_TIMEOUT=30      Per-step timeout passed to timeout(1)
+  MINIC_TEST_EXTRA_ARGS="-e" Extra compiler options, for example enable extended grammar
+  MINIC_ASM_TARGET=RISCV64   Assembly backend target (default and only supported target)
+  RISCV64_GCC_BIN=...        RISC-V cross compiler for asm mode
+  QEMU_RISCV64_BIN=...       RISC-V user-mode emulator for asm mode
 
 Examples:
   ./tools/run-local-tests.sh
@@ -97,6 +116,13 @@ case "${FRONTEND}" in
         fail_with_usage "Unknown MINIC_FRONTEND: ${FRONTEND}"
         ;;
 esac
+
+extra_args=()
+if [[ -n "${TEST_EXTRA_ARGS}" ]]; then
+    read -r -a extra_args <<< "${TEST_EXTRA_ARGS}"
+fi
+
+compiler_args=("${frontend_args[@]}" "${extra_args[@]}")
 
 case "${TEST_MODE}" in
     llvmir|asm|ast|all)
@@ -273,7 +299,7 @@ run_asm_check() {
     source_name=$(basename "${cfile}")
 
     if ! timeout --foreground "${TEST_TIMEOUT}" \
-        "${MINIC_BIN}" -S "${frontend_args[@]}" -O1 -t "${ASM_TARGET}" -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
+        "${MINIC_BIN}" -S "${compiler_args[@]}" -O1 -t "${ASM_TARGET}" -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${source_name} compile NG [asm]"
         return 1
     fi
@@ -290,10 +316,10 @@ run_asm_check() {
     fi
 
     if [[ -f "${infile}" ]]; then
-        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_CPU_ARGS[@]}" "${exe_file}" < "${infile}" > "${output_file}" 2> "${stderr_file}"
         exit_code=$?
     else
-        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
+        timeout --foreground "${TEST_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_CPU_ARGS[@]}" "${exe_file}" > "${output_file}" 2> "${stderr_file}"
         exit_code=$?
     fi
 
@@ -322,7 +348,7 @@ run_llvmir_check() {
     local exit_code=0
     source_name=$(basename "${cfile}")
 
-    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${compiler_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${source_name} compile NG [llvmir]"
         return 1
     fi
@@ -366,7 +392,7 @@ run_ast_check() {
     local expected_svg="${case_root}/${testcase}.svg"
     source_name=$(basename "${cfile}")
 
-    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" -T -o "${astfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${compiler_args[@]}" -T -o "${astfile}" "${cfile}" >/dev/null 2>&1; then
         echo "${source_name} compile NG [ast]"
         return 1
     fi
@@ -454,7 +480,7 @@ run_compile_fail_testcase() {
     fi
 
     if timeout --foreground "${TEST_TIMEOUT}" \
-        "${MINIC_BIN}" -S "${frontend_args[@]}" -L -o "${output_file}" "${cfile}" >/dev/null 2>&1; then
+        "${MINIC_BIN}" -S "${compiler_args[@]}" -L -o "${output_file}" "${cfile}" >/dev/null 2>&1; then
         echo "${source_name} NG [compile-fail]"
         NG_NUM=$((NG_NUM + 1))
         return

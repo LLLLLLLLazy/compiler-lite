@@ -58,6 +58,20 @@ bool isLocalComputedSource(Value * src, Instruction * copyInst)
 	       srcInst->getParentBlock() != nullptr && srcInst->getParentBlock() == copyInst->getParentBlock();
 }
 
+int registerClassOf(Type * type)
+{
+	if (type == nullptr) {
+		return -1;
+	}
+	if (type->isVectorType()) {
+		return 2;
+	}
+	if (type->isFloatType()) {
+		return 1;
+	}
+	return 0;
+}
+
 } // namespace
 
 /// @brief 构造函数
@@ -94,13 +108,11 @@ bool RegCoalescer::canCoalesce(Value * src, Value * dst,
                                Instruction * copyInst,
                                const std::map<Instruction *, int> & instNumbering)
 {
-	// 类型必须兼容：同为 float 或同为 int
+	// 类型必须兼容：GPR/FPR/VR 不能跨寄存器类合并。
 	if (src->getType() == nullptr || dst->getType() == nullptr) {
 		return false;
 	}
-	bool srcIsFloat = src->getType()->isFloatType();
-	bool dstIsFloat = dst->getType()->isFloatType();
-	if (srcIsFloat != dstIsFloat) {
+	if (registerClassOf(src->getType()) != registerClassOf(dst->getType())) {
 		return false;
 	}
 

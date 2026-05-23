@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+env:
+  MINIC_QEMU_VERSION: v9.2.0
+  QEMU_RISCV64_BIN: /usr/local/bin/qemu-riscv64-static
+  QEMU_RISCV64_CPU: rv64,v=true
+
 jobs:
   build-and-smoke-test:
     runs-on: ubuntu-22.04
@@ -16,16 +21,33 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            build-essential \
             clang \
             cmake \
+            git \
             gcc-riscv64-linux-gnu \
             ninja-build \
+            pkg-config \
+            python3-venv \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            zlib1g-dev \
             graphviz \
             graphviz-dev \
             openjdk-17-jdk \
-            qemu-user-static \
             unzip \
             curl
+
+      - name: Install QEMU ${{ env.MINIC_QEMU_VERSION }}
+        run: |
+          rm -rf /tmp/qemu-rvv
+          git clone --depth 1 --branch "${MINIC_QEMU_VERSION}" https://github.com/qemu/qemu.git /tmp/qemu-rvv
+          cd /tmp/qemu-rvv
+          ./configure --target-list=riscv64-linux-user --static --disable-system --disable-tools --disable-docs
+          make -j"$(nproc)"
+          sudo install -m 0755 build/qemu-riscv64 "${QEMU_RISCV64_BIN}"
+          "${QEMU_RISCV64_BIN}" --version
+          "${QEMU_RISCV64_BIN}" -cpu "${QEMU_RISCV64_CPU}" -version
 
       - name: Install ANTLR4 C++ runtime 4.12.0
         run: |
@@ -54,16 +76,16 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Run phi regression tests
-        run: bash ./tools/run-phi-regression.sh
+        run: QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-phi-regression.sh
 
       - name: Run float regression tests
-        run: bash ./tools/run-float-regression.sh
+        run: QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-float-regression.sh
 
       - name: Run for-loop RISCV64 asm regression tests
-        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh for_loop
+        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 MINIC_TEST_EXTRA_ARGS="-e" QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-tests.sh for_loop
 
       - name: Run static RISCV64 asm regression tests
-        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh static_test
+        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 MINIC_TEST_EXTRA_ARGS="-e" QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-tests.sh static_test
 
       - name: Run 2023 LLVM IR full test suite
         run: MINIC_TEST_MODE=llvmir MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh 2023
@@ -75,13 +97,13 @@ jobs:
         run: MINIC_TEST_MODE=llvmir MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh 2026
 
       - name: Run 2023 RISCV64 asm full test suite
-        run: MINIC_RISCV64_TIMEOUT=60 bash ./tools/run-local-riscv64-tests.sh 2023
+        run: MINIC_RISCV64_TIMEOUT=60 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh 2023
 
       - name: Run 2025 RISCV64 asm full test suite
-        run: MINIC_RISCV64_TIMEOUT=60 bash ./tools/run-local-riscv64-tests.sh 2025
+        run: MINIC_RISCV64_TIMEOUT=60 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh 2025
 
       - name: Run 2026 RISCV64 asm full test suite
-        run: MINIC_RISCV64_TIMEOUT=60 bash ./tools/run-local-riscv64-tests.sh 2026
+        run: MINIC_RISCV64_TIMEOUT=60 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh 2026
 
       - name: Run 2026 RISCV64 asm performance test suite
-        run: MINIC_RISCV64_TIMEOUT=120 bash ./tools/run-local-riscv64-tests.sh 2026_performance
+        run: MINIC_RISCV64_TIMEOUT=120 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh 2026_performance

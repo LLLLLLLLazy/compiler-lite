@@ -69,6 +69,9 @@ bool isAlwaysLiveInstruction(Instruction * inst)
     if (!inst) {
         return false;
     }
+    if (inst->isDead()) {
+        return false;
+    }
 
     if (dynamic_cast<CondBranchInst *>(inst)) {
         return false;

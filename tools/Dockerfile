@@ -21,11 +21,23 @@ RUN apt-get update && \
 	apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf && \
 	apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu && \
 	apt-get install -y qemu-user-static && \
+	apt-get install -y ninja-build pkg-config libglib2.0-dev libpixman-1-dev && \
 	apt-get install -y openssh-server && \
 	apt-get install -y doxygen
 
 # 安装texlive，默认不安装，需要时请打开选项，或者进入容器内执行如下的apt-get命令
 # RUN apt-get install -y texlive-lang-chinese texlive-lang-english texlive-latex-extra texlive-science texlive-plain-generic
+
+# 如果系统 qemu-user-static 不支持 RVV 向量扩展，则从源码编译 QEMU 9.x
+RUN if ! qemu-riscv64-static -cpu rv64,v=true -version >/dev/null 2>&1; then \
+	echo "System qemu-user-static does not support RVV, building from source..." && \
+	git clone --depth 1 --branch v9.2.0 https://github.com/qemu/qemu.git /tmp/qemu-rvv && \
+	cd /tmp/qemu-rvv && \
+	./configure --target-list=riscv64-linux-user --static --disable-system --disable-tools --disable-docs && \
+	make -j$(nproc) && \
+	cp build/qemu-riscv64 /usr/local/bin/qemu-riscv64-static && \
+	rm -rf /tmp/qemu-rvv; \
+    fi
 
 # 安装ANTLR 4.12.0
 RUN wget -O /usr/local/bin/antlr-4.12.0-complete.jar https://scoop.201704.xyz/https://raw.githubusercontent.com/antlr/website-antlr4/refs/heads/gh-pages/download/antlr-4.12.0-complete.jar && \

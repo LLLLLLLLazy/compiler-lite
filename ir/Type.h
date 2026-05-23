@@ -38,6 +38,7 @@ public:
 		FunctionTyID, ///< 函数类型
 		PointerTyID,  ///< 指针类型
 		ArrayTyID, 	  ///< 数组类型
+		VectorTyID,   ///< RVV 可伸缩向量类型
 	};
 
 	///
@@ -138,6 +139,16 @@ public:
 	[[nodiscard]] bool isArrayType() const
 	{
 		return ID == ArrayTyID;
+	}
+
+	///
+	/// @brief 是否是向量类型
+	/// @return true 是
+	/// @return false 不是
+	///
+	[[nodiscard]] bool isVectorType() const
+	{
+		return ID == VectorTyID;
 	}
 
 	///

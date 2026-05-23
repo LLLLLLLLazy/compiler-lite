@@ -74,6 +74,10 @@ int stackSlotAlignment(Type * type)
 	if (type->isPointerType()) {
 		return 8;
 	}
+	if (type->isVectorType()) {
+		// RVV 栈槽按 16 字节对齐，兼顾常见 VLEN 装载和栈帧布局稳定性。
+		return 16;
+	}
 	if (auto * arrayType = dynamic_cast<ArrayType *>(type)) {
 		return stackSlotAlignment(arrayType->getElementType());
 	}
@@ -266,17 +270,20 @@ void writeJsonIntArray(std::ostream & out, const std::vector<int> & values)
 
 /// @brief 构造函数
 /// @param _module 待编译的IR模块
+/// @param enableRVV 是否按 RVV 目标生成汇编
 /// @param enableCalleeSavedFPR 是否启用 callee-saved FPR
 /// @param enableCoalesce 是否启用寄存器合并
 /// @param enableSplit 是否启用活跃区间分裂
 /// @param raStatsJsonPath 若非空，则输出寄存器分配JSON统计到该路径
 CodeGeneratorRiscV64::CodeGeneratorRiscV64(Module * _module,
+                                           bool enableRVV,
                                            bool enableCalleeSavedFPR,
                                            bool enableCoalesce,
                                            bool enableSplit,
                                            std::string raStatsJsonPath)
 	: CodeGeneratorAsm(_module),
 	  greedyAllocator(nullptr, enableCalleeSavedFPR, enableCoalesce, enableSplit),
+	  enableRVV_(enableRVV),
 	  enableCalleeSavedFPR_(enableCalleeSavedFPR),
 	  enableCoalesce_(enableCoalesce),
 	  enableSplit_(enableSplit),
@@ -300,7 +307,8 @@ void CodeGeneratorRiscV64::genHeader()
 {
 	std::fprintf(fp, "%s\n", "# .arch riscv");
 	std::fprintf(fp, "%s\n", "# .option pic0");
-	std::fprintf(fp, "%s\n", ".attribute arch, \"rv64gc\"");
+	// RVV 开关只影响目标属性和向量化后端路径，关闭时保持普通 rv64gc 汇编。
+	std::fprintf(fp, ".attribute arch, \"%s\"\n", enableRVV_ ? "rv64gcv" : "rv64gc");
 	std::fprintf(fp, "%s\n", ".option nopic");
 }
 
@@ -364,12 +372,13 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	if (std::getenv("MINIC_RA_STATS") != nullptr) {
 		const auto & s = greedyAllocator.getStats();
 		std::fprintf(stderr,
-		             "[ra-stats] %s assigned=%d(gpr=%d,fpr=%d) spilledIntervals=%d spilledValues=%d "
+		             "[ra-stats] %s assigned=%d(gpr=%d,fpr=%d,vr=%d) spilledIntervals=%d spilledValues=%d "
 		             "reloads~=%d stores~=%d copies=%d splits=%d\n",
 		             func->getName().c_str(),
 		             s.assignedRegIntervals,
 		             s.assignedGprIntervals,
 		             s.assignedFprIntervals,
+		             s.assignedVrIntervals,
 		             s.spilledIntervals,
 		             s.spilledValues,
 		             s.estimatedReloads,
@@ -464,11 +473,12 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	if (showLinearIR) {
 		const auto & s = greedyAllocator.getStats();
 		std::fprintf(fp,
-		             "\t# RA stats: assigned=%d(gpr=%d,fpr=%d) spilledIntervals=%d spilledValues=%d "
+		             "\t# RA stats: assigned=%d(gpr=%d,fpr=%d,vr=%d) spilledIntervals=%d spilledValues=%d "
 		             "reloads~=%d stores~=%d copies=%d splits=%d\n",
 		             s.assignedRegIntervals,
 		             s.assignedGprIntervals,
 		             s.assignedFprIntervals,
+		             s.assignedVrIntervals,
 		             s.spilledIntervals,
 		             s.spilledValues,
 		             s.estimatedReloads,
@@ -532,6 +542,7 @@ bool CodeGeneratorRiscV64::writeRAStatsJson() const
 		out << "      \"assigned_reg_intervals\": " << stats.assignedRegIntervals << ",\n";
 		out << "      \"assigned_gpr_intervals\": " << stats.assignedGprIntervals << ",\n";
 		out << "      \"assigned_fpr_intervals\": " << stats.assignedFprIntervals << ",\n";
+		out << "      \"assigned_vr_intervals\": " << stats.assignedVrIntervals << ",\n";
 		out << "      \"spilled_intervals\": " << stats.spilledIntervals << ",\n";
 		out << "      \"spilled_values\": " << stats.spilledValues << ",\n";
 		out << "      \"estimated_reloads\": " << stats.estimatedReloads << ",\n";
@@ -750,6 +761,9 @@ void CodeGeneratorRiscV64::getIRValueStr(Value * val, std::string & str)
 		str = "\t# " + showName + ":" + PlatformRiscV64::regName[it->second.regId];
 	} else if (it->second.hasFloatReg()) {
 		str = "\t# " + showName + ":" + PlatformRiscV64::fpRegName[it->second.regId];
+	} else if (it->second.hasVectorReg()) {
+		// 汇编旁注保留 VR 名称，方便观察向量化结果和 RA 分配。
+		str = "\t# " + showName + ":" + PlatformRiscV64::vectorRegName[it->second.regId];
 	} else if (it->second.hasStackSlot) {
 		str = "\t# " + showName + ":" + std::to_string(it->second.offset) + "(" +
 			  PlatformRiscV64::regName[it->second.baseRegId] + ")";

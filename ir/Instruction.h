@@ -51,6 +51,13 @@ enum class IRInstOperator : std::int8_t {
     IRINST_OP_SELECT,    ///< 条件选择指令
     IRINST_OP_COPY,      ///< 值复制指令，供 PhiLoweringPass 消除 phi 时使用
     IRINST_OP_GEP,       ///< 元素地址计算指令
+    IRINST_OP_VSETVL,    ///< RVV vsetvli，返回本轮 VL
+    IRINST_OP_VLOAD,     ///< RVV 向量 load
+    IRINST_OP_VSTORE,    ///< RVV 向量 store
+    IRINST_OP_VSPLAT,    ///< 标量广播到向量
+    IRINST_OP_VBINARY,   ///< 向量二元运算
+    IRINST_OP_VREDUCE,   ///< 向量归约到单 lane 向量
+    IRINST_OP_VEXTRACT,  ///< 提取 lane0 到标量
 
     IRINST_OP_MAX
 };

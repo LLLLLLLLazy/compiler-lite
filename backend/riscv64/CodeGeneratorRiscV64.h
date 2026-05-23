@@ -16,11 +16,13 @@ class CodeGeneratorRiscV64 : public CodeGeneratorAsm {
 public:
 	/// @brief 构造函数
 	/// @param module 待编译的IR模块
+	/// @param enableRVV 是否按 RVV 目标生成汇编
 	/// @param enableCalleeSavedFPR 是否启用 callee-saved FPR
 	/// @param enableCoalesce 是否启用寄存器合并
 	/// @param enableSplit 是否启用活跃区间分裂
 	/// @param raStatsJsonPath 若非空，则输出寄存器分配JSON统计到该路径
 	explicit CodeGeneratorRiscV64(Module * module,
+	                             bool enableRVV = true,
 	                             bool enableCalleeSavedFPR = false,
 	                             bool enableCoalesce = false,
 	                             bool enableSplit = false,
@@ -87,6 +89,7 @@ private:
 	std::vector<int> currentSavedFPRs;
 
 	/// @brief 当前代码生成器启用的RA配置
+	bool enableRVV_ = true;            ///< 是否输出 RVV 目标汇编
 	bool enableCalleeSavedFPR_ = false;  ///< 是否启用callee-saved FPR分配
 	bool enableCoalesce_ = false;        ///< 是否启用寄存器合并（coalescing）
 	bool enableSplit_ = false;           ///< 是否启用活跃区间分裂

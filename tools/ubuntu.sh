@@ -33,8 +33,29 @@ sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
 # RISCV64的交叉编译环境
 sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
-# QEMU用户态模拟器
+# QEMU用户态模拟器（先尝试安装系统包，再尝试从源码编译支持RVV的版本）
 sudo apt-get install -y qemu-user-static
+# 检测系统 QEMU 是否支持 RVV 向量扩展，若不支持则从源码编译
+if ! qemu-riscv64-static -cpu rv64,v=true -version >/dev/null 2>&1; then
+	echo "System qemu-user-static does not support RVV, building from source..."
+	QEMU_SRC_DIR=$(mktemp -d)
+	if command -v git >/dev/null 2>&1; then
+		git clone --depth 1 --branch v9.2.0 https://github.com/qemu/qemu.git "$QEMU_SRC_DIR/qemu" 2>/dev/null || \
+		git clone --depth 1 --branch stable-9.2 https://github.com/qemu/qemu.git "$QEMU_SRC_DIR/qemu" 2>/dev/null
+	fi
+	if [[ -d "$QEMU_SRC_DIR/qemu" ]]; then
+		cd "$QEMU_SRC_DIR/qemu" || true
+		# 安装编译依赖
+		sudo apt-get install -y ninja-build pkg-config libglib2.0-dev libpixman-1-dev
+		./configure --target-list=riscv64-linux-user --static --disable-system --disable-tools --disable-docs 2>/dev/null
+		make -j"$(nproc)" 2>/dev/null
+		if [[ -f build/qemu-riscv64 ]]; then
+			sudo cp build/qemu-riscv64 /usr/local/bin/qemu-riscv64-static
+			echo "Installed RVV-capable qemu-riscv64-static to /usr/local/bin/"
+		fi
+	fi
+	rm -rf "$QEMU_SRC_DIR"
+fi
 # SSH服务器
 sudo apt-get install -y openssh-server
 # 文档生成工具
