@@ -113,9 +113,9 @@ static bool gRASplit = true;
 static std::string gRAStatsJsonFile;
 
 ///
-/// @brief RISC-V64 RVV 支持，默认开启；可用 --riscv64-rvv=off 手动关闭
+/// @brief RISC-V64 RVV 支持
 ///
-static bool gRiscV64RVV = true;
+static bool gRiscV64RVV = false;
 
 ///
 /// @brief 启用竞赛扩展文法
@@ -182,7 +182,7 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  --ra-no-coalesce           Disable register coalescing\n";
 	std::cout << "  --ra-no-split              Disable live interval splitting\n";
 	std::cout << "  --ra-stats-json=FILE       Write machine-readable register allocation metrics\n";
-	std::cout << "  --riscv64-rvv=on|off       Enable or disable RVV codegen (default: on)\n";
+	std::cout << "  --riscv64-rvv=on|off       Enable or disable RVV codegen\n";
 }
 
 /// @brief 参数解析与有效性检查
