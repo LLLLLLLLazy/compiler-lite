@@ -286,10 +286,15 @@ bool isStoreOpcode(const std::string & opcode)
 	       opcode == "fsd";
 }
 
-bool isMemoryOpcode(const std::string & opcode)
+bool isLoadOpcode(const std::string & opcode)
 {
 	return opcode == "lb" || opcode == "lbu" || opcode == "lh" || opcode == "lhu" || opcode == "lw" ||
-	       opcode == "lwu" || opcode == "ld" || opcode == "flw" || opcode == "fld" || isStoreOpcode(opcode);
+	       opcode == "lwu" || opcode == "ld" || opcode == "flw" || opcode == "fld";
+}
+
+bool isMemoryOpcode(const std::string & opcode)
+{
+	return isLoadOpcode(opcode) || isStoreOpcode(opcode);
 }
 
 bool isBranchOpcode(const std::string & opcode)
@@ -874,6 +879,240 @@ std::string addressBaseRegister(const std::string & operand)
 	return operand.substr(open + 1, close - open - 1);
 }
 
+/// @brief 栈槽访问摘要，用于局部 store-load forwarding
+struct StackSlotAccess {
+	bool valid = false;          ///< 是否成功解析为栈槽访问
+	bool isLoad = false;         ///< 是否为加载指令
+	bool isStore = false;        ///< 是否为存储指令
+	std::string opcode;          ///< 原始操作码
+	std::string base;            ///< 栈基址寄存器
+	std::string slotKey;         ///< 栈槽键，包含基址和偏移
+	std::string valueReg;        ///< load 的目标寄存器或 store 的源寄存器
+};
+
+/// @brief 判断基址寄存器是否为当前函数栈帧基址
+bool isStackBaseRegister(const std::string & reg)
+{
+	return reg == "sp" || reg == "s0" || reg == "fp";
+}
+
+/// @brief 解析形如 off(sp) 或 off(s0) 的栈操作数
+bool parseStackMemoryOperand(const std::string & operand, std::string & base, int & offset)
+{
+	const auto open = operand.find('(');
+	const auto close = operand.find(')', open == std::string::npos ? 0 : open);
+	if (open == std::string::npos || close == std::string::npos || close <= open + 1 || close + 1 != operand.size()) {
+		return false;
+	}
+
+	base = operand.substr(open + 1, close - open - 1);
+	if (!isStackBaseRegister(base)) {
+		return false;
+	}
+
+	try {
+		std::size_t parsed = 0;
+		offset = std::stoi(operand.substr(0, open), &parsed);
+		return parsed == open;
+	} catch (...) {
+		return false;
+	}
+}
+
+/// @brief 提取直接以 sp/s0/fp 为基址的栈槽访问
+StackSlotAccess decodeStackSlotAccess(RiscV64Inst * inst)
+{
+	StackSlotAccess access;
+	if (!isLiveInst(inst) || !isMemoryOpcode(inst->opcode)) {
+		return access;
+	}
+
+	std::string base;
+	int offset = 0;
+	if (!parseStackMemoryOperand(inst->arg1, base, offset)) {
+		return access;
+	}
+
+	access.valid = true;
+	access.isLoad = isLoadOpcode(inst->opcode);
+	access.isStore = isStoreOpcode(inst->opcode);
+	access.opcode = inst->opcode;
+	access.base = base;
+	access.slotKey = base + ":" + std::to_string(offset);
+	access.valueReg = inst->result;
+	return access;
+}
+
+/// @brief 栈槽级块活跃性信息
+struct StackSlotBlockLiveness {
+	std::vector<MachineBlock> blocks;                           ///< 复用机器基本块划分和后继
+	std::unordered_map<RiscV64Inst *, int> instToBlock;         ///< 指令到块编号
+};
+
+/// @brief 构建栈槽级活跃性，用于判断 store 是否跨基本块有后续 load
+StackSlotBlockLiveness buildStackSlotLiveness(InstList & code)
+{
+	StackSlotBlockLiveness info;
+	MachineLiveness machine = buildMachineLiveness(code);
+	info.blocks = std::move(machine.blocks);
+	info.instToBlock = std::move(machine.instToBlock);
+
+	for (auto & block : info.blocks) {
+		block.use.clear();
+		block.def.clear();
+		block.liveIn.clear();
+		block.liveOut.clear();
+		for (auto * inst : block.insts) {
+			StackSlotAccess access = decodeStackSlotAccess(inst);
+			if (!access.valid) {
+				continue;
+			}
+			if (access.isLoad && block.def.find(access.slotKey) == block.def.end()) {
+				block.use.insert(access.slotKey);
+			}
+			if (access.isStore && access.opcode == "sd") {
+				block.def.insert(access.slotKey);
+			}
+		}
+	}
+
+	bool changed = true;
+	while (changed) {
+		changed = false;
+		for (int i = static_cast<int>(info.blocks.size()) - 1; i >= 0; --i) {
+			auto & block = info.blocks[i];
+			std::unordered_set<std::string> newOut;
+			for (int succ : block.succs) {
+				newOut.insert(info.blocks[succ].liveIn.begin(), info.blocks[succ].liveIn.end());
+			}
+			std::unordered_set<std::string> newIn = block.use;
+			for (const auto & slot : newOut) {
+				if (block.def.find(slot) == block.def.end()) {
+					newIn.insert(slot);
+				}
+			}
+			if (newOut != block.liveOut || newIn != block.liveIn) {
+				block.liveOut = std::move(newOut);
+				block.liveIn = std::move(newIn);
+				changed = true;
+			}
+		}
+	}
+
+	return info;
+}
+
+/// @brief 判断栈槽在当前块剩余部分是否仍可能被读取
+bool stackSlotUsedLaterInBlock(InstList & code, InstIt start, const std::string & slotKey)
+{
+	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (isControlBoundary(inst)) {
+			break;
+		}
+
+		StackSlotAccess access = decodeStackSlotAccess(inst);
+		if (access.valid && access.slotKey == slotKey) {
+			if (access.isLoad) {
+				return true;
+			}
+			if (access.isStore && access.opcode == "sd") {
+				return false;
+			}
+			return true;
+		}
+
+		if (!access.valid && isLoadOpcode(inst->opcode)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/// @brief 判断栈槽是否在 store 所在块出口活跃
+bool stackSlotLiveOutOfBlock(const StackSlotBlockLiveness & liveness, RiscV64Inst * inst, const std::string & slotKey)
+{
+	auto it = liveness.instToBlock.find(inst);
+	if (it == liveness.instToBlock.end()) {
+		return true;
+	}
+	return liveness.blocks[it->second].liveOut.find(slotKey) != liveness.blocks[it->second].liveOut.end();
+}
+
+/// @brief 转发同一基本块内的 64 位栈槽 store-load 往返
+///
+/// 匹配：
+///   sd src, slot
+///   ...
+///   ld dst, slot
+///
+/// 若中间没有控制流边界、同槽写或可能改写该栈槽的未知 store，
+/// 则把 ld 改为寄存器 move；若 src 在中间被重定义，则在 store 后补一个早期 move。
+/// 当栈槽在后续块不活跃且当前块后续也不再读取时，原 store 也可删除
+bool forwardStackStoreLoads(InstList & code)
+{
+	bool changed = false;
+	const StackSlotBlockLiveness liveness = buildStackSlotLiveness(code);
+
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * store = *it;
+		StackSlotAccess storeAccess = decodeStackSlotAccess(store);
+		if (!storeAccess.valid || !storeAccess.isStore || storeAccess.opcode != "sd" || storeAccess.valueReg.empty()) {
+			continue;
+		}
+
+		bool sourceAvailable = true;
+		for (auto scan = nextLive(code, it); scan != code.end(); scan = nextLive(code, scan)) {
+			auto * inst = *scan;
+			if (isControlBoundary(inst)) {
+				break;
+			}
+
+			if (definesResultOperand(inst) && inst->result == storeAccess.base) {
+				break;
+			}
+
+			StackSlotAccess access = decodeStackSlotAccess(inst);
+			if (access.valid && access.slotKey == storeAccess.slotKey) {
+				if (access.isStore) {
+					break;
+				}
+				if (!access.isLoad || access.opcode != "ld" || access.valueReg.empty()) {
+					break;
+				}
+
+				const std::string dst = access.valueReg;
+				if (sourceAvailable) {
+					inst->replace("mv", dst, storeAccess.valueReg);
+				} else {
+					if (dst == storeAccess.valueReg || registerMentionedInRange(nextLive(code, it), scan, dst)) {
+						break;
+					}
+					code.insert(std::next(it), new RiscV64Inst("mv", dst, storeAccess.valueReg));
+					inst->setDead();
+				}
+
+				if (!stackSlotLiveOutOfBlock(liveness, store, storeAccess.slotKey) &&
+				    !stackSlotUsedLaterInBlock(code, scan, storeAccess.slotKey)) {
+					store->setDead();
+				}
+				changed = true;
+				break;
+			}
+
+			if (!access.valid && isStoreOpcode(inst->opcode)) {
+				break;
+			}
+
+			if (definesResultOperand(inst) && inst->result == storeAccess.valueReg) {
+				sourceAvailable = false;
+			}
+		}
+	}
+
+	return changed;
+}
+
 /// @brief 在指定范围内选择一个未被使用的浮点临时寄存器（ft4-ft7）
 std::string chooseFreeFloatTemp(InstIt begin, InstIt end)
 {
@@ -1259,6 +1498,55 @@ bool foldMaterializationMoves(InstList & code)
 
 			materialize->result = dst;
 			inst->setDead();
+			changed = true;
+			break;
+		}
+	}
+	return changed;
+}
+
+/// @brief 折叠零值材料化后的整数 store
+///
+/// 匹配：
+///   li tmp, 0
+///   ...
+///   sw/sd tmp, addr
+///
+/// RISC-V store 可以直接使用 zero 寄存器作为源操作数，
+/// 若 tmp 在 store 后不再使用，则删除对应 li
+bool foldZeroStores(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * li = *it;
+		if (!isLiveInst(li) || li->opcode != "li" || li->arg1 != "0" || li->result.empty()) {
+			continue;
+		}
+
+		const std::string zeroReg = li->result;
+		for (auto scan = nextLive(code, it); scan != code.end(); scan = nextLive(code, scan)) {
+			auto * inst = *scan;
+			if (isControlBoundary(inst)) {
+				break;
+			}
+			if (!instructionMentionsRegister(inst, zeroReg)) {
+				continue;
+			}
+
+			const bool integerStore = inst->opcode == "sb" || inst->opcode == "sh" || inst->opcode == "sw" ||
+			                          inst->opcode == "sd";
+			const bool storeUsesZeroReg = integerStore && inst->result == zeroReg &&
+			                          !operandMentionsRegister(inst->arg1, zeroReg) &&
+			                          !operandMentionsRegister(inst->arg2, zeroReg) &&
+			                          !operandMentionsRegister(inst->addition, zeroReg);
+			if (!storeUsesZeroReg) {
+				break;
+			}
+
+			inst->result = "zero";
+			if (!registerUsedAfterBeforeRedefOrBoundary(code, scan, zeroReg)) {
+				li->setDead();
+			}
 			changed = true;
 			break;
 		}
@@ -2080,6 +2368,10 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		localChanged = foldZeroSubCompare(code) || localChanged;
 		// 折叠立即数/地址材料化后的冗余move：li x,imm; mv y,x -> li y,imm
 		localChanged = foldMaterializationMoves(code) || localChanged;
+		// 折叠零值 store，减少局部数组清零中的 li 0 序列
+		localChanged = foldZeroStores(code) || localChanged;
+		// 转发同块内 64 位栈槽 store-load，消除地址临时值绕栈往返
+		localChanged = forwardStackStoreLoads(code) || localChanged;
 		// coalesce专属优化：将局部唯一消费的producer直接改写到copy目标寄存器
 		if (enableCoalesceRetargeting) {
 			localChanged = retargetSingleUseDefinitions(code) || localChanged;
