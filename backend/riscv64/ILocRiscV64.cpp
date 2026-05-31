@@ -720,7 +720,7 @@ void ILocRiscV64::leaStack(int rs_reg_no, int base_reg_no, int off)
 }
 
 /// @brief 函数内栈内空间分配（局部变量、形参变量、函数参数传值，或不能寄存器分配的临时变量等）
-/// RISCV64 prologue: addi sp,sp,-framesize; 保存必要callee-saved寄存器; addi s0,sp,framesize
+/// RISCV64 prologue: addi sp,sp,-framesize; 保存必要callee-saved寄存器; 按需设置s0
 /// @param func 函数
 /// @param tmp_reg_no 临时寄存器编号
 void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
@@ -729,7 +729,7 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 	// 优先使用已计算的栈帧大小，否则动态计算
 	// 根据实际需要保存的callee-saved寄存器数量计算占用字节数
 	const int savedFrameBytes = static_cast<int>(savedRegs.size()) * 8;
-	const int currentFrameSize = frameSize > 0 ? frameSize : computeFrameSize(regAllocMap, savedFrameBytes);
+	const int currentFrameSize = frameSizeSet ? frameSize : computeFrameSize(regAllocMap, savedFrameBytes);
 	if (currentFrameSize == 0 && savedRegs.empty()) {
 		return;
 	}
@@ -774,12 +774,13 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 		}
 	}
 
-	// addi s0, sp, framesize - 设置帧指针
-	if (PlatformRiscV64::constExpr(currentFrameSize)) {
-		emit("addi", "s0", "sp", std::to_string(currentFrameSize));
-	} else {
-		load_imm(tmp_reg_no, currentFrameSize);
-		emit("add", "s0", "sp", PlatformRiscV64::regName[tmp_reg_no]);
+	if (usesFramePointer()) {
+		if (PlatformRiscV64::constExpr(currentFrameSize)) {
+			emit("addi", "s0", "sp", std::to_string(currentFrameSize));
+		} else {
+			load_imm(tmp_reg_no, currentFrameSize);
+			emit("add", "s0", "sp", PlatformRiscV64::regName[tmp_reg_no]);
+		}
 	}
 }
 
