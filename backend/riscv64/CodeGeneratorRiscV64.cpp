@@ -128,19 +128,29 @@ bool hasCallInst(Function * func)
 	return false;
 }
 
+/// @brief 判断当前函数是否必须保留s0作为帧指针
+/// @note 当前后端没有动态栈分配/调试帧指针模式，固定大小栈帧均可用sp相对寻址。
+bool requiresFramePointer(Function * func)
+{
+	(void) func;
+	return false;
+}
+
 /// @brief 计算当前函数需要在prologue/epilogue中保存的callee-saved寄存器列表
 /// @param func 当前函数
 /// @param allocMap 寄存器分配映射表
+/// @param useFramePointer 是否建立s0帧指针
 /// @return 需要保存的寄存器编号列表（按栈帧中保存顺序排列）
 ///
 /// 策略：
 /// - 若函数包含调用指令，则必须保存ra（返回地址）
-/// - 始终保存s0（帧指针，后端固定使用s0作为FP）
+/// - 仅在确实需要帧指针时保存s0
 /// - 对于s1-s11（编号9,18-27），仅当寄存器分配器实际使用了该寄存器时才保存
 std::vector<int> computeSavedRegs(
 	Function * func,
 	const std::unordered_map<Value *, RegAllocInfo> & allocMap,
-	const std::unordered_map<int, std::vector<std::pair<int, int>>> & allocatedGprLiveRanges)
+	const std::unordered_map<int, std::vector<std::pair<int, int>>> & allocatedGprLiveRanges,
+	bool useFramePointer)
 {
 	std::vector<int> regs;
 	if (hasCallInst(func)) {
@@ -148,8 +158,9 @@ std::vector<int> computeSavedRegs(
 		regs.push_back(RISCV64_RA_REG_NO);
 	}
 
-	// 后端当前始终使用s0作为帧指针，必须保存
-	regs.push_back(RISCV64_FP_REG_NO);
+	if (useFramePointer) {
+		regs.push_back(RISCV64_FP_REG_NO);
+	}
 
 	// s1-s11的寄存器编号：s1=9, s2=18, s3=19, ..., s11=27
 	const std::vector<int> calleeSavedGprs = {
@@ -173,25 +184,6 @@ std::vector<int> computeSavedRegs(
 	}
 
 	return regs;
-}
-
-bool canOmitLeafFrame(Function * func,
-                      const std::unordered_map<Value *, RegAllocInfo> & allocMap,
-                      const std::vector<int> & savedRegs,
-                      int outgoingArgBytes)
-{
-	if (hasCallInst(func) || outgoingArgBytes != 0) {
-		return false;
-	}
-	if (savedRegs.size() != 1 || savedRegs.front() != RISCV64_FP_REG_NO) {
-		return false;
-	}
-	for (const auto & [_, info] : allocMap) {
-		if (info.hasStackSlot) {
-			return false;
-		}
-	}
-	return true;
 }
 
 /// @brief 从当前保存列表中提取真正由寄存器分配器使用的callee-saved GPR
@@ -428,7 +420,7 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 				greedyAllocator.setFrameSize(newFrameSize);
 				sv.spillSlot = -slotEnd;
 				RegAllocInfo info;
-				info.setStack(RISCV64_FP_REG_NO, sv.spillSlot);
+				info.setStack(RISCV64_SP_REG_NO, greedyAllocator.getFrameSize() + sv.spillSlot);
 				allocMap[key] = info;
 			} else if (sv.physicalReg >= 0) {
 				RegAllocInfo info;
@@ -586,24 +578,18 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 	adjustFuncCallInsts(func);
 	adjustFormalParamInsts(func);
 	// 计算当前函数需要保存的callee-saved寄存器列表
+	const bool useFramePointer = requiresFramePointer(func);
 	currentSavedRegs = computeSavedRegs(func,
 	                                    greedyAllocator.getAllocationMap(),
-	                                    greedyAllocator.getAllocatedGprLiveRanges());
+	                                    greedyAllocator.getAllocatedGprLiveRanges(),
+	                                    useFramePointer);
 	// 收集被使用的callee-saved FPR
 	currentSavedFPRs = greedyAllocator.getUsedCalleeSavedFPRs();
 	// 为未分配寄存器和溢出的变量分配栈槽
-	stackAlloc(func);
+	stackAlloc(func, useFramePointer);
 	// 栈分配完成后，将coalesced alias的分配信息回填到代表值，
 	// 确保被合并的值与代表值共享同一栈槽/寄存器位置
 	greedyAllocator.refreshCoalescedAliasAllocations();
-	if (canOmitLeafFrame(func,
-	                     greedyAllocator.getAllocationMap(),
-	                     currentSavedRegs,
-	                     greedyAllocator.getOutgoingArgBytes()) &&
-	    currentSavedFPRs.empty()) {
-		currentSavedRegs.clear();
-		greedyAllocator.setFrameSize(0);
-	}
 }
 
 /// @brief 栈空间分配，为局部变量、溢出变量和超出寄存器传递的形参分配栈槽
@@ -615,14 +601,14 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 /// - 局部变量和溢出变量（localBytes字节）
 /// - 超过8个参数的调用参数（outgoingBytes字节）
 ///
-void CodeGeneratorRiscV64::stackAlloc(Function * func)
+void CodeGeneratorRiscV64::stackAlloc(Function * func, bool useFramePointer)
 {
 	auto & allocMap = greedyAllocator.getAllocationMap();
 	// 根据实际保存的callee-saved寄存器数量计算栈帧占用字节数（GPR + FPR）
 	const int savedFrameBytes = static_cast<int>(currentSavedRegs.size() + currentSavedFPRs.size()) * 8;
 
 	int localBytes = 0;
-	// 为Value分配栈槽，偏移量相对于FP寄存器为负方向
+	// 为Value分配栈槽。先按旧FP(s0=entry sp)布局记录，最终可统一重写为SP相对偏移。
 	auto assignStackSlot = [&](Value * val) {
 		auto & info = allocMap[val];
 		if (info.hasStackSlot) {
@@ -711,6 +697,13 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func)
 	const int maxArgs = maxCallArgCount(func);
 	const int outgoingBytes = maxArgs > 8 ? (maxArgs - 8) * 8 : 0;
 	const int frameSize = alignTo(savedFrameBytes + localBytes + outgoingBytes, 16);
+	if (!useFramePointer) {
+		for (auto & [_, info] : allocMap) {
+			if (info.hasStackSlot && info.baseRegId == RISCV64_FP_REG_NO) {
+				info.setStack(RISCV64_SP_REG_NO, frameSize + static_cast<int>(info.offset));
+			}
+		}
+	}
 	greedyAllocator.setOutgoingArgBytes(outgoingBytes);
 	greedyAllocator.setFrameSize(frameSize);
 }

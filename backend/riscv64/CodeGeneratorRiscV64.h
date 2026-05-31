@@ -50,7 +50,8 @@ protected:
 
 	/// @brief 栈空间分配，为局部变量和溢出变量分配栈槽
 	/// @param func 待分配栈空间的函数
-	void stackAlloc(Function * func);
+	/// @param useFramePointer 是否保留s0作为帧指针
+	void stackAlloc(Function * func, bool useFramePointer);
 
 	/// @brief 调整函数调用指令（RISC-V64暂不需要额外调整）
 	/// @param func 待调整的函数

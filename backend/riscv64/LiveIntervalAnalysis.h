@@ -10,6 +10,7 @@
 
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "InterferenceGraph.h"
@@ -62,6 +63,10 @@ public:
 	/// @return Instruction* -> 指令编号的映射
 	const std::map<Instruction *, int> & getInstNumbering() const;
 
+	/// @brief 获取真正跨调用存活的位置集合
+	/// @return Value* -> call 指令编号集合。集合中的 call 表示该值在 call 返回后仍需保持。
+	const std::unordered_map<Value *, std::unordered_set<int>> & getLiveAcrossCallPositions() const;
+
 private:
 	/// @brief 计算所有虚拟寄存器的活跃区间
 	/// 按基本块顺序遍历指令，为每条指令编号，
@@ -98,6 +103,9 @@ private:
 
 	/// @brief 指令编号映射：Instruction* -> 指令编号
 	std::map<Instruction *, int> instNumbering;
+
+	/// @brief Value 在哪些 call 返回后仍然存活
+	std::unordered_map<Value *, std::unordered_set<int>> liveAcrossCallPositions;
 
 	/// @brief 下一条指令的编号
 	int nextInstNum = 0;
