@@ -303,6 +303,9 @@ private:
 	/// @brief 获取活跃区间对应类别的可用寄存器池
 	const std::vector<int> & registerPoolFor(LiveInterval * interval) const;
 
+	/// @brief 获取考虑跨调用偏好的寄存器遍历顺序
+	std::vector<int> orderedRegisterPoolFor(LiveInterval * interval) const;
+
 	/// @brief 获取与某节点干涉且同类别的已分配寄存器集合
 	std::set<int> getInterferingRegsForClass(
 		int node,
@@ -315,10 +318,13 @@ private:
 	/// @return 是否会被普通函数调用 clobber
 	static bool isCallerSavedReg(int reg);
 
-	/// @brief 判断活跃区间是否覆盖任一函数调用点
+	/// @brief 判断活跃区间是否在调用返回后仍需保持值
 	/// @param interval 活跃区间
 	/// @return 是否在调用点需要保持值
 	bool intervalCrossesCall(LiveInterval * interval) const;
+
+	/// @brief 将 coalesced alias 的跨调用存活标记合并到代表值
+	void refreshCoalescedLiveAcrossCallPositions();
 
 	/// @brief 判断某物理寄存器能否分配给指定活跃区间
 	/// @param interval 活跃区间
@@ -370,7 +376,8 @@ private:
 	/// @brief 需要以栈槽作为 canonical 位置的 split Value。
 	///
 	/// 目前 split 是线性指令号上的区间拆分，尚未在 CFG 边上插入 edge copy。
-	/// 对这类 Value 使用统一栈槽可以避免循环回边或 call clobber 读到旧寄存器。
+	/// 对位置变化或部分 spill 的 Value 使用统一栈槽可以避免循环回边、非相邻
+	/// CFG 段或 call clobber 读到旧寄存器/未初始化栈槽。
 	std::unordered_set<Value *> splitStackValues;
 
 	/// @brief 寄存器分配统计
@@ -384,6 +391,9 @@ private:
 
 	/// @brief 当前函数中CallInst对应的指令编号列表
 	std::vector<int> callInstNumbers;
+
+	/// @brief Value 在哪些 call 返回后仍然存活
+	std::unordered_map<Value *, std::unordered_set<int>> liveAcrossCallPositions;
 
 	/// @brief 栈帧大小
 	int frameSize = 0;

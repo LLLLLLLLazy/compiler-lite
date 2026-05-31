@@ -138,6 +138,11 @@ const std::map<Instruction *, int> & LiveIntervalAnalysis::getInstNumbering() co
 	return instNumbering;
 }
 
+const std::unordered_map<Value *, std::unordered_set<int>> & LiveIntervalAnalysis::getLiveAcrossCallPositions() const
+{
+	return liveAcrossCallPositions;
+}
+
 /// @brief 判断Value是否需要活跃区间分析
 ///
 /// 以下Value不需要分配虚拟寄存器，因此不需要活跃区间：
@@ -329,8 +334,17 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 		for (auto instIt = insts.rbegin(); instIt != insts.rend(); ++instIt) {
 			Instruction * inst = *instIt;
 			const int pos = instNumbering[inst];
+			Value * def = instructionDef(inst);
 
-			if (Value * def = instructionDef(inst); needsInterval(def)) {
+			if (dynamic_cast<CallInst *>(inst) != nullptr) {
+				for (const auto & [value, _] : liveEnd) {
+					if (value != def && needsInterval(value)) {
+						liveAcrossCallPositions[value].insert(pos);
+					}
+				}
+			}
+
+			if (needsInterval(def)) {
 				auto openIt = liveEnd.find(def);
 				if (openIt != liveEnd.end()) {
 					getOrCreateInterval(def)->addSegment(pos, openIt->second);

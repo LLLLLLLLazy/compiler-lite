@@ -92,6 +92,11 @@ private:
 		int dst = -1;
 	};
 
+	struct RegMove {
+		int src = -1;
+		int dst = -1;
+	};
+
 	/// @brief 指令翻译处理函数类型
 	typedef void (InstSelectorRiscV64::*translate_handler)(Instruction *);
 
@@ -202,8 +207,14 @@ private:
 	/// @brief 将单用途整数比较直接翻译为条件分支
 	bool translateDirectIcmpBranch(class ICmpInst * icmp, class CondBranchInst * condBr);
 
-	/// @brief 生成形参从a0-a7到分配寄存器的移动指令
-	void emitFormalParamMoves();
+		/// @brief 生成形参从a0-a7到分配寄存器的移动指令
+		void emitFormalParamMoves();
+		/// @brief ABI栈传入参数的当前基址寄存器
+		int incomingStackBaseReg() const;
+		/// @brief ABI栈传入参数在当前栈帧下的偏移
+		int incomingStackOffset(int abiOffset) const;
+		/// @brief 解析整数寄存器并行移动
+		void emitGprRegMoves(std::vector<RegMove> & regMoves, int scratchGpr);
 	/// @brief 解析浮点寄存器并行移动
 	void emitFloatRegMoves(std::vector<FloatRegMove> & regMoves, int scratchGpr);
 	/// @brief 生成函数epilogue（恢复callee-saved寄存器并返回）

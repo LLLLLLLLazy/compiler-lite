@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Module.h"
+#include "PlatformRiscV64.h"
 #include "Value.h"
 
 class Instruction;
@@ -163,6 +164,9 @@ class ILocRiscV64 {
 	/// @brief 已计算好的函数栈帧大小
 	int frameSize = 0;
 
+	/// @brief frameSize是否已由CodeGenerator显式设置
+	bool frameSizeSet = false;
+
 	/// @brief 当前函数需要在栈帧中保存的callee-saved寄存器
 	std::vector<int> savedRegs;
 
@@ -197,6 +201,7 @@ public:
 	void setFrameSize(int size)
 	{
 		frameSize = size;
+		frameSizeSet = true;
 	}
 
 	/// @brief 获取函数栈帧大小
@@ -216,6 +221,17 @@ public:
 	const std::vector<int> & getSavedRegs() const
 	{
 		return savedRegs;
+	}
+
+	/// @brief 当前函数是否在prologue中建立s0帧指针
+	bool usesFramePointer() const
+	{
+		for (int reg : savedRegs) {
+			if (reg == RISCV64_FP_REG_NO) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/// @brief 设置当前函数需要保存的callee-saved FPR
@@ -333,7 +349,7 @@ public:
 	void call_fun(std::string name);
 
 	/// @brief 分配栈帧（RISCV64 prologue）
-	/// addi sp,sp,-framesize; sd ra,off(sp); sd s0,off(sp); addi s0,sp,framesize
+	/// addi sp,sp,-framesize; 保存callee-saved；必要时设置s0帧指针
 	/// @param func 函数
 	/// @param tmp_reg_no 临时寄存器编号
 	void allocStack(Function * func, int tmp_reg_no);

@@ -104,11 +104,6 @@ AbiArgLoc classifyVariadicFloatArg(int & intRegCount, int & stackCount)
 }
 
 
-struct RegMove {
-	int src = -1;
-	int dst = -1;
-};
-
 bool sameRegAllocInfo(const RegAllocInfo & lhs, const RegAllocInfo & rhs)
 {
 	return lhs.regId == rhs.regId &&
@@ -2021,6 +2016,35 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 			releaseFloatOperand(src);
 		};
 
+		for (int i = 0; i < call->getArgCount(); ++i) {
+			Value * arg = call->getArg(i);
+			const AbiArgLoc & loc = argLocs[i];
+			if (loc.kind != AbiArgLocKind::Stack) {
+				continue;
+			}
+			if (argTypes[i]->isFloatType() && !variadicFloatArgs[i]) {
+				RegAllocInfo argInfo = getAllocInfo(arg, inst);
+				if (argInfo.hasFloatReg()) {
+					auto tmp = tempMgr.borrow(inst);
+					iloc.store_float_base(argInfo.regId, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg());
+				} else {
+					const int tmpFpr = borrowFloatTemp(inst);
+					auto tmp = tempMgr.borrow(inst);
+					iloc.load_float_var(tmpFpr, arg, tmp.reg(), argInfo);
+					iloc.store_float_base(tmpFpr, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg());
+					releaseFloatTemp(tmpFpr);
+				}
+			} else if (variadicFloatArgs[i]) {
+				emitVariadicFloatArg(arg, loc);
+			} else {
+				OperandReg value = loadOperand(arg, inst);
+				auto tmp = tempMgr.borrow(inst, value.reg);
+				iloc.store_base(value.reg, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg(),
+				                arg->getType()->isPointerType());
+				releaseOperand(value);
+			}
+		}
+
 		std::vector<FloatRegMove> floatRegMoves;
 		std::vector<std::pair<Value *, int>> deferredFloatLoads;
 		for (int i = 0; i < call->getArgCount(); ++i) {
@@ -2044,18 +2068,6 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 				} else {
 					deferredFloatLoads.push_back({arg, destReg});
 				}
-			} else if (loc.kind == AbiArgLocKind::Stack) {
-				RegAllocInfo argInfo = getAllocInfo(arg, inst);
-				if (argInfo.hasFloatReg()) {
-					auto tmp = tempMgr.borrow(inst);
-					iloc.store_float_base(argInfo.regId, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg());
-				} else {
-					const int tmpFpr = borrowFloatTemp(inst);
-					auto tmp = tempMgr.borrow(inst);
-					iloc.load_float_var(tmpFpr, arg, tmp.reg(), argInfo);
-					iloc.store_float_base(tmpFpr, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg());
-					releaseFloatTemp(tmpFpr);
-				}
 			}
 		}
 
@@ -2073,25 +2085,52 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 			loadFloatValueToReg(destReg, arg, tmp.reg(), inst);
 		}
 
+		std::vector<RegMove> intRegMoves;
+		std::vector<std::pair<Value *, int>> deferredIntLoads;
 		for (int i = 0; i < call->getArgCount(); ++i) {
-			if (argTypes[i]->isFloatType() && !variadicFloatArgs[i]) {
+			if ((argTypes[i]->isFloatType() && !variadicFloatArgs[i]) || variadicFloatArgs[i]) {
 				continue;
 			}
 
 			Value * arg = call->getArg(i);
 			const AbiArgLoc & loc = argLocs[i];
-			if (variadicFloatArgs[i]) {
-				emitVariadicFloatArg(arg, loc);
+			if (loc.kind != AbiArgLocKind::IntReg) {
 				continue;
 			}
+
+			const int destReg = RISCV64_A0_REG_NO + loc.index;
+			RegAllocInfo argInfo = getAllocInfo(arg, inst);
+			if (argInfo.hasReg()) {
+				if (argInfo.regId != destReg) {
+					intRegMoves.push_back(RegMove{argInfo.regId, destReg});
+				}
+			} else {
+				deferredIntLoads.push_back({arg, destReg});
+			}
+		}
+
+		{
+			std::set<int> blockedGprs;
+			for (int reg = RISCV64_A0_REG_NO; reg < RISCV64_A0_REG_NO + 8; ++reg) {
+				blockedGprs.insert(reg);
+			}
+			auto scratch = tempMgr.borrowExcluding(inst, blockedGprs);
+			emitGprRegMoves(intRegMoves, scratch.reg());
+		}
+
+		for (const auto & [arg, destReg] : deferredIntLoads) {
+			loadValueToReg(destReg, arg, inst);
+		}
+
+		for (int i = 0; i < call->getArgCount(); ++i) {
+			if (!variadicFloatArgs[i]) {
+				continue;
+			}
+
+			Value * arg = call->getArg(i);
+			const AbiArgLoc & loc = argLocs[i];
 			if (loc.kind == AbiArgLocKind::IntReg) {
-				loadValueToReg(RISCV64_A0_REG_NO + loc.index, arg, inst);
-			} else if (loc.kind == AbiArgLocKind::Stack) {
-				OperandReg value = loadOperand(arg, inst);
-				auto tmp = tempMgr.borrow(inst, value.reg);
-				iloc.store_base(value.reg, RISCV64_SP_REG_NO, loc.index * 8, tmp.reg(),
-				                arg->getType()->isPointerType());
-				releaseOperand(value);
+				emitVariadicFloatArg(arg, loc);
 			}
 		}
 	}
@@ -2438,6 +2477,45 @@ void InstSelectorRiscV64::emitFloatRegMoves(std::vector<FloatRegMove> & regMoves
 	}
 }
 
+void InstSelectorRiscV64::emitGprRegMoves(std::vector<RegMove> & regMoves, int scratchGpr)
+{
+	while (!regMoves.empty()) {
+		bool progressed = false;
+		for (auto it = regMoves.begin(); it != regMoves.end(); ++it) {
+			bool dstIsStillSource = false;
+			for (const auto & move : regMoves) {
+				if (move.src == it->dst) {
+					dstIsStillSource = true;
+					break;
+				}
+			}
+
+			if (dstIsStillSource) {
+				continue;
+			}
+
+			if (it->src != it->dst) {
+				iloc.mov_reg(it->dst, it->src);
+			}
+			regMoves.erase(it);
+			progressed = true;
+			break;
+		}
+
+		if (progressed) {
+			continue;
+		}
+
+		const int cycleSrc = regMoves.front().src;
+		iloc.mov_reg(scratchGpr, cycleSrc);
+		for (auto & move : regMoves) {
+			if (move.src == cycleSrc) {
+				move.src = scratchGpr;
+			}
+		}
+	}
+}
+
 /// @brief 生成形参从ABI寄存器到分配位置的移动指令
 ///
 /// RISC-V调用约定：整数和浮点参数使用独立的寄存器计数器。
@@ -2505,58 +2583,27 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 		}
 	}
 
-	// 解析寄存器移动依赖（含循环依赖的打破）
-	while (!regMoves.empty()) {
-		bool progressed = false;
-		for (auto it = regMoves.begin(); it != regMoves.end(); ++it) {
-			bool dstIsStillSource = false;
-			for (const auto & move : regMoves) {
-				if (move.src == it->dst) {
-					dstIsStillSource = true;
-					break;
-				}
-			}
-
-			if (dstIsStillSource) {
-				continue;
-			}
-
-			iloc.mov_reg(it->dst, it->src);
-			regMoves.erase(it);
-			progressed = true;
-			break;
-		}
-
-		if (progressed) {
-			continue;
-		}
-
-		const int cycleSrc = regMoves.front().src;
-		iloc.mov_reg(scratchReg, cycleSrc);
-		for (auto & move : regMoves) {
-			if (move.src == cycleSrc) {
-				move.src = scratchReg;
-			}
-		}
-	}
+	emitGprRegMoves(regMoves, scratchReg);
 
 	// 栈传整数参数在 a0-a7 全部落位后再搬运，避免覆盖尚未处理的入参寄存器。
 	for (std::size_t pi = 0; pi < params.size(); ++pi) {
 		auto * param = params[pi];
 		if (param->getType()->isFloatType() || paramLocs[pi].kind != AbiArgLocKind::Stack) {
 			continue;
-		}
-		RegAllocInfo info = getAllocInfoAt(param, 0);
-		const int stackOffset = paramLocs[pi].index * 8;
-		if (info.hasReg()) {
-			iloc.load_base(info.regId, RISCV64_FP_REG_NO, stackOffset, param->getType()->isPointerType());
-		} else if (info.hasStackSlot &&
-		           (info.baseRegId != RISCV64_FP_REG_NO || info.offset != stackOffset)) {
-			auto tmp = tempMgr.borrow(nullptr, info.regId);
-			iloc.load_base(tmp.reg(), RISCV64_FP_REG_NO, stackOffset, param->getType()->isPointerType());
-			iloc.store_base(tmp.reg(), info.baseRegId, info.offset, scratchReg,
-			                param->getType()->isPointerType());
-		}
+			}
+			RegAllocInfo info = getAllocInfoAt(param, 0);
+			const int stackOffset = paramLocs[pi].index * 8;
+			const int stackBaseReg = incomingStackBaseReg();
+			const int sourceOffset = incomingStackOffset(stackOffset);
+			if (info.hasReg()) {
+				iloc.load_base(info.regId, stackBaseReg, sourceOffset, param->getType()->isPointerType());
+			} else if (info.hasStackSlot &&
+			           (info.baseRegId != stackBaseReg || info.offset != sourceOffset)) {
+				auto tmp = tempMgr.borrow(nullptr, info.regId);
+				iloc.load_base(tmp.reg(), stackBaseReg, sourceOffset, param->getType()->isPointerType());
+				iloc.store_base(tmp.reg(), info.baseRegId, info.offset, scratchReg,
+				                param->getType()->isPointerType());
+			}
 	}
 
 	// 整数入参已经安全落位后，再处理浮点入参。
@@ -2597,20 +2644,32 @@ void InstSelectorRiscV64::emitFormalParamMoves()
 		auto * param = params[pi];
 		if (!param->getType()->isFloatType() || paramLocs[pi].kind != AbiArgLocKind::Stack) {
 			continue;
-		}
-		RegAllocInfo info = getAllocInfoAt(param, 0);
-		const int stackOffset = paramLocs[pi].index * 8;
-		if (info.hasFloatReg()) {
-			iloc.load_float_base(info.regId, RISCV64_FP_REG_NO, stackOffset, scratchReg);
-		} else if (info.hasReg()) {
-			iloc.load_base(info.regId, RISCV64_FP_REG_NO, stackOffset, false);
-		} else if (info.hasStackSlot &&
-		           (info.baseRegId != RISCV64_FP_REG_NO || info.offset != stackOffset)) {
-			auto tmp = tempMgr.borrow(nullptr);
-			iloc.load_base(tmp.reg(), RISCV64_FP_REG_NO, stackOffset, false);
-			iloc.store_base(tmp.reg(), info.baseRegId, info.offset, scratchReg, false);
+			}
+			RegAllocInfo info = getAllocInfoAt(param, 0);
+			const int stackOffset = paramLocs[pi].index * 8;
+			const int stackBaseReg = incomingStackBaseReg();
+			const int sourceOffset = incomingStackOffset(stackOffset);
+			if (info.hasFloatReg()) {
+				iloc.load_float_base(info.regId, stackBaseReg, sourceOffset, scratchReg);
+			} else if (info.hasReg()) {
+				iloc.load_base(info.regId, stackBaseReg, sourceOffset, false);
+			} else if (info.hasStackSlot &&
+			           (info.baseRegId != stackBaseReg || info.offset != sourceOffset)) {
+				auto tmp = tempMgr.borrow(nullptr);
+				iloc.load_base(tmp.reg(), stackBaseReg, sourceOffset, false);
+				iloc.store_base(tmp.reg(), info.baseRegId, info.offset, scratchReg, false);
+			}
 		}
 	}
+
+int InstSelectorRiscV64::incomingStackBaseReg() const
+{
+	return iloc.usesFramePointer() ? RISCV64_FP_REG_NO : RISCV64_SP_REG_NO;
+}
+
+int InstSelectorRiscV64::incomingStackOffset(int abiOffset) const
+{
+	return iloc.usesFramePointer() ? abiOffset : allocator.getFrameSize() + abiOffset;
 }
 
 /// @brief 生成函数epilogue

@@ -81,6 +81,7 @@ void GreedyRegAllocator::allocate(Function * func)
 	stats = RegAllocStats{};
 	intervalToIndex.clear();
 	callInstNumbers.clear();
+	liveAcrossCallPositions.clear();
 	instNumbering.clear();
 	valueLiveRanges.clear();
 	frameSize = 0;
@@ -117,6 +118,7 @@ void GreedyRegAllocator::allocate(Function * func)
 	LiveIntervalAnalysis analysis(func, &loopInfo);
 	analysis.run();
 	instNumbering = analysis.getInstNumbering();
+	liveAcrossCallPositions = analysis.getLiveAcrossCallPositions();
 	for (auto & [inst, num] : instNumbering) {
 		if (dynamic_cast<CallInst *>(inst) != nullptr) {
 			callInstNumbers.push_back(num);
@@ -139,6 +141,7 @@ void GreedyRegAllocator::allocate(Function * func)
 	}
 	if (coalescer_) {
 		coalescer_->run(intervals, ig, func, valueToInterval, instNumbering);
+		refreshCoalescedLiveAcrossCallPositions();
 	}
 
 	// 运行Greedy分配主循环
@@ -417,7 +420,7 @@ bool GreedyRegAllocator::tryAssignFreeReg(LiveInterval * interval,
 	// 获取当前区间所有干涉邻居已占用的寄存器集合
 	const RegisterClass wantedClass = registerClassFor(interval);
 	std::set<int> usedRegs = getInterferingRegsForClass(node, intervals, graph, wantedClass);
-	for (int reg: registerPoolFor(interval)) {
+	for (int reg: orderedRegisterPoolFor(interval)) {
 		if (!canAssignReg(interval, reg)) {
 			continue;
 		}
@@ -454,7 +457,7 @@ bool GreedyRegAllocator::tryEvictAndAssign(LiveInterval * interval,
 	}
 
 	const RegisterClass wantedClass = registerClassFor(interval);
-	for (int reg: registerPoolFor(interval)) {
+	for (int reg: orderedRegisterPoolFor(interval)) {
 		if (!canAssignReg(interval, reg)) {
 			continue;
 		}
@@ -637,6 +640,36 @@ const std::vector<int> & GreedyRegAllocator::registerPoolFor(LiveInterval * inte
 	}
 }
 
+std::vector<int> GreedyRegAllocator::orderedRegisterPoolFor(LiveInterval * interval) const
+{
+	const auto & pool = registerPoolFor(interval);
+	if (registerClassFor(interval) != RegisterClass::Gpr || pool.empty()) {
+		return pool;
+	}
+
+	std::vector<int> ordered;
+	ordered.reserve(pool.size());
+	const bool crossesCall = intervalCrossesCall(interval);
+
+	auto appendMatching = [&](bool wantCallerSaved) {
+		for (int reg : pool) {
+			if (isCallerSavedReg(reg) == wantCallerSaved) {
+				ordered.push_back(reg);
+			}
+		}
+	};
+
+	if (crossesCall) {
+		appendMatching(false);
+		appendMatching(true);
+	} else {
+		appendMatching(true);
+		appendMatching(false);
+	}
+
+	return ordered;
+}
+
 /// @brief 收集同寄存器文件内的干涉寄存器。
 ///
 /// GPR、FPR和VR都用0-31编号，编号相同不代表同一个物理资源，因此干涉集合必须按类别过滤。
@@ -696,25 +729,22 @@ static bool sameRegAllocInfo(const RegAllocInfo & lhs, const RegAllocInfo & rhs)
 	       lhs.isVectorReg == rhs.isVectorReg;
 }
 
-/// @brief 判断活跃区间是否覆盖任一函数调用点
+/// @brief 判断活跃区间是否在调用返回后仍需保持值
 /// @param interval 活跃区间
 /// @return 是否在调用点需要保持值
 bool GreedyRegAllocator::intervalCrossesCall(LiveInterval * interval) const
 {
-	if (interval == nullptr || callInstNumbers.empty()) {
+	if (interval == nullptr || liveAcrossCallPositions.empty()) {
 		return false;
 	}
 
 	Value * vreg = interval->getVReg();
-	for (int callNum : callInstNumbers) {
-		// call指令自身的返回值定义在调用完成之后，不与该调用的clobber冲突。
-		if (auto * inst = dynamic_cast<Instruction *>(vreg); inst != nullptr) {
-			auto it = instNumbering.find(inst);
-			if (it != instNumbering.end() && it->second == callNum && dynamic_cast<CallInst *>(inst) != nullptr) {
-				continue;
-			}
-		}
+	auto it = liveAcrossCallPositions.find(vreg);
+	if (it == liveAcrossCallPositions.end()) {
+		return false;
+	}
 
+	for (int callNum : it->second) {
 		for (const auto & seg : interval->getSegments()) {
 			if (seg.start <= callNum && callNum < seg.end) {
 				return true;
@@ -723,6 +753,26 @@ bool GreedyRegAllocator::intervalCrossesCall(LiveInterval * interval) const
 	}
 
 	return false;
+}
+
+void GreedyRegAllocator::refreshCoalescedLiveAcrossCallPositions()
+{
+	if (!coalescer_ || liveAcrossCallPositions.empty()) {
+		return;
+	}
+
+	std::vector<std::pair<Value *, std::unordered_set<int>>> updates;
+	for (const auto & [value, positions] : liveAcrossCallPositions) {
+		Value * representative = getCoalescedRepresentative(value);
+		if (representative != nullptr && representative != value) {
+			updates.push_back({representative, positions});
+		}
+	}
+
+	for (const auto & [representative, positions] : updates) {
+		auto & destination = liveAcrossCallPositions[representative];
+		destination.insert(positions.begin(), positions.end());
+	}
 }
 
 /// @brief 判断某物理寄存器能否分配给指定活跃区间
@@ -868,10 +918,18 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 		});
 
 		bool hasSpilledSegment = false;
+		bool hasLocationChange = false;
+		bool hasBaselineLocation = false;
+		RegAllocInfo baselineLocation;
 		for (const auto & segment : segments) {
 			if (!segment.info.hasAnyReg()) {
 				hasSpilledSegment = true;
-				break;
+			}
+			if (!hasBaselineLocation) {
+				baselineLocation = segment.info;
+				hasBaselineLocation = true;
+			} else if (!sameRegAllocInfo(baselineLocation, segment.info)) {
+				hasLocationChange = true;
 			}
 		}
 
@@ -892,7 +950,11 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 				needsTransferStackSlot = true;
 			}
 		}
-		if (needsTransferStackSlot) {
+		if (needsTransferStackSlot || hasLocationChange) {
+			// Split copies are only inserted at linear adjacent boundaries. If the
+			// same Value has different locations across CFG-separated segments
+			// (including partial spill), use one canonical stack slot so every
+			// definition and use sees the same storage.
 			allocationMap[value] = RegAllocInfo{};
 			splitStackValues.insert(value);
 			spilledValues.insert(value);
