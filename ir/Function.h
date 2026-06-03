@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,8 @@
 #include "FunctionType.h"
 #include "GlobalValue.h"
 #include "LocalVariable.h"
+
+class AnalysisCache;
 
 class Function : public GlobalValue {
 
@@ -86,6 +89,12 @@ public:
     /// @brief 重新为函数中的 IR 值命名
     void renameIR();
 
+    /// @brief 获取函数级 analysis 结果缓存
+    AnalysisCache & getAnalysisCache()
+    {
+        return *analysisCache;
+    }
+
 private:
     Type * returnType = nullptr;
     std::vector<FormalParam *> params;
@@ -95,4 +104,5 @@ private:
     std::vector<Value *> detachedValues;
     BasicBlock * entryBlock = nullptr;
     std::vector<BasicBlock *> blocks;
+    std::unique_ptr<AnalysisCache> analysisCache;
 };

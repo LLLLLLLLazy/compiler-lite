@@ -30,6 +30,7 @@
 #include "ScalarEvolution.h"
 #include "StoreInst.h"
 #include "Value.h"
+#include "AnalysisCache.h"
 
 namespace {
 
@@ -914,11 +915,15 @@ bool LoopTiling::run()
     }
 
     // 优先尝试折叠重复不变调用循环（将多次相同调用折叠为一次）
+    auto & cache = func->getAnalysisCache();
     {
-        DominatorTree domTree(func);
-        LoopInfo loopInfo(func, &domTree);
-        ScalarEvolution scev(func, &domTree, &loopInfo);
+        auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+        auto & loopInfo =
+            cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
+        auto & scev = cache.getOrCompute<ScalarEvolution>(
+            [this, &domTree, &loopInfo] { return ScalarEvolution(func, &domTree, &loopInfo); });
         if (collapseRepeatedInvariantCallLoop(func, mod, loopInfo, scev)) {
+            cache.invalidateCFGAnalyses();
             return true;
         }
     }
@@ -926,9 +931,11 @@ bool LoopTiling::run()
     bool changed = false;
     while (true) {
         bool localChanged = false;
-        DominatorTree domTree(func);
-        LoopInfo loopInfo(func, &domTree);
-        ScalarEvolution scev(func, &domTree, &loopInfo);
+        auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+        auto & loopInfo =
+            cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
+        auto & scev = cache.getOrCompute<ScalarEvolution>(
+            [this, &domTree, &loopInfo] { return ScalarEvolution(func, &domTree, &loopInfo); });
 
         std::vector<BasicBlock *> headers;
         for (auto * bb : func->getBlocks()) {
@@ -954,6 +961,8 @@ bool LoopTiling::run()
         if (!localChanged) {
             break;
         }
+        // 分块新建了多组循环控制基本块，CFG 派生分析整体失效
+        cache.invalidateCFGAnalyses();
     }
 
     return changed;

@@ -25,6 +25,7 @@
 #include "FCmpInst.h"
 #include "FormalParam.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "ICmpInst.h"
@@ -602,5 +603,10 @@ bool GVN::run()
     }
 
     DominatorGVN executor(func, mod);
-    return executor.run();
+    bool changed = executor.run();
+    if (changed) {
+        // GVN 改写值定义但不改 CFG，仅使值相关分析失效
+        func->getAnalysisCache().invalidateValueAnalyses();
+    }
+    return changed;
 }

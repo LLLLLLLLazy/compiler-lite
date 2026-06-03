@@ -28,6 +28,7 @@
 #include "Value.h"
 #include "Types/ArrayType.h"
 #include "Types/PointerType.h"
+#include "AnalysisCache.h"
 
 namespace {
 
@@ -379,10 +380,12 @@ bool LoopStrengthReduce::run()
     }
 
     bool changed = false;
+    auto & cache = func->getAnalysisCache();
     while (true) {
         bool localChanged = false;
-        DominatorTree domTree(func);
-        LoopInfo loopInfo(func, &domTree);
+        auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+        auto & loopInfo =
+            cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
         std::vector<BasicBlock *> headers;
         for (auto * bb : func->getBlocks()) {
             if (loopInfo.isLoopHeader(bb)) {
@@ -407,9 +410,15 @@ bool LoopStrengthReduce::run()
         if (!localChanged) {
             break;
         }
+        // 强度削减仅新增/改写指令而不改动 CFG，因此只失效依赖具体指令的标量演化
+        cache.invalidateValueAnalyses();
     }
 
-    return sweepDeadInstructions() || changed;
+    bool swept = sweepDeadInstructions();
+    if (swept) {
+        cache.invalidateValueAnalyses();
+    }
+    return swept || changed;
 }
 
 bool LoopStrengthReduce::tryReduceHeader(BasicBlock * header)
@@ -418,9 +427,12 @@ bool LoopStrengthReduce::tryReduceHeader(BasicBlock * header)
         return false;
     }
 
-    DominatorTree domTree(func);
-    LoopInfo loopInfo(func, &domTree);
-    ScalarEvolution scev(func, &domTree, &loopInfo);
+    auto & cache = func->getAnalysisCache();
+    auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+    auto & loopInfo =
+        cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
+    auto & scev = cache.getOrCompute<ScalarEvolution>(
+        [this, &domTree, &loopInfo] { return ScalarEvolution(func, &domTree, &loopInfo); });
     const auto * bodyPtr = loopInfo.getLoopBody(header);
     if (!bodyPtr || bodyPtr->empty()) {
         return false;

@@ -18,6 +18,7 @@
 #include "CopyInst.h"
 #include "FPToSIInst.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "GetElementPtrInst.h"
 #include "Instruction.h"
 #include "IntegerType.h"
@@ -170,6 +171,10 @@ bool InstCombine::run()
         }
     } while (localChanged);
 
+    if (changed) {
+        // 指令化简改写值但不改 CFG，仅使值相关分析失效
+        func->getAnalysisCache().invalidateValueAnalyses();
+    }
     return changed;
 }
 

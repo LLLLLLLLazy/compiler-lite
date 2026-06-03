@@ -23,6 +23,7 @@
 #include "FCmpInst.h"
 #include "FPToSIInst.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "GlobalVariable.h"
 #include "ICmpInst.h"
 #include "Instruction.h"
@@ -1077,5 +1078,10 @@ bool ConstProp::run()
 
     bool changed = sanitizeCFGState(func);
     SCCPSolver solver(func, mod);
-    return solver.run() || changed;
+    changed = solver.run() || changed;
+    if (changed) {
+        // 常量传播会删除不可达分支，CFG 派生分析整体失效
+        func->getAnalysisCache().invalidateCFGAnalyses();
+    }
+    return changed;
 }

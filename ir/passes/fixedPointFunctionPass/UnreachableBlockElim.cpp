@@ -11,6 +11,7 @@
 
 #include "BasicBlock.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "Instruction.h"
 #include "PhiInst.h"
 #include "toolPass/CFGStateCleanup.h"
@@ -55,6 +56,9 @@ bool UnreachableBlockElim::run()
 
     BasicBlock * entry = func->getEntryBlock();
     if (!entry) {
+        if (changed) {
+            func->getAnalysisCache().invalidateCFGAnalyses();
+        }
         return changed;
     }
 
@@ -84,6 +88,9 @@ bool UnreachableBlockElim::run()
     }
 
     if (deadBlocks.empty()) {
+        if (changed) {
+            func->getAnalysisCache().invalidateCFGAnalyses();
+        }
         return changed;
     }
 
@@ -122,5 +129,7 @@ bool UnreachableBlockElim::run()
         delete deadBB;
     }
 
+    // 删除不可达基本块，CFG 派生分析整体失效
+    func->getAnalysisCache().invalidateCFGAnalyses();
     return true;
 }
