@@ -35,6 +35,7 @@
 #include "User.h"
 #include "Value.h"
 #include "VectorInst.h"
+#include "AnalysisCache.h"
 #include "Types/VectorType.h"
 
 namespace {
@@ -557,9 +558,12 @@ bool LoopVectorize::run()
     }
 
     bool changed = false;
-    DominatorTree domTree(func);
-    LoopInfo loopInfo(func, &domTree);
-    ScalarEvolution scev(func, &domTree, &loopInfo);
+    auto & cache = func->getAnalysisCache();
+    auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+    auto & loopInfo =
+        cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
+    auto & scev = cache.getOrCompute<ScalarEvolution>(
+        [this, &domTree, &loopInfo] { return ScalarEvolution(func, &domTree, &loopInfo); });
 
     std::vector<BasicBlock *> headers;
     for (auto * bb : func->getBlocks()) {
@@ -579,6 +583,11 @@ bool LoopVectorize::run()
         }
     }
 
+    if (changed) {
+        // 向量化改写了循环体/剩余控制流，CFG 派生分析整体失效
+        cache.invalidateCFGAnalyses();
+    }
+
     return changed;
 }
 
@@ -592,8 +601,10 @@ bool LoopVectorize::tryVectorizeHeader(BasicBlock * header, ScalarEvolution & sc
         return false;
     }
 
-    DominatorTree domTree(func);
-    LoopInfo loopInfo(func, &domTree);
+    auto & cache = func->getAnalysisCache();
+    auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+    auto & loopInfo =
+        cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
     const auto * loopBodyPtr = loopInfo.getLoopBody(header);
     // 当前 pass 只处理 header+单 body/latch 的最小循环，避免复杂 CFG 下错误迁移指令。
     if (!loopBodyPtr || loopBodyPtr->size() != 2 || loopAlreadyVectorized(*loopBodyPtr)) {

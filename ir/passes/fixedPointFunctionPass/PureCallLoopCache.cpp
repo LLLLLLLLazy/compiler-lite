@@ -36,6 +36,7 @@
 #include "DominatorTree.h"
 #include "FunctionSideEffectAnalysis.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "Instruction.h"
@@ -455,8 +456,10 @@ bool PureCallLoopCache::run()
         return false;
     }
 
-    DominatorTree domTree(func);
-    LoopInfo loopInfo(func, &domTree);
+    auto & cache = func->getAnalysisCache();
+    auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+    auto & loopInfo =
+        cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
     PurityAnalyzer purity(mod);
 
     std::vector<BasicBlock *> headers;
@@ -494,6 +497,8 @@ bool PureCallLoopCache::run()
             }
 
             if (cacheCallInLoop(func, mod, header, *loopBody, pred, call)) {
+                // 插入了 check/reuse/cont 等控制基本块，CFG 派生分析整体失效
+                cache.invalidateCFGAnalyses();
                 return true;
             }
         }

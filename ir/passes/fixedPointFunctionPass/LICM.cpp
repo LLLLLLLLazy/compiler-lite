@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "AllocaInst.h"
+#include "AnalysisCache.h"
 #include "BasicBlock.h"
 #include "BranchInst.h"
 #include "CallInst.h"
@@ -217,9 +218,11 @@ bool LICM::run()
 
     bool changed = false;
 
+    auto & cache = func->getAnalysisCache();
     while (true) {
-        DominatorTree domTree(func);
-        LoopInfo loopInfo(func, &domTree);
+        auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+        auto & loopInfo =
+            cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
 
         std::vector<BasicBlock *> headers;
         for (auto * bb : func->getBlocks()) {
@@ -251,6 +254,8 @@ bool LICM::run()
         if (!localChanged) {
             break;
         }
+        // 本轮外提改动了 preheader/CFG，使所有 CFG 派生分析失效以便下轮重算
+        cache.invalidateCFGAnalyses();
     }
 
     return changed;
