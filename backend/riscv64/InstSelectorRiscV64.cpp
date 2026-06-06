@@ -869,6 +869,45 @@ void InstSelectorRiscV64::translate_store(Instruction * inst)
 		return;
 	}
 
+	// 检测存储常量0：直接使用zero寄存器，避免li x,0的冗余物化
+	auto * constZero = asConstInteger(storeInst->getValueOperand());
+	if (constZero != nullptr && constZero->getVal() == 0) {
+		Value * ptrOp = storeInst->getPointerOperand();
+		const bool wide = storeInst->getValueOperand()->getType()->isPointerType();
+		const char * storeOp = wide ? "sd" : "sw";
+
+		if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
+			RegAllocInfo ptrInfo = getAllocInfo(ptrOp, inst);
+			if (dynamic_cast<GlobalVariable *>(ptrOp) == nullptr && ptrInfo.hasStackSlot) {
+				if (PlatformRiscV64::isDisp(ptrInfo.offset)) {
+					// 栈槽 + 12位偏移：sw zero, offset(fp)
+					std::string mem = std::to_string(ptrInfo.offset) + "(" +
+					                  PlatformRiscV64::regName[ptrInfo.baseRegId] + ")";
+					iloc.inst(storeOp, "zero", mem);
+				} else {
+					// 栈槽 + 大偏移：先计算地址再存
+					auto tmp = tempMgr.borrowAfterUses(inst);
+					iloc.load_imm(tmp.reg(), ptrInfo.offset);
+					iloc.inst("add", PlatformRiscV64::regName[tmp.reg()],
+					          PlatformRiscV64::regName[ptrInfo.baseRegId],
+					          PlatformRiscV64::regName[tmp.reg()]);
+					iloc.inst(storeOp, "zero", "0(" + PlatformRiscV64::regName[tmp.reg()] + ")");
+				}
+			} else {
+				// 全局变量或无栈槽：通过load_symbol计算地址
+				auto tmp = tempMgr.borrowAfterUses(inst);
+				iloc.load_symbol(tmp.reg(), ptrOp->getName());
+				iloc.inst(storeOp, "zero", "0(" + PlatformRiscV64::regName[tmp.reg()] + ")");
+			}
+		} else {
+			// 计算地址：sw zero, 0(ptr)
+			OperandReg ptr = loadOperand(ptrOp, inst);
+			iloc.inst(storeOp, "zero", "0(" + PlatformRiscV64::regName[ptr.reg] + ")");
+			releaseOperand(ptr);
+		}
+		return;
+	}
+
 	OperandReg value = loadOperand(storeInst->getValueOperand(), inst);
 	Value * ptrOp = storeInst->getPointerOperand();
 	if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
