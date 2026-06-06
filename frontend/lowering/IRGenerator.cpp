@@ -85,7 +85,7 @@ Type * getArrayScalarType(Type * type)
     return type;
 }
 
-constexpr std::size_t kFlatZeroInitThreshold = 256;
+constexpr std::size_t kFlatZeroInitThreshold = 4;
 
 std::vector<int32_t> packStringLiteralWords(const std::string & text)
 {
@@ -1276,6 +1276,16 @@ bool IRGenerator::emitArrayInitializer(
         }
 
         if (cursor >= end) {
+            std::size_t remainingElements = static_cast<std::size_t>(arrayType->getNumElements()) - static_cast<std::size_t>(i);
+            std::size_t remainingSlots = remainingElements * subScalarCount;
+            if (remainingSlots >= kFlatZeroInitThreshold) {
+                Type * subArrayType = ArrayType::get(elemType, static_cast<int32_t>(remainingElements));
+                auto * subArrayPtrType = const_cast<PointerType *>(PointerType::get(subArrayType));
+                auto * subArrayAddr = new GetElementPtrInst(
+                    currentFunction(), addr, module->newConstInt32(i), subArrayPtrType, true);
+                emitToBlock(subArrayAddr);
+                return emitZeroInitializer(subArrayAddr, subArrayType);
+            }
             if (!emitZeroInitializer(elemAddr, elemType)) {
                 return false;
             }
@@ -1391,6 +1401,9 @@ bool IRGenerator::emitInitializer(Value * addr, Type * type, ast_node * initNode
         }
 
         if (initNode->node_type == ast_operator_type::AST_OP_INIT_LIST) {
+            if (initNode->sons.empty()) {
+                return emitZeroInitializer(addr, type);
+            }
             return emitArrayInitializer(addr, type, initNode->sons, 0, initNode->sons.size());
         }
 
