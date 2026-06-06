@@ -16,7 +16,7 @@ CLANG_BIN=${CLANG_BIN:-"clang"}
 FRONTEND=${MINIC_FRONTEND:-"antlr"}
 TEST_MODE=${MINIC_RISCV64_TEST_MODE:-"asm"}
 RISCV64_TIMEOUT=${MINIC_RISCV64_TIMEOUT:-30}
-MINIC_RISCV64_RVV=${MINIC_RISCV64_RVV:-"on"}
+MINIC_RISCV64_RVV=${MINIC_RISCV64_RVV:-"off"}
 QEMU_RISCV64_ARGS=${QEMU_RISCV64_ARGS:-""}
 
 # QEMU 会解析 QEMU_* 环境变量；避免 QEMU_VERSION 触发 -version 输出污染测试 stdout。
@@ -74,7 +74,7 @@ Environment:
   MINIC_RISCV64_TEST_MODE=assemble  Generate RISCV64 asm and assemble only
   MINIC_RISCV64_TIMEOUT=30          Per-step timeout passed to timeout(1)
   MINIC_RISCV64_PARALLEL=N          Number of parallel jobs (default: nproc or 4)
-  MINIC_RISCV64_RVV=on|off          Pass --riscv64-rvv to minic (default: on)
+  MINIC_RISCV64_RVV=on|off          Pass --riscv64-rvv to minic (default: off)
   QEMU_RISCV64_CPU=rv64,v=true      Preferred qemu -cpu value
   QEMU_RISCV64_ARGS="..."           Extra qemu args, e.g. -cpu rv64,v=true
   RISCV64_GCC_BIN=riscv64-linux-gnu-gcc
