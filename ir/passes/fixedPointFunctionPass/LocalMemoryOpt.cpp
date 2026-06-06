@@ -13,6 +13,7 @@
 #include "BasicBlock.h"
 #include "DominatorTree.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "Instruction.h"
 #include "LocalMemoryAnalysis.h"
 #include "LoadInst.h"
@@ -927,5 +928,10 @@ bool LocalMemoryOpt::run()
     changed = runAvailableValueOptimizations(func, rpo, reachableBlocks, trackableAllocas) || changed;
     changed = eliminateDeadStores(func, rpo, reachableBlocks, trackableAllocas) || changed;
 
-    return sweepDeadInstructions() || changed;
+    changed = sweepDeadInstructions() || changed;
+    if (changed) {
+        // 内存优化改写 load/store 等值但不改 CFG，仅使值相关分析失效
+        func->getAnalysisCache().invalidateValueAnalyses();
+    }
+    return changed;
 }

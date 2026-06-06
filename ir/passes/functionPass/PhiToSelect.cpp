@@ -17,6 +17,7 @@
 #include "ConstInteger.h"
 #include "DominatorTree.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "Instruction.h"
 #include "PhiInst.h"
 #include "SelectInst.h"
@@ -812,5 +813,9 @@ bool PhiToSelect::run()
         changed = changed || localChanged;
     } while (localChanged);
 
+    if (changed) {
+        // phi 转 select 会折叠基本块，CFG 派生分析整体失效
+        func->getAnalysisCache().invalidateCFGAnalyses();
+    }
     return changed;
 }

@@ -16,6 +16,7 @@
 #include "BranchInst.h"
 #include "CondBranchInst.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "Instruction.h"
 #include "PostDominatorTree.h"
 #include "PhiInst.h"
@@ -369,6 +370,7 @@ bool DeadInstElim::run()
     }
 
     bool changed = sanitizeCFGState(func);
+    bool cfgChanged = changed;
 
     PostDominatorTree postDomTree(func);
 
@@ -388,8 +390,19 @@ bool DeadInstElim::run()
 
     if (rewriteDeadConditionalBranches(state) > 0) {
         changed = true;
+        cfgChanged = true;
         changed = sanitizeCFGState(func) || changed;
     }
 
-    return sweepDeadInstructions(func, state.liveInstructions) > 0 || changed;
+    bool swept = sweepDeadInstructions(func, state.liveInstructions) > 0;
+    changed = swept || changed;
+    auto & cache = func->getAnalysisCache();
+    if (cfgChanged) {
+        // 改写了死分支或清理了 CFG，CFG 派生分析整体失效
+        cache.invalidateCFGAnalyses();
+    } else if (swept) {
+        // 仅删除死指令，使引用指令的值分析失效
+        cache.invalidateValueAnalyses();
+    }
+    return changed;
 }

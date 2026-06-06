@@ -28,6 +28,7 @@
 #include "FCmpInst.h"
 #include "FormalParam.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "ICmpInst.h"
@@ -457,6 +458,8 @@ bool PureCallCSE::run()
 
     if (changed) {
         sweepDeadInstructions(func);
+        // 纯调用 CSE 删除冗余调用但不改 CFG，仅使值相关分析失效
+        func->getAnalysisCache().invalidateValueAnalyses();
     }
 
     return changed;

@@ -46,10 +46,10 @@ constDecl: constDeclNoSemi T_SEMICOLON;
 // 变量声明，支持变量定义时初始化
 varDecl: varDeclNoSemi T_SEMICOLON;
 
-// 不带分号的常量声明，用于普通声明与 for 初始化子句
+// 不带分号的常量声明，用于普通声明与扩展语法初始化子句
 constDeclNoSemi: T_STATIC? T_CONST basicType constDef (T_COMMA constDef)*;
 
-// 不带分号的变量声明，用于普通声明与 for 初始化子句
+// 不带分号的变量声明，用于普通声明与扩展语法初始化子句
 varDeclNoSemi: T_STATIC? basicType varDef (T_COMMA varDef)*;
 
 // 常量定义
@@ -93,10 +93,10 @@ unmatchedStatement:
 	| T_WHILE T_L_PAREN cond T_R_PAREN unmatchedStatement # whileUnmatchedStatement
 	| T_FOR T_L_PAREN forInit? T_SEMICOLON cond? T_SEMICOLON forStep? T_R_PAREN unmatchedStatement # forUnmatchedStatement;
 
-// for 初始化子句，允许声明、赋值或普通表达式
+// 扩展语法：for 初始化子句，允许声明、赋值或普通表达式，仅在 -e 时生效
 forInit: constDeclNoSemi | varDeclNoSemi | lVal T_ASSIGN expr | expr;
 
-// for 步进子句，允许赋值或普通表达式
+// 扩展语法：for 步进子句，允许赋值或普通表达式，仅在 -e 时生效
 forStep: lVal T_ASSIGN expr | expr;
 
 // 普通表达式文法 Exp : LOrExp

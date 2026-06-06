@@ -20,6 +20,7 @@
 #include "BranchInst.h"
 #include "CondBranchInst.h"
 #include "Function.h"
+#include "AnalysisCache.h"
 #include "Instruction.h"
 #include "PhiInst.h"
 #include "Value.h"
@@ -267,6 +268,10 @@ bool CFGSimplify::run()
         }
     } while (localChanged);
 
+    if (changed) {
+        // CFG 化简增删基本块，CFG 派生分析整体失效
+        func->getAnalysisCache().invalidateCFGAnalyses();
+    }
     return changed;
 }
 

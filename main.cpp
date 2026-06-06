@@ -113,9 +113,9 @@ static bool gRASplit = true;
 static std::string gRAStatsJsonFile;
 
 ///
-/// @brief RISC-V64 RVV 支持，默认开启；可用 --riscv64-rvv=off 手动关闭
+/// @brief RISC-V64 RVV 支持
 ///
-static bool gRiscV64RVV = true;
+static bool gRiscV64RVV = false;
 
 ///
 /// @brief 启用竞赛扩展文法
@@ -168,7 +168,7 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  -T, --ast                  Output abstract syntax tree\n";
 	std::cout << "  -I, --ir                   Output structured IR\n";
 	std::cout << "  -L, --llvmir               Output LLVM IR (.ll)\n";
-	std::cout << "  -e, --extended-grammar     Enable extended grammar: Exp -> LOrExp, Cond -> Exp\n";
+	std::cout << "  -e, --extended-grammar     Enable extended grammar\n";
 	std::cout << "  -A, --antlr4               Deprecated, now always use Antlr4\n";
 	std::cout << "  -D, --recursive-descent    Deprecated, now always use Antlr4\n";
 	std::cout << "  -O, --optimize=LEVEL       Set optimization level (0: off, 1: on)\n";
@@ -182,7 +182,7 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  --ra-no-coalesce           Disable register coalescing\n";
 	std::cout << "  --ra-no-split              Disable live interval splitting\n";
 	std::cout << "  --ra-stats-json=FILE       Write machine-readable register allocation metrics\n";
-	std::cout << "  --riscv64-rvv=on|off       Enable or disable RVV codegen (default: on)\n";
+	std::cout << "  --riscv64-rvv=on|off       Enable or disable RVV codegen\n";
 }
 
 /// @brief 参数解析与有效性检查
@@ -230,7 +230,7 @@ lb_check:
 				gShowLLVMIR = true;
 				break;
 			case 'e':
-				// 启用竞赛扩展文法
+				// 启用扩展文法
 				gExtendedGrammar = true;
 				break;
 			case 'A':

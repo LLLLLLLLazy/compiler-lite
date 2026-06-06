@@ -82,10 +82,10 @@ jobs:
         run: QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-float-regression.sh
 
       - name: Run for-loop RISCV64 asm regression tests
-        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-tests.sh for_loop
+        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 MINIC_TEST_EXTRA_ARGS="-e" QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-tests.sh for_loop
 
       - name: Run static RISCV64 asm regression tests
-        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-tests.sh static_test
+        run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=60 MINIC_TEST_EXTRA_ARGS="-e" QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-tests.sh static_test
 
       - name: Run 2023 LLVM IR full test suite
         run: MINIC_TEST_MODE=llvmir MINIC_TEST_TIMEOUT=60 bash ./tools/run-local-tests.sh 2023

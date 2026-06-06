@@ -33,6 +33,7 @@
 #include "SIToFPInst.h"
 #include "StoreInst.h"
 #include "Value.h"
+#include "AnalysisCache.h"
 #include "ZExtInst.h"
 
 namespace {
@@ -88,11 +89,14 @@ bool SimpleLoopUnroll::run()
     }
 
     bool changed = false;
+    auto & cache = func->getAnalysisCache();
     while (true) {
         bool localChanged = false;
-        DominatorTree domTree(func);
-        LoopInfo loopInfo(func, &domTree);
-        ScalarEvolution scev(func, &domTree, &loopInfo);
+        auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+        auto & loopInfo =
+            cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
+        auto & scev = cache.getOrCompute<ScalarEvolution>(
+            [this, &domTree, &loopInfo] { return ScalarEvolution(func, &domTree, &loopInfo); });
         std::vector<BasicBlock *> blocks = func->getBlocks();
         for (auto * bb : blocks) {
             if (tryUnrollHeader(bb, scev)) {
@@ -104,6 +108,8 @@ bool SimpleLoopUnroll::run()
         if (!localChanged) {
             break;
         }
+        // 展开复制了循环体基本块，CFG 派生分析整体失效
+        cache.invalidateCFGAnalyses();
     }
 
     return changed;

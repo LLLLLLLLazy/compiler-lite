@@ -19,6 +19,7 @@
 #include "Module.h"
 #include "PhiInst.h"
 #include "Value.h"
+#include "AnalysisCache.h"
 
 CanonicalizeLoop::CanonicalizeLoop(Function * _func, Module * /*_mod*/) : func(_func)
 {}
@@ -30,9 +31,11 @@ bool CanonicalizeLoop::run()
     }
 
     bool changed = false;
+    auto & cache = func->getAnalysisCache();
     while (true) {
-        DominatorTree domTree(func);
-        LoopInfo loopInfo(func, &domTree);
+        auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+        auto & loopInfo =
+            cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
 
         std::vector<BasicBlock *> headers;
         for (auto * bb : func->getBlocks()) {
@@ -64,6 +67,8 @@ bool CanonicalizeLoop::run()
         if (!localChanged) {
             break;
         }
+        // 规范化新建了 preheader/latch 等基本块，CFG 派生分析整体失效
+        cache.invalidateCFGAnalyses();
     }
 
     return changed;
