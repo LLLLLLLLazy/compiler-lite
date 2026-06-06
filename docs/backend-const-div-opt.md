@@ -185,7 +185,7 @@ flowchart TD
         IncP --> UpdateQ1("更新q1, r1<br>q1 <<= 1, r1 <<= 1<br>if r1 >= anc: q1++, r1 -= anc")
         UpdateQ1 --> UpdateQ2("更新q2, r2<br>q2 <<= 1, r2 <<= 1<br>if r2 >= absDivisor: q2++, r2 -= absDivisor")
         UpdateQ2 --> CalcDelta("delta = absDivisor - r2")
-        CalcDelta --> Converge{{"q1 < delta<br>|| (q1 == delta && r1 != 0)?"}}
+        CalcDelta --> Converge{{"q1 > delta<br>|| (q1 == delta && r1 != 0)?"}}
         Converge -- "No" --> IncP
     end
 

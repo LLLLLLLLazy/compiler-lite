@@ -8,7 +8,7 @@ a0-a7 是"可分配的 caller-saved 寄存器"。平时参与全局寄存器分�
 
 栈帧方面只有 `sp` (x2) 是真实栈指针；后端另固定使用 `s0/fp` (x8) 作为帧指针。`sp` 在 prologue/epilogue 中移动，`s0` 建好后通常保持不变，用于稳定访问形参栈槽、局部变量和 spill。
 
-**源码位置**: `backend/riscv64/PlatformRiscV64.h:13-14`
+**源码位置**: `backend/riscv64/PlatformRiscV64.h:15-16`
 
 ```cpp
 #define RISCV64_SP_REG_NO 2
@@ -57,7 +57,7 @@ std::vector<int> GreedyRegAllocator::buildRegisterPool(Function * func) const
 
 a0-a7 是 caller-saved，函数调用会破坏它们。分配器通过 `canAssignReg` 约束保证正确性。
 
-**源码位置**: `backend/riscv64/GreedyRegAllocator.cpp:732-750`
+**源码位置**: `backend/riscv64/GreedyRegAllocator.cpp:782-800`
 
 ```cpp
 bool GreedyRegAllocator::canAssignReg(LiveInterval * interval, int reg) const
@@ -74,7 +74,7 @@ bool GreedyRegAllocator::canAssignReg(LiveInterval * interval, int reg) const
 }
 ```
 
-**caller-saved 判定**: `backend/riscv64/GreedyRegAllocator.cpp:676-679`
+**caller-saved 判定**: `backend/riscv64/GreedyRegAllocator.cpp:709-712`
 
 ```cpp
 bool GreedyRegAllocator::isCallerSavedReg(int reg)
@@ -86,7 +86,7 @@ bool GreedyRegAllocator::isCallerSavedReg(int reg)
 
 **含义**: 如果一个值的 live interval 覆盖了某个 call 指令，就不能分到 a0-a7 / t* 这些 caller-saved 寄存器，只能去 s1-s11 或 spill 到栈。
 
-**call 指令编号收集**: `backend/riscv64/GreedyRegAllocator.cpp:120-124`
+**call 指令编号收集**: `backend/riscv64/GreedyRegAllocator.cpp:122-126`
 
 ```cpp
 for (auto & [inst, num] : instNumbering) {
@@ -102,7 +102,7 @@ for (auto & [inst, num] : instNumbering) {
 
 形参在 ABI 上进入函数时确实在 a0-a7 / fa0-fa7，但 allocator 可能把形参分到任意寄存器（比如 s2、t1、甚至还是 a0），也可能 spill 到栈。所以指令选择一开始会调用 `emitFormalParamMoves()`。
 
-**调用位置**: `backend/riscv64/InstSelectorRiscV64.cpp:552-560`
+**调用位置**: `backend/riscv64/InstSelectorRiscV64.cpp:547-571`
 
 ```cpp
 void InstSelectorRiscV64::run()
@@ -115,7 +115,7 @@ void InstSelectorRiscV64::run()
 
 ### 3.1 emitFormalParamMoves 逻辑
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2446-2614`
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2524-2663`
 
 #### 整数形参处理 (line 2484-2506)
 
@@ -153,16 +153,18 @@ mv  a1, scratch    # 搬原 a0 → a1
 
 scratch 寄存器通过 `tempMgr.borrowExcluding` 借用，排除所有入参寄存器和目标寄存器 (line 2459-2482)。
 
-#### 栈传参数 (line 2543-2560)
+#### 栈传参数 (line 2589-2607)
 
-超过 8 个的参数由 caller 通过栈传递，位于 FP 正方向偏移:
+超过 8 个的参数由 caller 通过栈传递；当前无帧指针，按 `frameSize + 槽偏移(sp)` 读取（基址/偏移由 `incomingStackBaseReg()`/`incomingStackOffset()` 决定）:
 
 ```cpp
+const int base   = incomingStackBaseReg();            // usesFramePointer()? s0 : sp（当前 sp）
+const int srcOff = incomingStackOffset(stackOffset);  // ? abiOffset : frameSize + abiOffset
 if (info.hasReg()) {
-    iloc.load_base(info.regId, RISCV64_FP_REG_NO, stackOffset, ...);
+    iloc.load_base(info.regId, base, srcOff, ...);
 } else if (info.hasStackSlot && ...) {
     // 从 caller 栈帧加载到临时寄存器，再存到 callee 栈槽
-    iloc.load_base(tmp.reg(), RISCV64_FP_REG_NO, stackOffset, ...);
+    iloc.load_base(tmp.reg(), base, srcOff, ...);
     iloc.store_base(tmp.reg(), info.baseRegId, info.offset, ...);
 }
 ```
@@ -180,7 +182,7 @@ if (info.hasReg()) {
 
 `translate_call` 仍然遵守 ABI：前 8 个整数实参加载到 a0-a7，浮点实参加载到 fa0-fa7，超出的存到栈，然后 call，返回值从 a0/fa0 取。
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:1954-2110`
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:1949-2149`
 
 ```cpp
 // 整数实参放入 a0-a7
@@ -228,7 +230,7 @@ mv   s2, a0      # 调用返回值从 ABI 返回寄存器 a0 搬到 %r 的分配
 
 形参被视为在指令编号 0 处隐式定义，活跃区间从 0 开始延伸到所有使用点。
 
-**源码位置**: `backend/riscv64/LiveIntervalAnalysis.cpp:244-250`
+**源码位置**: `backend/riscv64/LiveIntervalAnalysis.cpp:249-255`
 
 ```cpp
 // 处理函数形参：形参在CFG入口前隐式定义，活跃区间起点为0
@@ -246,7 +248,7 @@ for (auto * param : params) {
 
 ## 6. 栈分配阶段对形参的处理
 
-**源码位置**: `backend/riscv64/CodeGeneratorRiscV64.cpp:996-1029`
+**源码位置**: `backend/riscv64/CodeGeneratorRiscV64.cpp:974-1007`
 
 ```cpp
 // 为所有形参创建分配信息
@@ -284,26 +286,26 @@ for (auto * param : func->getParams()) {
 
 ## 7. 栈帧布局
 
-**源码位置**: `backend/riscv64/CodeGeneratorRiscV64.cpp:968-976` (注释), `line 1072` (计算)
+**源码位置**: `backend/riscv64/CodeGeneratorRiscV64.cpp:946-954` (注释), `line 1050` (计算)
 
 ```
 高地址
 ┌──────────────────────────────┐
 │       caller 的栈帧           │
-│       栈传形参 (FP正偏移)     │  ← 超过8个的形参存放处
-├──────────────────────────────┤ ← FP (s0)
-│       ra + callee-saved      │  ← savedFrameBytes
-│       局部变量 / 溢出变量     │  ← localBytes (FP负偏移)
+│       栈传形参                │  ← 超过8个的形参，位于 frameSize+偏移(sp)
+├──────────────────────────────┤ ← old sp = sp + frameSize
+│       ra + callee-saved      │  ← savedFrameBytes (不含 s0/fp)
+│       局部变量 / 溢出变量     │  ← localBytes (保存区下方)
 │       outgoing 参数区         │  ← 调用其他函数时超过8个的实参
 └──────────────────────────────┘ ← SP
 低地址
 ```
 
-这个布局里 `s0` 指向当前函数调用前的旧 `sp`，所以:
+当前没有帧指针，所有偏移都相对 `sp`（`old sp = sp + frameSize`），所以:
 
-- `0(s0)`, `8(s0)`, ... 是 caller 放好的栈传形参。
-- `-8(s0)`, `-16(s0)`, ... 一开始是保存区，保存 `ra`、`s0`、被用到的 `s1-s11`、可选 `fs*`。
-- 更低的负偏移是本函数局部对象、`alloca` 和 spill 栈槽。
+- `frameSize(sp)`, `frameSize+8(sp)`, ... 是 caller 放好的栈传形参。
+- `frameSize-8(sp)`, `frameSize-16(sp)`, ... 是保存区，保存 `ra`、被用到的 `s1-s11`、可选 `fs*`（**不含 s0/fp**）。
+- 保存区下方较小的 `sp` 正偏移是本函数局部对象、`alloca` 和 spill 栈槽。
 - `0(sp)`, `8(sp)`, ... 是本函数调用别人时使用的 outgoing 参数区。
 
 栈帧大小计算 (`line 1072`):
@@ -320,22 +322,21 @@ const int frameSize = alignTo(savedFrameBytes + localBytes + outgoingBytes, 16);
 
 ### Prologue
 
-**源码位置**: `backend/riscv64/ILocRiscV64.cpp:727-785`
+**源码位置**: `backend/riscv64/ILocRiscV64.cpp:727-786`
 
 ```
 addi  sp, sp, -framesize       # 分配栈帧
 sd    ra,  offset(sp)          # 保存 ra (若函数有调用)
-sd    s0,  offset(sp)          # 保存 s0/fp (始终)
-sd    s1,  offset(sp)          # 保存 s1 (若被分配器使用)
-...                            # 保存其他被使用的 callee-saved
-fsd   fs0, offset(sp)          # 保存 callee-saved FPR (若启用)
-addi  s0,  sp, framesize       # 设置帧指针
+sd    s1,  offset(sp)          # 保存被分配器使用的 callee-saved GPR
+...                            # (注意: s0/fp 当前不保存)
+fsd   fs0, offset(sp)          # 保存被使用的 callee-saved FPR (若启用)
+# addi s0, sp, framesize 仅在 usesFramePointer() 时生成 —— 当前不会
 ```
 
-因此函数体内同时能看到两类栈寻址:
+因此函数体内的栈寻址都基于 sp:
 
 ```asm
-lw    t0, -32(s0)    # 局部变量或 spill，基于固定帧指针
+lw    t0, 12(sp)     # 局部变量或 spill，基于 sp
 sd    t1, 0(sp)      # 第 9 个实参的值写入 outgoing 参数区
 ```
 
@@ -343,21 +344,22 @@ sd    t1, 0(sp)      # 第 9 个实参的值写入 outgoing 参数区
 
 ### Epilogue
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2616-2658`
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2678-2717`
 
 逆序恢复 callee-saved 寄存器，恢复 SP，执行 `ret`。
 
 ### Callee-saved 保存策略
 
-**源码位置**: `backend/riscv64/CodeGeneratorRiscV64.cpp:140-176`
+**源码位置**: `backend/riscv64/CodeGeneratorRiscV64.cpp:149-187`
 
 | 寄存器 | 保存条件 |
 |--------|---------|
 | ra (x1) | 函数内有调用指令时 |
-| s0/fp (x8) | 始终保存 |
+| s0/fp (x8) | 当前不保存（`requiresFramePointer()` 恒为 false） |
 | s1-s11 | 仅当被寄存器分配器实际使用时 |
+| fs0-fs11 | 被使用且启用 callee-saved FPR（默认开启）时 |
 
-叶子函数（无调用、无栈传参数、无栈分配值）可省略整个栈帧 (`canOmitLeafFrame`, `line 186-203`)。
+叶子函数（无调用、无栈传参数、无栈分配值）的 savedRegs 为空、frameSize 为 0，自然省略整个栈帧（代码中没有 `canOmitLeafFrame` 函数）。
 
 ---
 
@@ -369,7 +371,7 @@ sd    t1, 0(sp)      # 第 9 个实参的值写入 outgoing 参数区
   caller 设置 a0-a7     prologue      emitFormalParamMoves    函数体执行      epilogue
        │                  │                │                    │              │
        │  实参值在 a0-a7  │ 保存 callee-  │ 将形参从 a0-a7    │ a0-a7 可被   │ 恢复 callee-
-       │  / fa0-fa7       │ saved, 设 FP  │ 搬到最终位置      │ 自由使用     │ saved, ret
+       │  / fa0-fa7       │ saved        │ 搬到最终位置      │ 自由使用     │ saved, ret
        │                  │               │                    │              │
        ▼                  ▼               ▼                    ▼              ▼
   [a0-a7=实参]       [a0-a7 不变]    [a0-a7 被释放]      [a0-a7 作为普通   [a0-a7=返回值]
@@ -433,8 +435,8 @@ a0-a7 同时承担 ABI 参数寄存器和全局分配寄存器两个角色，通
 
 | 层次 | 机制 | 源码位置 |
 |------|------|---------|
-| 分配层 | a0-a7 纳入全局 GPR 池，任何值都可能分到 a0-a7 | `GreedyRegAllocator.cpp:527` |
-| 约束层 | 跨调用的值不能分到 a0-a7 (caller-saved)，只能去 s1-s11 或栈 | `GreedyRegAllocator.cpp:746-749` |
-| 搬运层 | 函数入口 `emitFormalParamMoves` 将形参从 ABI 位置搬到分配位置；调用点 `translate_call` 将实参放回 ABI 位置 | `InstSelectorRiscV64.cpp:560, 1954` |
+| 分配层 | a0-a7 纳入全局 GPR 池，任何值都可能分到 a0-a7 | `GreedyRegAllocator.cpp:530` |
+| 约束层 | 跨调用的值不能分到 a0-a7 (caller-saved)，只能去 s1-s11 或栈 | `GreedyRegAllocator.cpp:796-799` |
+| 搬运层 | 函数入口 `emitFormalParamMoves` 将形参从 ABI 位置搬到分配位置；调用点 `translate_call` 将实参放回 ABI 位置 | `InstSelectorRiscV64.cpp:555, 1949` |
 
 **一句话**: a0-a7 在"两个 call 之间"的普通代码里当 caller-saved 临时寄存器用；在 ABI 边界（函数入口/调用/返回）由指令选择阶段插入搬运，保证 ABI 约定不被破坏。
