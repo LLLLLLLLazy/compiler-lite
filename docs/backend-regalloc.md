@@ -10,7 +10,7 @@ flowchart TD
     BuiltinCheck -- "Yes" --> Return(["直接返回"])
     BuiltinCheck -- "No" --> BuildPool["构建可用物理寄存器池<br>buildRegisterPool(func)<br>t0-t2, a0-a7, s1-s11, t5-t6"]
 
-    BuildPool --> BuildFloatPool["构建可用浮点寄存器池<br>buildFloatRegisterPool(func)<br>ft0-ft7, fa0-fa7, ft8-ft11 (20个caller-saved FPR)"]
+    BuildPool --> BuildFloatPool["构建可用浮点寄存器池<br>buildFloatRegisterPool(func): ft0-ft7, fa0-fa7, ft8-ft9 (18个caller-saved FPR)<br>ft10-ft11 保留作指令选择临时FPR<br>默认经 CalleeSavedFPREnabler 追加 fs0-fs11"]
     BuildFloatPool --> DomTree["构建支配树<br>DominatorTree(func)"]
     DomTree --> LoopInfo["循环分析<br>LoopInfo(func, domTree)"]
     LoopInfo --> SetDepth["设置基本块循环深度<br>bb->setLoopDepth()"]
@@ -18,7 +18,7 @@ flowchart TD
     SetDepth --> LIA["活跃区间分析<br>LiveIntervalAnalysis(func, loopInfo)"]
     LIA --> LIARun["analysis.run()<br>computeLiveIntervals() +<br>buildInterferenceGraph()"]
     LIARun --> RecordCall["记录CallInst指令编号<br>callInstNumbers"]
-    RecordCall --> BuildIndex["建立LiveInterval→索引映射<br>intervalToIndex"]
+    RecordCall --> BuildIndex["建立LiveInterval→索引映射 intervalToIndex<br>(随后默认执行寄存器合并 RegCoalescer)"]
 
     BuildIndex --> RunGreedy["运行Greedy分配主循环<br>runGreedy(intervals, graph)"]
     RunGreedy --> Rebuild["重建分配映射表<br>rebuildAllocationMap(intervals)"]
@@ -76,7 +76,7 @@ flowchart TD
     A5 -- "No" --> A7("继续下一条指令")
     A7 --> A8{{"还有更多指令?"}}
     A8 -- "Yes" --> A2
-    A8 -- "No" --> A9("计算溢出权重<br>权重 = 使用频率 × (1 + 循环深度 × 3)")
+    A8 -- "No" --> A9("计算溢出权重<br>spillWeight = (使用次数 / 区间长度) × 10^循环深度")
     A9 --> End(["结束: 活跃区间计算完成"])
 
     %%Node styles
@@ -142,7 +142,7 @@ flowchart TD
     TryEvict --> EvictOk{{"驱逐成功?"}}
 
     EvictOk -- "Yes" --> MoreCheck
-    EvictOk -- "No" --> Spill2["markSpilled(interval)<br>标记为溢出"]
+    EvictOk -- "No" --> Spill2["(默认先 splitter->trySplit() 分裂)<br>分裂失败再 markSpilled(interval) 标记为溢出"]
     Spill2 --> MoreCheck
 
     MoreCheck -- "Yes" --> NextIter
@@ -274,9 +274,10 @@ flowchart TD
 |------|--------|------|------|
 | caller-saved | ft0-ft7 | 0-7 | 临时寄存器 |
 | caller-saved | fa0-fa7 | 10-17 | 参数/返回值寄存器 |
-| caller-saved | ft8-ft11 | 28-31 | 临时寄存器 |
-| **callee-saved (未启用)** | fs0-fs1 | 8-9 | 保存寄存器 (当前不参与分配) |
-| **callee-saved (未启用)** | fs2-fs11 | 18-27 | 保存寄存器 (当前不参与分配) |
+| caller-saved | ft8-ft9 | 28-29 | 临时寄存器 |
+| **保留 (scratch)** | ft10-ft11 | 30-31 | 指令选择阶段临时FPR，不参与分配 |
+| callee-saved | fs0-fs1 | 8-9 | 保存寄存器 (默认 `--ra-callee-saved-fpr` 开启时纳入分配) |
+| callee-saved | fs2-fs11 | 18-27 | 保存寄存器 (默认 `--ra-callee-saved-fpr` 开启时纳入分配) |
 
 > **注意**：GPR和FPR都使用0-31编号，编号相同不代表同一物理资源。干涉集合必须通过 `getInterferingRegsForClass()` 按类别过滤。
 

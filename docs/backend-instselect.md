@@ -51,7 +51,7 @@ flowchart TD
     OpCheck -- "浮点算术类" --> FloatArithGroup["浮点算术翻译<br>FADD / FSUB / FMUL / FDIV"]
     OpCheck -- "比较类" --> CmpGroup["比较指令翻译<br>ICMP / FCMP"]
     OpCheck -- "控制流类" --> CtrlGroup["控制流指令翻译<br>BR / COND_BR / RET / CALL"]
-    OpCheck -- "转换/辅助类" --> MiscGroup["转换与辅助翻译<br>ZEXT / COPY / GEP / SITOFP / FPTOSI / PHI"]
+    OpCheck -- "转换/辅助类" --> MiscGroup["转换与辅助翻译<br>ZEXT / COPY / GEP / SITOFP / FPTOSI / PHI / SELECT<br>(另有 RVV 向量指令 VSETVL/VLOAD/VSTORE/...)"]
 
     MemGroup & IntArithGroup & FloatArithGroup & CmpGroup & CtrlGroup & MiscGroup --> End(["结束: 指令翻译完成"])
 
@@ -100,8 +100,8 @@ flowchart TD
     OpCheck -- "整数" --> IntCheck{{"操作码?"}}
     OpCheck -- "浮点" --> FloatCheck{{"操作码?"}}
 
-    IntCheck -- "ADD_I" --> T_add["translate_add()<br>→ add rd, rs1, rs2"]
-    IntCheck -- "SUB_I" --> T_sub["translate_sub()<br>→ sub rd, rs1, rs2"]
+    IntCheck -- "ADD_I" --> T_add["translate_add()<br>→ addw rd, rs1, rs2"]
+    IntCheck -- "SUB_I" --> T_sub["translate_sub()<br>→ subw rd, rs1, rs2"]
     IntCheck -- "MUL_I" --> T_mul["translate_mul()<br>优先: 乘以2的幂 → slliw<br>回退: mulw rd, rs1, rs2"]
     IntCheck -- "DIV_I" --> T_div["translate_div()<br>优先1: 2的幂次 → 移位+bias<br>优先2: 常量 → magic number<br>回退: divw rd, rs1, rs2"]
     IntCheck -- "MOD_I" --> T_mod["translate_mod()<br>优先1: 2的幂次 → 移位求余<br>优先2: 常量 → magic除法求余<br>回退: remw rd, rs1, rs2"]
@@ -132,8 +132,8 @@ flowchart TD
 ```mermaid
 flowchart TD
     Start(["比较指令"]) --> OpCheck{{"整数 or 浮点?"}}
-    OpCheck -- "ICMP" --> T_icmp["translate_icmp()<br>lt→slt / gt→sgt<br>le→slt+seqz / ge→sgt+seqz<br>eq→sub+seqz / ne→sub+snez"]
-    OpCheck -- "FCMP" --> T_fcmp["translate_fcmp()<br>lt→flt.s / gt→fgt.s<br>le→fle.s / ge→fge.s<br>eq→feq.s / ne→feq.s+snez"]
+    OpCheck -- "ICMP" --> T_icmp["translate_icmp()<br>lt→slt / gt→slt(操作数交换)<br>le→slt(交换)+xori / ge→slt+xori<br>eq→subw+seqz / ne→subw+snez"]
+    OpCheck -- "FCMP" --> T_fcmp["translate_fcmp()<br>lt→flt.s / gt→flt.s(交换)<br>le→fle.s / ge→fle.s(交换)<br>eq→feq.s / ne→feq.s+xori"]
 
     T_icmp & T_fcmp --> End(["翻译完成"])
 
@@ -156,8 +156,8 @@ flowchart TD
 flowchart TD
     Start(["控制流指令"]) --> OpCheck{{"操作码?"}}
     OpCheck -- "BR" --> T_br["translate_br()<br>→ j label<br>无条件跳转"]
-    OpCheck -- "COND_BR" --> T_condbr["translate_cond_br()<br>→ bnez rs, true_label<br>→ j false_label"]
-    OpCheck -- "RET" --> T_ret["translate_ret()<br>→ mv a0, retval<br>→ j .Lepilogue"]
+    OpCheck -- "COND_BR" --> T_condbr["translate_cond_br()<br>→ bne cond, zero, true_label; j false_label<br>(紧邻的比较可融合为 blt/bge/beq/bne)"]
+    OpCheck -- "RET" --> T_ret["translate_ret()<br>→ 返回值移到 a0(整数) / fa0(浮点)<br>→ 内联 emitEpilogue() 恢复寄存器并 ret"]
     OpCheck -- "CALL" --> T_call["translate_call()<br>→ mv a_i, arg_i<br>→ call funcname<br>→ mv dst, a0"]
 
     T_br & T_condbr & T_ret & T_call --> End(["翻译完成"])
@@ -308,8 +308,8 @@ flowchart TD
 | `ALLOCA` | AllocaInst | (栈地址计算) | 计算FP+offset，无实际指令 |
 | `LOAD` | LoadInst | `lw`/`fld` | 整数用lw，浮点用fld |
 | `STORE` | StoreInst | `sw`/`fsd` | 整数用sw，浮点用fsd |
-| `ADD_I` | BinaryInst | `add` | 整数加法 |
-| `SUB_I` | BinaryInst | `sub` | 整数减法 |
+| `ADD_I` | BinaryInst | `addw` | 整数加法(32位) |
+| `SUB_I` | BinaryInst | `subw` | 整数减法(32位) |
 | `MUL_I` | BinaryInst | `slliw`/`mulw` | 乘以2的幂→左移，否则mulw |
 | `DIV_I` | BinaryInst | `sraiw`/`mul`+`srai`/`divw` | 2的幂→移位+bias，常量→magic number，否则divw |
 | `MOD_I` | BinaryInst | `sraiw`+`subw`/`remw` | 2的幂→移位求余，常量→magic求余，否则remw |
@@ -317,11 +317,11 @@ flowchart TD
 | `SUB_F` | BinaryInst | `fsub.s` | 浮点减法 |
 | `MUL_F` | BinaryInst | `fmul.s` | 浮点乘法 |
 | `DIV_F` | BinaryInst | `fdiv.s` | 浮点除法 |
-| `LT_I/GT_I/...` | ICmpInst | `slt`/`sgt`+`bnez` | 整数比较+条件分支 |
-| `LT_F/GT_F/...` | FCmpInst | `flt`/`fgt`/`feq`+`bnez` | 浮点比较+条件分支 |
+| `LT_I/GT_I/...` | ICmpInst | `slt`(GT交换操作数; LE/GE再`xori`; EQ/NE用`subw`+`seqz`/`snez`) | 整数比较，结果0/1 |
+| `LT_F/GT_F/...` | FCmpInst | `flt.s`/`fle.s`/`feq.s`(GT/GE交换操作数; NE加`xori`) | 浮点比较，结果0/1 |
 | `BR` | BranchInst | `j` | 无条件跳转 |
-| `COND_BR` | CondBranchInst | `bnez`/`beqz` | 条件跳转 |
-| `RET` | ReturnInst | `mv a0`+`j epilogue` | 返回值移动+跳转到epilogue |
+| `COND_BR` | CondBranchInst | `bne`+`j`(可融合比较为`blt`/`bge`/`beq`/`bne`) | 条件跳转 |
+| `RET` | ReturnInst | `mv a0`/`fa0` + 内联epilogue | 返回值移动 + 内联epilogue + `ret` |
 | `CALL` | CallInst | `mv a_i`+`call` | 参数传递+函数调用 |
 | `PHI` | PhiInst | (空操作) | Phi已降级为Copy |
 | `ZEXT` | ZExtInst | `andi`/零扩展 | 零扩展i1→i32 |

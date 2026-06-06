@@ -2,7 +2,7 @@
 
 ## 总览
 
-浮点寄存器分配与整数寄存器共享统一的Greedy分配框架，通过 `isFloatInterval()` 区分GPR/FPR类别，分别使用独立的寄存器池和干涉集合。当前FPR池只启用caller-saved寄存器（20个），跨调用的float值会被溢出到栈上，避免引入fs*保存/恢复逻辑。
+浮点寄存器分配与整数寄存器共享统一的Greedy分配框架，通过 `isFloatInterval()` 区分GPR/FPR类别，分别使用独立的寄存器池和干涉集合。`buildFloatRegisterPool()` 提供 18 个 caller-saved FPR（ft0-ft7、fa0-fa7、ft8-ft9；ft10-ft11 保留作指令选择临时 FPR）；默认（`--ra-callee-saved-fpr`，由 `CalleeSavedFPREnabler` 实现）再追加 fs0-fs11，共 30 个可分配 FPR，跨调用的 float 可分配到 callee-saved fs* 并在 prologue/epilogue 中保存/恢复。仅当用 `--ra-no-callee-saved-fpr` 关闭时，跨调用的 float 值才必须溢出到栈上。
 
 ```mermaid
 flowchart TD
@@ -63,11 +63,11 @@ flowchart TD
 flowchart TD
     Start(["buildFloatRegisterPool(func)"]) --> BuildPool("构建caller-saved FPR列表")
 
-    BuildPool --> ListRegs("ft0-ft7 (f0-f7): 8个临时寄存器<br>fa0-fa7 (f10-f17): 8个参数/返回值寄存器<br>ft8-ft11 (f28-f31): 4个临时寄存器")
+    BuildPool --> ListRegs("ft0-ft7 (f0-f7): 8个临时寄存器<br>fa0-fa7 (f10-f17): 8个参数/返回值寄存器<br>ft8-ft9 (f28-f29): 2个临时寄存器")
 
-    ListRegs --> ExcludeCallee("排除callee-saved FPR<br>fs0-fs1 (f8-f9)<br>fs2-fs11 (f18-f27)<br>避免引入prologue/epilogue保存恢复逻辑")
+    ListRegs --> ExcludeCallee("保留 ft10-ft11 (f30-f31) 作指令选择临时FPR<br>基础池不含 callee-saved fs0-fs11<br>(默认由 CalleeSavedFPREnabler 追加)")
 
-    ExcludeCallee --> Return(["返回20个caller-saved FPR"])
+    ExcludeCallee --> Return(["返回18个caller-saved FPR<br>(默认再追加 fs0-fs11 → 共30个)"])
 
     %%Node styles
     classDef default fill:#E2EAFE4F,stroke:#5A88F6AF
@@ -86,7 +86,7 @@ flowchart TD
 flowchart TD
     Start(["registerPoolFor(interval)"]) --> FloatCheck{{"isFloatInterval(interval)?<br>value->getType()->isFloatType()"}}
 
-    FloatCheck -- "Yes" --> FPR("返回 availableFloatRegs<br>(20个caller-saved FPR)")
+    FloatCheck -- "Yes" --> FPR("返回 availableFloatRegs<br>(默认含callee-saved共30个；关闭则18个)")
     FloatCheck -- "No" --> GPR("返回 availableRegs<br>(GPR寄存器池)")
 
     FPR --> End(["寄存器池已选择"])
@@ -298,7 +298,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start(["borrowFloatTemp(inst, excludeRegs)"]) --> IterPool("遍历可用FPR池<br>allocator.getAvailableFloatRegs()")
+    Start(["borrowFloatTemp(inst, excludeRegs)"]) --> IterPool("候选: 先 ft10/ft11(保留scratch)<br>再 allocator.getAvailableFloatRegs()")
 
     IterPool --> NextReg("取下一个FPR reg")
     NextReg --> ExcludeCheck{{"reg ∈ excludeRegs?"}}
@@ -342,12 +342,12 @@ flowchart TD
 flowchart TD
     Start(["isFloatRegLiveAt(reg, inst)"]) --> GetInstNum("获取当前指令编号<br>instNumbering[inst]")
 
-    GetInstNum --> IterMap("遍历allocationMap")
-    IterMap --> NextEntry("取下一个(value, info)对")
-    NextEntry --> FloatRegCheck{{"info.hasFloatReg()<br>&& info.regId == reg?"}}
+    GetInstNum --> IterMap("在 allocatedFprLiveRanges[reg] 中<br>遍历该FPR的已分配活跃区间")
+    IterMap --> NextEntry("取下一个区间 [start, end)")
+    NextEntry --> FloatRegCheck{{"该reg存在活跃区间记录?"}}
 
     FloatRegCheck -- "No" --> MoreCheck
-    FloatRegCheck -- "Yes" --> FindRange("查找value的活跃范围<br>valueLiveRanges[value]")
+    FloatRegCheck -- "Yes" --> FindRange("检查区间 [start, end)")
 
     FindRange --> InRange{{"instNum ∈ [start, end)?"}}
     InRange -- "Yes" --> Live(["返回 true<br>(该FPR承载活跃值)"])
@@ -467,23 +467,28 @@ flowchart TD
 |------|--------|------|------|
 | caller-saved | ft0-ft7 | 0-7 | 临时寄存器 |
 | caller-saved | fa0-fa7 | 10-17 | 参数/返回值寄存器 |
-| caller-saved | ft8-ft11 | 28-31 | 临时寄存器 |
-| **callee-saved (未启用)** | fs0-fs1 | 8-9 | 保存寄存器 (当前不参与分配) |
-| **callee-saved (未启用)** | fs2-fs11 | 18-27 | 保存寄存器 (当前不参与分配) |
+| caller-saved | ft8-ft9 | 28-29 | 临时寄存器 |
+| **保留 (scratch)** | ft10-ft11 | 30-31 | 指令选择阶段临时FPR，不参与分配 |
+| callee-saved | fs0-fs1 | 8-9 | 保存寄存器 (默认 `--ra-callee-saved-fpr` 开启时纳入分配) |
+| callee-saved | fs2-fs11 | 18-27 | 保存寄存器 (默认 `--ra-callee-saved-fpr` 开启时纳入分配) |
 
-> **设计决策**：当前FPR分配只启用caller-saved寄存器（共20个），跨调用的float值会被溢出到栈上。这避免了引入fs0-fs11的prologue/epilogue保存恢复逻辑，简化了首次实现。未来可扩展启用callee-saved FPR以减少溢出。
+> **设计决策**：`buildFloatRegisterPool()` 基础池为 18 个 caller-saved FPR，并保留 ft10-ft11 作指令选择临时 FPR。是否纳入 callee-saved fs0-fs11 由 `--ra-callee-saved-fpr` 控制（默认开启，经 `CalleeSavedFPREnabler` 追加，共 30 个可分配 FPR，跨调用 float 可分配到 fs* 并在 prologue/epilogue 中保存/恢复）；用 `--ra-no-callee-saved-fpr` 关闭后只用 18 个 caller-saved，跨调用 float 溢出到栈。
 
 ## RegAllocInfo 浮点标记
 
 ```cpp
 struct RegAllocInfo {
     int32_t regId = -1;
-    bool isFloatReg = false;       // 分配的寄存器是否来自浮点寄存器文件
-    bool hasReg() const;           // regId != -1 && !isFloatReg
-    bool hasFloatReg() const;      // regId != -1 && isFloatReg
-    void setReg(int32_t reg);      // 设置GPR分配
-    void setFloatReg(int32_t reg); // 设置FPR分配
+    bool isFloatReg = false;        // 分配的寄存器是否来自浮点寄存器文件
+    bool isVectorReg = false;       // 分配的寄存器是否来自 RVV 向量寄存器文件
+    // 另有 baseRegId / offset / hasStackSlot 描述栈槽位置
+    bool hasReg() const;            // regId != -1 && !isFloatReg && !isVectorReg
+    bool hasFloatReg() const;       // regId != -1 && isFloatReg
+    bool hasVectorReg() const;      // regId != -1 && isVectorReg
+    void setReg(int32_t reg);       // 设置GPR分配
+    void setFloatReg(int32_t reg);  // 设置FPR分配
+    void setVectorReg(int32_t reg); // 设置VR分配
 };
 ```
 
-`isFloatReg` 标志确保指令选择器能正确区分GPR和FPR，即使两者使用相同的0-31编号空间。
+`isFloatReg`/`isVectorReg` 标志确保指令选择器能正确区分GPR/FPR/VR，即使三者使用相同的0-31编号空间。

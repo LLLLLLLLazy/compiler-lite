@@ -2,7 +2,7 @@
 
 ```mermaid
 flowchart TD
-    Start(["开始: CodeGeneratorRiscV64::emitFunction(func)"]) --> InitAnalysis("初始化: 构建支配树 DominatorTree 与循环信息 LoopInfo")
+    Start(["开始: registerAllocation(func) → GreedyRegAllocator::allocate(func)"]) --> InitAnalysis("初始化: 构建支配树 DominatorTree 与循环信息 LoopInfo")
     InitAnalysis --> RunLIA("调用 LiveIntervalAnalysis::run()")
 
     RunLIA --> ComputeLI("阶段1: computeLiveIntervals() 计算活跃区间")
@@ -17,11 +17,11 @@ flowchart TD
         Step12Detail --> Step13("步骤1.3: 根据使用点扩展活跃区间")
         Step13 --> Step13Detail("对每个LiveInterval<br>找到lastUse, 从定义点延伸到lastUse+1<br>addSegment自动合并相邻/重叠子段")
 
-        Step13Detail --> Step14("步骤1.4: 循环回边保守扩展")
-        Step14 --> Step14Detail("检测回边(后继bb序号 ≤ 当前bb序号)<br>对循环内使用、循环外定义的值<br>保守延长活跃区间到循环头之后即活跃区间为整个循环体")
+        Step13Detail --> Step14("步骤1.4: 循环多定义值保守扩展 (需 LoopInfo)")
+        Step14 --> Step14Detail("基于 LoopInfo 判断: 同一 Value 多次定义且<br>定义/使用触及循环(loopDepth>0)时<br>把所有 def/use 范围合并为一条保守总段")
 
-        Step14Detail --> Step15{"步骤1.5: 是否提供LoopInfo?"}
-        Step15 -- "是" --> Step15Yes("循环感知扩展<br>对循环头中使用、循环外定义的值<br>扩展活跃区间到循环体末尾")
+        Step14Detail --> Step15{"步骤1.5: 提供 LoopInfo? (步骤1.4/1.5 均依赖)"}
+        Step15 -- "是" --> Step15Yes("跨循环活跃性补足<br>用 LoopInfo 的循环头/循环体确定循环指令范围<br>对跨自然循环的值补足整个循环体区间")
         Step15 -- "否" --> Step16
         Step15Yes --> Step16("步骤1.6: 计算溢出权重")
 
@@ -52,7 +52,7 @@ flowchart TD
         TryFree -- "成功" --> Assigned("分配物理寄存器")
         TryFree -- "失败" --> TryEvict{{"tryEvictAndAssign()<br>能否驱逐低权重邻居?"}}
         TryEvict -- "成功" --> Evicted("驱逐邻居并分配")
-        TryEvict -- "失败" --> Spilled("markSpilled() 标记为溢出")
+        TryEvict -- "失败" --> Spilled("(默认先尝试 splitter->trySplit 分裂)<br>失败再 markSpilled() 标记为溢出")
         Assigned --> MoreIntervals{{"还有未处理区间?"}}
         Evicted --> MoreIntervals
         Spilled --> MoreIntervals
@@ -63,7 +63,7 @@ flowchart TD
     AllocDone --> Downstream("阶段4: 活跃性信息下游使用")
 
     subgraph Phase4["阶段4: 下游消费"]
-        Downstream --> SpillMgr("SpillManager: 溢出代码插入<br>为溢出区间分配栈槽<br>定义点后插入StoreInst(spill)<br>使用点前插入LoadInst(reload)")
+        Downstream --> SpillMgr("溢出处理: rebuildAllocationMap 标记 spilledValues<br>CodeGeneratorRiscV64::stackAlloc 分配栈槽<br>指令选择经 load_var/store_var 在使用/定义处直接访问栈槽<br>(实际路径未使用 SpillManager 插入 IR spill/reload)")
         Downstream --> LocalTmp("LocalTempManager: 临时寄存器管理<br>isLiveAllocatedReg()判断寄存器是否承载live值<br>borrow()借用时避开活跃值")
         Downstream --> ScratchAlloc("ScratchAllocator: Scratch寄存器分配<br>isRegOccupiedByIR()检查与IR活跃值冲突")
         Downstream --> FloatTmp("浮点临时寄存器管理<br>borrowFloatTemp(): 遍历FPR池避开活跃值<br>isFloatRegLiveAt(): 查询FPR活跃性<br>emitFloatRegMoves(): 解析FPR并行移动")

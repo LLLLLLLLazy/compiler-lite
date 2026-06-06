@@ -10,9 +10,9 @@ flowchart TD
     AST2IR --> Rename1("IR重命名<br>module->renameIR()")
 
     Rename1 --> OptCheck{{"优化等级 > 0?"}}
-    OptCheck -- "Yes" --> Mem2Reg["Mem2Reg优化<br>alloca/load/store → SSA Phi"]
+    OptCheck -- "Yes" --> Mem2Reg["模块/函数级一次性优化<br>IPCP/内联/GlobalToLocal/PureCallCSE/ArrayScalarize<br>Mem2Reg(alloca/load/store → SSA Phi)/GVN/尾递归消除"]
     OptCheck -- "No" --> PhiLower
-    Mem2Reg --> OptLoop["优化循环 (最多8轮)<br>LocalMemoryOpt → LICM → InstCombine<br>→ ConstProp → UnreachableBlockElim<br>→ DeadInstElim → CFGSimplify"]
+    Mem2Reg --> OptLoop["优化循环 (定点迭代, 最多18轮)<br>LocalMemoryOpt/GVN/LICM/循环优化(CanonicalizeLoop/<br>LoopTiling/LoopStrengthReduce/SimpleLoopUnroll)/PureCallCSE/<br>InstCombine/ConstProp/UnreachableBlockElim/DeadInstElim/CFGSimplify 等"]
     OptLoop --> PhiLower["Phi降级<br>Phi → Copy指令<br>PhiLowering::run()"]
 
     PhiLower --> Rename2("IR重命名<br>module->renameIR()")
@@ -38,13 +38,13 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start(["CodeGeneratorAsm::run()"]) --> Header["genHeader()<br>输出.arch rv64gc等汇编器指令"]
+    Start(["CodeGeneratorRiscV64::run()"]) --> Header["genHeader()<br>输出 .attribute arch rv64gc/rv64gcv 等汇编器指令"]
     Header --> DataSection["genDataSection()<br>输出全局变量(.comm/.data段)"]
     DataSection --> CodeSection["genCodeSection()<br>遍历所有非内建函数"]
     CodeSection --> FuncIter{{"还有下一个函数?"}}
     FuncIter -- "Yes" --> GenFunc["genCodeSection(func)<br>函数级代码生成"]
     GenFunc --> FuncIter
-    FuncIter -- "No" --> End(["结束: 汇编文件输出完成"])
+    FuncIter -- "No" --> End(["(若用到内置并行运行时) emitMtRuntime()<br>writeRAStatsJson()<br>结束: 汇编文件输出完成"])
 
     %%Node styles
     classDef default fill:#E2EAFE4F,stroke:#5A88F6AF
@@ -77,9 +77,9 @@ flowchart TD
     ScratchProcess --> Patchup["ILocRiscV64::patchScratchRegs()<br>替换机器指令中的scratch寄存器编号"]
     Patchup --> CleanLabel
 
-    ScratchCheck -- "No" --> CleanLabel["5. 删除未引用的基本块标签<br>deleteUnusedLabel()"]
+    ScratchCheck -- "No" --> CleanLabel["5. Peephole优化<br>RiscV64Peephole::run(iloc, optLevel, enableCoalesce)<br>FMA融合/强度消减/仿射地址递推/栈load-store转发/<br>move传播/删除自移动·重复指令·无效跳转/折叠零减比较 等"]
 
-    CleanLabel --> Peephole["6. Peephole优化<br>RiscV64Peephole::run(iloc)<br>删除自移动/重复指令/无效跳转/折叠零减比较"]
+    CleanLabel --> Peephole["6. 删除未引用的基本块标签<br>deleteUnusedLabel()"]
 
     Peephole --> Output["7. 输出函数头部<br>.align/.global/.type/函数名"]
     Output --> DebugCheck{{"调试模式?"}}
@@ -114,13 +114,13 @@ flowchart TD
 
     Greedy --> AdjustCall["adjustFuncCallInsts(func)<br>调整函数调用指令"]
     AdjustCall --> AdjustParam["adjustFormalParamInsts(func)<br>调整形参指令"]
-    AdjustParam --> SavedRegs["computeSavedRegs(func, allocMap)<br>计算callee-saved寄存器列表"]
+    AdjustParam --> SavedRegs["computeSavedRegs(...)<br>计算callee-saved寄存器列表<br>(ra若有调用 / s1-s11按需; s0/fp 不保存)"]
     SavedRegs --> StackAlloc["stackAlloc(func)<br>栈空间分配"]
 
     StackAlloc --> ParamLoop["遍历形参<br>按RISC-V ABI分配寄存器(a0-a7/fa0-fa7)<br>超出部分分配栈槽"]
     ParamLoop --> InstLoop["遍历所有指令<br>为AllocaInst和有结果值指令创建分配信息"]
     InstLoop --> SpillLoop["为强制栈分配/未分配/溢出变量<br>分配栈槽(assignStackSlot)"]
-    SpillLoop --> FrameCalc["计算栈帧总大小<br>savedFrameBytes + localBytes + outgoingBytes<br>16字节对齐"]
+    SpillLoop --> FrameCalc["计算栈帧总大小<br>savedFrameBytes + localBytes + outgoingBytes (16字节对齐)<br>无帧指针: 栈槽统一重写为 sp 相对偏移"]
     FrameCalc --> End(["结束: 寄存器分配完成"])
 
     %%Node styles
@@ -144,11 +144,12 @@ flowchart TD
 高地址
 ┌──────────────────────────────┐
 │       caller的栈帧            │
-├──────────────────────────────┤
+│       栈传形参                │  ← 超过8个的形参, frameSize+偏移(sp)
+├──────────────────────────────┤  ← old sp = sp + frameSize
 │       返回地址 (ra)           │  ← 若函数包含调用指令
-│       帧指针 (s0/FP)         │  ← 始终保存
-│       callee-saved (s1-s11)  │  ← 仅保存实际使用的
-├──────────────────────────────┤  ← FP (s0) 指向此处
+│       callee-saved (s1-s11)  │  ← 仅保存实际使用的 (不含 s0/fp)
+│       callee-saved FPR (fs*) │  ← 若启用且被使用
+├──────────────────────────────┤
 │       局部变量                │  ← AllocaInst分配
 │       溢出变量                │  ← 被spill的虚拟寄存器
 │       spilled scratch        │  ← 溢出的scratch寄存器
