@@ -12,7 +12,7 @@ RUNTIME_LIB=${MINIC_RUNTIME_LIB:-"${REPO_ROOT}/tests/libsysy_riscv.a"}
 FRONTEND=${MINIC_FRONTEND:-"antlr"}
 TEST_MODE=${MINIC_RISCV64_TEST_MODE:-"asm"}
 RISCV64_TIMEOUT=${MINIC_RISCV64_TIMEOUT:-30}
-MINIC_RISCV64_RVV=${MINIC_RISCV64_RVV:-"on"}
+MINIC_RISCV64_RVV=${MINIC_RISCV64_RVV:-"off"}
 PARALLEL_JOBS=${MINIC_RISCV64_PARALLEL:-1}
 LINK_STATIC=${MINIC_RISCV64_LINK_STATIC:-1}
 EXTRA_GCC_ARGS=${MINIC_RISCV64_GCC_ARGS:-""}
@@ -53,7 +53,7 @@ Environment:
   MINIC_RISCV64_TEST_MODE=assemble  Generate asm and assemble only
   MINIC_RISCV64_TIMEOUT=30          Per-step timeout passed to timeout(1)
   MINIC_RISCV64_PARALLEL=1          Number of parallel jobs; keep 1 for stable perf timings
-  MINIC_RISCV64_RVV=on|off          Pass --riscv64-rvv to minic (default: on)
+  MINIC_RISCV64_RVV=on|off          Pass --riscv64-rvv to minic (default: off)
   MINIC_RISCV64_LINK_STATIC=1|0     Link with -static by default
   MINIC_RISCV64_GCC_ARGS="..."      Extra gcc args, e.g. "-mabi=lp64d"
   MINIC_RISCV64_SKIP_RVV_PROBE=1    Skip the native RVV availability probe
