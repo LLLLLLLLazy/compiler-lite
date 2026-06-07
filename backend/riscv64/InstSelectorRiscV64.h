@@ -347,4 +347,7 @@ private:
 
 	/// @brief 被寄存器合并消除的 copy 指令集合
 	std::unordered_set<Instruction *> eliminatedCopies_;
+
+	/// @brief 是否已在调用点保存ra（避免重复保存）
+	bool raSavedAtCallSite = false;
 };

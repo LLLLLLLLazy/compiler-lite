@@ -3013,6 +3013,60 @@ void InstSelectorRiscV64::emitStackAdjust(int amount, int tmpReg)
 	iloc.inst("add", "sp", "sp", PlatformRiscV64::regName[tmpReg]);
 }
 
+/// @brief 计算ra在栈帧中的保存位置偏移（相对于sp）
+/// @return ra的栈偏移，若不需要保存ra则返回-1
+int InstSelectorRiscV64::raSaveOffset() const
+{
+	const auto & savedRegs = iloc.getSavedRegs();
+	// 查找ra在savedRegs中的位置
+	for (int i = 0; i < static_cast<int>(savedRegs.size()); ++i) {
+		if (savedRegs[i] == RISCV64_RA_REG_NO) {
+			// ra在savedRegs中的索引为i，其栈偏移为：frameSize - (i+1)*8
+			const int frameSize = allocator.getFrameSize();
+			return frameSize - (i + 1) * 8;
+		}
+	}
+	return -1;  // 叶子函数，不需要保存ra
+}
+
+/// @brief 在调用点保存ra到栈上（仅在第一次call时）
+/// @param inst 当前call指令（用于借用临时寄存器）
+void InstSelectorRiscV64::emitCallSiteSaveRA(Instruction * inst)
+{
+	if (raSavedAtCallSite) {
+		return;  // 已经保存过，避免重复保存
+	}
+
+	const int offset = raSaveOffset();
+	if (offset < 0) {
+		return;  // 叶子函数，不需要保存ra
+	}
+
+	auto tmp = tempMgr.borrow(inst);
+	if (PlatformRiscV64::isDisp(offset)) {
+		iloc.inst("sd", PlatformRiscV64::regName[RISCV64_RA_REG_NO],
+		          std::to_string(offset) + "(sp)");
+	} else {
+		iloc.load_imm(tmp.reg(), offset);
+		iloc.inst("add", PlatformRiscV64::regName[tmp.reg()], "sp",
+		          PlatformRiscV64::regName[tmp.reg()]);
+		iloc.inst("sd", PlatformRiscV64::regName[RISCV64_RA_REG_NO],
+		          "0(" + PlatformRiscV64::regName[tmp.reg()] + ")");
+	}
+
+	raSavedAtCallSite = true;  // 标记已保存
+}
+
+/// @brief 在调用点恢复ra（目前不需要，因为ra在调用之间保持栈上）
+/// @param inst 当前call指令
+void InstSelectorRiscV64::emitCallSiteRestoreRA(Instruction * inst)
+{
+	// 在RISC-V中，call指令会覆盖ra，但我们已经在第一次call前保存了旧ra。
+	// 连续多个call之间，ra会不断被覆盖，但我们只需要在epilogue时恢复最初保存的值。
+	// 因此，调用点恢复是不必要的。
+	(void)inst;
+}
+
 /// @brief 获取Value分配的结果寄存器编号
 /// @param val IR值
 /// @return 物理寄存器编号，若未分配则返回-1
