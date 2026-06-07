@@ -232,6 +232,12 @@ private:
 	/// @param offset 栈偏移
 	/// @param tmpReg 临时寄存器编号（用于大偏移地址计算）
 	void emitLoad64(const std::string & reg, int offset, int tmpReg);
+	/// @brief 按调用点保存ra（若当前函数需要保存ra）
+	void emitCallSiteSaveRA(Instruction * inst);
+	/// @brief 按调用点恢复ra（若当前函数需要保存ra）
+	void emitCallSiteRestoreRA(Instruction * inst);
+	/// @brief 当前函数ra保存槽位的sp相对偏移；无ra槽则返回-1
+	int raSaveOffset() const;
 	/// @brief 生成栈指针调整指令
 	/// @param amount 调整量
 	/// @param tmpReg 临时寄存器编号（用于大偏移地址计算）

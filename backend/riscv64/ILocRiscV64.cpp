@@ -424,8 +424,13 @@ void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 		const uint32_t luiImm = (static_cast<uint32_t>(hi >> 12)) & 0xFFFFF;
 
 		emit("lui", PlatformRiscV64::regName[rs_reg_no], std::to_string(luiImm));
-		emit("addiw", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[rs_reg_no],
-			 std::to_string(lo));
+		// 当低 12 位为 0 时，lui 本身已得到正确的 32 位值（其低 32 位被符号扩展到 64 位，
+		// addiw rd,rd,0 只是再做一次相同的低 32 位符号扩展，属于纯冗余指令）。
+		// 这类常量在浮点位模式（1.0/2.0/0.5/8.0/10.0…，低 12 位恒为 0）中极为常见，跳过可省一条指令。
+		if (lo != 0) {
+			emit("addiw", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[rs_reg_no],
+				 std::to_string(lo));
+		}
 	}
 }
 
@@ -520,12 +525,18 @@ void ILocRiscV64::store_float_base(int fs_reg_no, int base_reg_no, int disp, int
 /// @param src_reg_no 源寄存器
 void ILocRiscV64::mov_reg(int rs_reg_no, int src_reg_no)
 {
+	if (rs_reg_no == src_reg_no) {
+		return;
+	}
 	emit("mv", PlatformRiscV64::regName[rs_reg_no], PlatformRiscV64::regName[src_reg_no]);
 }
 
 /// @brief FPR到FPR复制。RISC-V没有fmv.s三操作数编码，使用fsgnj.s rd,rs,rs。
 void ILocRiscV64::fmov_reg(int fd_reg_no, int fs_reg_no)
 {
+	if (fd_reg_no == fs_reg_no) {
+		return;
+	}
 	emit("fsgnj.s", PlatformRiscV64::fpRegName[fd_reg_no], PlatformRiscV64::fpRegName[fs_reg_no],
 	     PlatformRiscV64::fpRegName[fs_reg_no]);
 }
@@ -591,8 +602,13 @@ void ILocRiscV64::load_float_var(int fd_reg_no, Value * src_var, int tmp_reg_no,
 {
 	if (Instanceof(constVal, ConstFloat *, src_var)) {
 		std::uint32_t bits = constVal->getBitPattern();
-		load_imm(tmp_reg_no, static_cast<int32_t>(bits));
-		emit("fmv.w.x", PlatformRiscV64::fpRegName[fd_reg_no], PlatformRiscV64::regName[tmp_reg_no]);
+		if (bits == 0) {
+			// 0.0f 的位模式为全 0，直接用硬件零寄存器搬运，省去 li tmp,0 一条指令。
+			emit("fmv.w.x", PlatformRiscV64::fpRegName[fd_reg_no], PlatformRiscV64::regName[0]);
+		} else {
+			load_imm(tmp_reg_no, static_cast<int32_t>(bits));
+			emit("fmv.w.x", PlatformRiscV64::fpRegName[fd_reg_no], PlatformRiscV64::regName[tmp_reg_no]);
+		}
 
 	} else if (Instanceof(globalVar, GlobalVariable *, src_var)) {
 		load_symbol(tmp_reg_no, globalVar->getName());
@@ -747,6 +763,9 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 	// 逐个保存callee-saved寄存器到栈帧顶部
 	// savedRegs由CodeGeneratorRiscV64根据实际使用情况计算得出，仅保存必要的寄存器
 	for (int i = 0; i < static_cast<int>(savedRegs.size()); ++i) {
+		if (savedRegs[i] == RISCV64_RA_REG_NO) {
+			continue;
+		}
 		int offset = currentFrameSize - (i + 1) * 8;
 		// 通过寄存器编号查找对应的寄存器名称
 		const std::string & regName = PlatformRiscV64::regName[savedRegs[i]];
