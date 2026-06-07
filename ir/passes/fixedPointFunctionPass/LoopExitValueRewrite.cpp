@@ -223,18 +223,21 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
         return false;
     }
 
-    // 仅处理规范化后的 for (i = 0; i < N; ++i)：起始 0、步长 1、判定 <
-    if (!loop.recurrence || loop.recurrence->getStep() != 1 ||
-        loop.compareKind != ScalarEvolution::CompareKind::LessThan || !loop.hasConstInitialValue ||
-        loop.initialIntValue != 0) {
+    // 处理形如 for (i = init; i < N; i += step) 的规范计数循环：
+    // 起始 init 可为循环不变量、步长 step 为正整数常量、判定为 <
+    if (!loop.recurrence || loop.recurrence->getStep() <= 0 ||
+        loop.compareKind != ScalarEvolution::CompareKind::LessThan) {
         return false;
     }
+
+    const int32_t inductionStep = loop.recurrence->getStep();
 
     BasicBlock * preheader = loop.preheader;
     BasicBlock * latch = loop.latch;
     BasicBlock * exit = loop.exit;
     Value * bound = loop.boundValue;
-    if (!preheader || !latch || !exit || !bound || exit == header) {
+    Value * inductionStart = loop.initialValue;
+    if (!preheader || !latch || !exit || !bound || !inductionStart || exit == header) {
         return false;
     }
 
@@ -300,12 +303,37 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
         insertPos = std::next(exitInsts.insert(insertPos, inst));
     };
 
-    // 计算循环执行次数 trip = (N > 0) ? N : 0
+    // 计算循环执行次数 trip = (N > init) ? ceilDiv(N - init, step) : 0
+    //   diff       = N - init
+    // 当 step 为正整数时 ceilDiv(diff, step) = (diff + step - 1) / step
+    //   tripRaw    = (diff + step - 1) / step
+    //   tripPos    = diff > 0
+    //   trip       = tripPos ? tripRaw : 0
+    // tripPos 同时用于 ModularAdd：循环未执行时出口值应为 start
     auto * zero = mod->newConstInteger(intType, 0);
-    auto * tripCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_GT_I, bound, zero, boolType);
-    auto * trip = new SelectInst(func, tripCmp, bound, zero, intType);
-    appendInst(tripCmp);
-    appendInst(trip);
+    auto * diff = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, bound, inductionStart, intType);
+    auto * tripPos = new ICmpInst(func, IRInstOperator::IRINST_OP_GT_I, diff, zero, boolType);
+    appendInst(diff);
+    appendInst(tripPos);
+
+    Value * trip = nullptr;
+    if (inductionStep == 1) {
+        // 步长为 1 时 ceilDiv(diff, 1) = diff，省去多余的加法和除法
+        trip = new SelectInst(func, tripPos, diff, zero, intType);
+        appendInst(static_cast<Instruction *>(trip));
+    } else {
+        auto * stepConst = mod->newConstInteger(intType, inductionStep);
+        auto * stepMinusOne = mod->newConstInteger(intType, inductionStep - 1);
+        auto * numerator =
+            new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, diff, stepMinusOne, intType);
+        auto * tripRaw =
+            new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, numerator, stepConst, intType);
+        auto * tripSelect = new SelectInst(func, tripPos, tripRaw, zero, intType);
+        appendInst(numerator);
+        appendInst(tripRaw);
+        appendInst(tripSelect);
+        trip = tripSelect;
+    }
 
     bool changed = false;
     for (auto & entry : candidates) {
@@ -326,7 +354,7 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
                 new BinaryInst(func, IRInstOperator::IRINST_OP_MOD_I, base, shape.modulus, intType);
             appendInst(modVal);
             // trip 为 0 时循环未执行，出口值应为 start，故按 trip>0 选择
-            auto * select = new SelectInst(func, tripCmp, modVal, shape.start, intType);
+            auto * select = new SelectInst(func, tripPos, modVal, shape.start, intType);
             appendInst(select);
             finalValue = select;
         }
