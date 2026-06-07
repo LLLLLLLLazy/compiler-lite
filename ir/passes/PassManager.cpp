@@ -304,6 +304,25 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         return pass.run();
     });
 
+    // LateInline：定点循环优化收敛后再做一轮内联。此时 SCEV 闭式替换、
+    // RemoveEmptyLoop 等已消除大量循环体指令，原本超过指令阈值的函数
+    // 可能已瘦身到可内联的规模。内联后清理死函数并下沉全局标量，
+    // 若 IR 发生变化，PassManager 会再跑一轮定点迭代优化新内联的代码
+    registerPostFixedPointModulePass([](Module * currentModule) {
+        SmallFunctionInline inlinePass(currentModule);
+        bool changed = inlinePass.run();
+        if (changed) {
+            DeadFunctionElim deadFuncElim(currentModule);
+            deadFuncElim.run();
+
+            GlobalToLocal globalToLocal(currentModule);
+            globalToLocal.run();
+
+            runPostInlineCleanupPipeline(currentModule);
+        }
+        return changed;
+    });
+
     registerLateFunctionPass([](Function * func) {
         return runPostFixedPointLoopCleanupPipeline(func);
     });
@@ -347,13 +366,28 @@ void PassManager::run()
         runner(module);
     }
 
-    if (!fixedPointFunctionPasses.empty()) {
+    auto runFixedPointLoop = [this]() {
+        if (fixedPointFunctionPasses.empty()) {
+            return;
+        }
         bool changed = false;
         int32_t round = 0;
         do {
             changed = runFunctionPassGroup(fixedPointFunctionPasses);
             ++round;
         } while (changed && round < maxFixedPointRounds);
+    };
+
+    runFixedPointLoop();
+
+    // 晚期内联（LateInline）等模块级 pass：在循环优化瘦身后再尝试内联，
+    // 若改变了 IR，则再跑一轮定点迭代消化新内联进来的代码
+    bool postChanged = false;
+    for (const auto & runner : postFixedPointModulePasses) {
+        postChanged = runner(module) || postChanged;
+    }
+    if (postChanged) {
+        runFixedPointLoop();
     }
 
     runFunctionPassGroup(lateFunctionPasses);
@@ -366,6 +400,7 @@ void PassManager::clear()
     lateModulePasses.clear();
     functionPasses.clear();
     fixedPointFunctionPasses.clear();
+    postFixedPointModulePasses.clear();
     lateFunctionPasses.clear();
     maxFixedPointRounds = 0;
 }
@@ -396,6 +431,13 @@ void PassManager::registerFunctionPass(FunctionPassRunner runner)
 void PassManager::registerFixedPointFunctionPass(FunctionPassRunner runner)
 {
     fixedPointFunctionPasses.push_back(std::move(runner));
+}
+
+/// @brief 注册在定点迭代收敛后执行的模块级 pass
+/// @param runner pass 执行器
+void PassManager::registerPostFixedPointModulePass(ModulePassRunner runner)
+{
+    postFixedPointModulePasses.push_back(std::move(runner));
 }
 
 /// @brief 注册在定点迭代收敛后执行一次的后置函数级 pass

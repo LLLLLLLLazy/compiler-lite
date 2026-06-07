@@ -52,6 +52,14 @@ private:
     /// @param runner pass 执行器
     void registerFixedPointFunctionPass(FunctionPassRunner runner);
 
+    /// @brief 注册在定点迭代收敛后执行的模块级 pass
+    ///
+    /// 用于晚期内联（LateInline）等场景：经过 SCEV 闭式替换与
+    /// RemoveEmptyLoop 瘦身后，原本体积过大的函数可能已可内联。
+    /// 若该组 pass 改变了 IR，定点迭代会再执行一轮以优化新内联的代码
+    /// @param runner pass 执行器
+    void registerPostFixedPointModulePass(ModulePassRunner runner);
+
     /// @brief 注册在定点迭代收敛后执行一次的后置函数级 pass
     /// @param runner pass 执行器
     void registerLateFunctionPass(FunctionPassRunner runner);
@@ -71,6 +79,7 @@ private:
     std::vector<ModulePassRunner> lateModulePasses;
     std::vector<FunctionPassRunner> functionPasses;
     std::vector<FunctionPassRunner> fixedPointFunctionPasses;
+    std::vector<ModulePassRunner> postFixedPointModulePasses;
     std::vector<FunctionPassRunner> lateFunctionPasses;
     int32_t maxFixedPointRounds = 0;
 };
