@@ -764,9 +764,6 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 	// 逐个保存callee-saved寄存器到栈帧顶部
 	// savedRegs由CodeGeneratorRiscV64根据实际使用情况计算得出，仅保存必要的寄存器
 	for (int i = 0; i < static_cast<int>(savedRegs.size()); ++i) {
-		if (savedRegs[i] == RISCV64_RA_REG_NO) {
-			continue;
-		}
 		int offset = currentFrameSize - (i + 1) * 8;
 		// 通过寄存器编号查找对应的寄存器名称
 		const std::string & regName = PlatformRiscV64::regName[savedRegs[i]];
