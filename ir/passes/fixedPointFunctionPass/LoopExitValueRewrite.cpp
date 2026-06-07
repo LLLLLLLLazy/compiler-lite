@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <unordered_set>
 #include <vector>
 
@@ -66,15 +67,105 @@ void insertAfterPhis(BasicBlock * bb, Instruction * inst)
 struct RecurrenceShape {
     enum class Kind {
         None,
-        Affine,    ///< p_{k+1} = p_k + c
-        ModularAdd ///< p_{k+1} = (p_k + c) % M
+        Affine,     ///< p_{k+1} = p_k + c
+        ModularAdd, ///< p_{k+1} = (p_k + c) % M
+        DivPow2     ///< p_{k+1} = p_k / 2^shiftPerStep（每步除以同一个 2 的幂常量）
     };
 
     Kind kind = Kind::None;
-    Value * start = nullptr; ///< 来自 preheader 的初值
-    Value * step = nullptr;  ///< 每次迭代增量 c（循环不变量）
+    Value * start = nullptr;   ///< 来自 preheader 的初值
+    Value * step = nullptr;    ///< 每次迭代增量 c（循环不变量）
     Value * modulus = nullptr; ///< 模数 M（仅 ModularAdd）
+    int32_t shiftPerStep = 0;  ///< 每步除数对应的右移位数 log2(divisor)（仅 DivPow2）
 };
+
+/// @brief 判断正整数是否为 2 的幂，并返回其 log2
+/// @param value 待判断值
+/// @param shift 输出：当 value 为 2 的幂时其以 2 为底的对数
+/// @return true 表示 value 是大于 1 的 2 的幂
+bool isPositivePowerOfTwo(int32_t value, int32_t & shift)
+{
+    if (value <= 1 || (value & (value - 1)) != 0) {
+        return false;
+    }
+    shift = 0;
+    int32_t v = value;
+    while ((v & 1) == 0) {
+        v >>= 1;
+        ++shift;
+    }
+    return true;
+}
+
+/// @brief 在出口块发射 32 位有符号除以 2 的幂的闭式表达式 start sdiv 2^s
+///
+/// 其中 s = shiftPerStep * trip 为运行时不变量。有符号除法向零取整，需对负数
+/// 做偏置修正：q = (n + ((n>>31) >>u (32-s))) >> s。由于 s 可能为 0 或 >= 32，
+/// 而 RISC-V 的 W 后缀移位仅取移位量低 5 位，故用 select 处理这两种边界：
+///   - s == 0      ：q = n
+///   - 0 < s < 32  ：q = (n + bias) ashr s
+///   - s >= 32     ：q = n ashr 31（结果为 0 或 -1，即符号位铺满）
+///
+/// @param func 所在函数
+/// @param mod 所属模块
+/// @param start 被除数 n（循环不变量）
+/// @param shiftPerStep 每步右移位数 log2(每步除数)
+/// @param trip 循环执行次数
+/// @param intType 32 位整型
+/// @param boolType 比较结果布尔类型
+/// @param appendInst 将新指令追加到出口块的回调
+/// @return 闭式结果值
+Value * emitSignedDivByPow2(Function * func,
+                            Module * mod,
+                            Value * start,
+                            int32_t shiftPerStep,
+                            Value * trip,
+                            Type * intType,
+                            Type * boolType,
+                            const std::function<void(Instruction *)> & appendInst)
+{
+    auto * shiftPerStepConst = mod->newConstInteger(intType, shiftPerStep);
+    // totalShift = shiftPerStep * trip
+    auto * totalShift =
+        new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, shiftPerStepConst, trip, intType);
+    appendInst(totalShift);
+
+    // sign = start ashr 31（非负为 0，负数为 -1）
+    auto * c31 = mod->newConstInteger(intType, 31);
+    auto * sign = new BinaryInst(func, IRInstOperator::IRINST_OP_ASHR_I, start, c31, intType);
+    appendInst(sign);
+
+    // bias = sign lshr (32 - totalShift)，仅在 0 < totalShift < 32 时有效
+    auto * c32 = mod->newConstInteger(intType, 32);
+    auto * shiftBack = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, c32, totalShift, intType);
+    appendInst(shiftBack);
+    auto * bias = new BinaryInst(func, IRInstOperator::IRINST_OP_LSHR_I, sign, shiftBack, intType);
+    appendInst(bias);
+
+    // biased = start + bias；qNormal = biased ashr totalShift
+    auto * biased = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, start, bias, intType);
+    appendInst(biased);
+    auto * qNormal =
+        new BinaryInst(func, IRInstOperator::IRINST_OP_ASHR_I, biased, totalShift, intType);
+    appendInst(qNormal);
+
+    // totalShift == 0 时结果应为 start（移位偏置序列在 s==0 时不成立）
+    auto * zero = mod->newConstInteger(intType, 0);
+    auto * isZeroShift =
+        new ICmpInst(func, IRInstOperator::IRINST_OP_EQ_I, totalShift, zero, boolType);
+    appendInst(isZeroShift);
+    auto * qNonNeg = new SelectInst(func, isZeroShift, start, qNormal, intType);
+    appendInst(qNonNeg);
+
+    // totalShift >= 32 时结果为 sign（符号位铺满，即 0 或 -1）
+    auto * isWideShift =
+        new ICmpInst(func, IRInstOperator::IRINST_OP_GE_I, totalShift, c32, boolType);
+    appendInst(isWideShift);
+    auto * result = new SelectInst(func, isWideShift, sign, qNonNeg, intType);
+    appendInst(result);
+
+    return result;
+}
 
 /// @brief 识别头部 phi 的递推形态
 /// @param phi 头部 phi（恰有两个 incoming：preheader 与 latch）
@@ -161,6 +252,19 @@ RecurrenceShape analyzeRecurrence(PhiInst * phi,
                 shape.modulus = modulus;
                 return shape;
             }
+        }
+    }
+
+    // 形态三：p_next = p / D，其中 D 为大于 1 的 2 的幂常量
+    // 经过 trip 次迭代后 p_exit = start / D^trip = start / 2^(log2(D)*trip)
+    if (latchInst->getOp() == IRInstOperator::IRINST_OP_DIV_I && latchInst->getLHS() == phi) {
+        auto * divisorConst = dynamic_cast<ConstInteger *>(latchInst->getRHS());
+        int32_t shift = 0;
+        if (divisorConst && isPositivePowerOfTwo(divisorConst->getVal(), shift)) {
+            shape.kind = RecurrenceShape::Kind::DivPow2;
+            shape.start = startValue;
+            shape.shiftPerStep = shift;
+            return shape;
         }
     }
 
@@ -340,23 +444,32 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
         PhiInst * phi = entry.first;
         const RecurrenceShape & shape = entry.second;
 
-        // delta = step * trip
-        auto * delta = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, shape.step, trip, intType);
-        appendInst(delta);
-        // base = start + delta
-        auto * base = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, shape.start, delta, intType);
-        appendInst(base);
+        Value * finalValue = nullptr;
 
-        Value * finalValue = base;
-        if (shape.kind == RecurrenceShape::Kind::ModularAdd) {
-            // modVal = (start + step * trip) % M
-            auto * modVal =
-                new BinaryInst(func, IRInstOperator::IRINST_OP_MOD_I, base, shape.modulus, intType);
-            appendInst(modVal);
-            // trip 为 0 时循环未执行，出口值应为 start，故按 trip>0 选择
-            auto * select = new SelectInst(func, tripPos, modVal, shape.start, intType);
-            appendInst(select);
-            finalValue = select;
+        if (shape.kind == RecurrenceShape::Kind::DivPow2) {
+            // 每步除以 2^shiftPerStep，trip 步后等价于 start sdiv 2^(shiftPerStep*trip)
+            finalValue = emitSignedDivByPow2(func, mod, shape.start, shape.shiftPerStep, trip, intType,
+                                             boolType, appendInst);
+        } else {
+            // Affine / ModularAdd：delta = step * trip，base = start + delta
+            auto * delta =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, shape.step, trip, intType);
+            appendInst(delta);
+            auto * base =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, shape.start, delta, intType);
+            appendInst(base);
+
+            finalValue = base;
+            if (shape.kind == RecurrenceShape::Kind::ModularAdd) {
+                // modVal = (start + step * trip) % M
+                auto * modVal =
+                    new BinaryInst(func, IRInstOperator::IRINST_OP_MOD_I, base, shape.modulus, intType);
+                appendInst(modVal);
+                // trip 为 0 时循环未执行，出口值应为 start，故按 trip>0 选择
+                auto * select = new SelectInst(func, tripPos, modVal, shape.start, intType);
+                appendInst(select);
+                finalValue = select;
+            }
         }
 
         // 仅替换循环体外对 phi 的使用

@@ -19,6 +19,9 @@ enum class IRInstOperator : std::int8_t {
     IRINST_OP_MUL_I,
     IRINST_OP_DIV_I,
     IRINST_OP_MOD_I,
+    IRINST_OP_SHL_I,   ///< 逻辑左移
+    IRINST_OP_ASHR_I,  ///< 算术右移（保留符号位）
+    IRINST_OP_LSHR_I,  ///< 逻辑右移（高位补 0）
     IRINST_OP_LT_I,
     IRINST_OP_GT_I,
     IRINST_OP_LE_I,
