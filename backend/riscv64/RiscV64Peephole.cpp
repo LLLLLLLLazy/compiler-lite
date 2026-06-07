@@ -1282,7 +1282,9 @@ bool reduceMulByConst(InstList & code)
 		} catch (...) {
 			continue;
 		}
-		if (imm < 2 || imm > 15) {
+		// 扩展范围：支持更多2^k±1模式，以及负数
+		const int absImm = imm < 0 ? -imm : imm;
+		if (absImm < 2 || absImm > 127) {
 			continue;
 		}
 
@@ -1311,18 +1313,24 @@ bool reduceMulByConst(InstList & code)
 		}
 		const std::string var = (t == constReg) ? s : t;
 
+		// 扩展的强度削减模式：支持所有2^k±1形式以及负数
 		int shift = 0;
 		std::string followOp;
-		if (isPowerOfTwo(imm)) {
-			shift = log2PowerOfTwo(imm);
-		} else if (imm == 3 || imm == 5 || imm == 9) {
-			shift = log2PowerOfTwo(imm - 1);
-			followOp = "addw";
-		} else if (imm == 7 || imm == 15) {
-			shift = log2PowerOfTwo(imm + 1);
-			followOp = "subw";
+		bool needNegate = imm < 0;  // 负数乘法需要最后取反
+
+		if (isPowerOfTwo(absImm)) {
+			// 2的幂：直接移位
+			shift = log2PowerOfTwo(absImm);
+		} else if (isPowerOfTwo(absImm - 1)) {
+			// 2^k + 1: 例如 3=2+1, 5=4+1, 9=8+1, 17=16+1, ...
+			shift = log2PowerOfTwo(absImm - 1);
+			followOp = "addw";  // (x << k) + x
+		} else if (isPowerOfTwo(absImm + 1)) {
+			// 2^k - 1: 例如 7=8-1, 15=16-1, 31=32-1, 63=64-1, ...
+			shift = log2PowerOfTwo(absImm + 1);
+			followOp = "subw";  // (x << k) - x
 		} else {
-			continue;
+			continue;  // 不支持的模式
 		}
 
 		if (!followOp.empty() && d == var) {
@@ -1341,6 +1349,10 @@ bool reduceMulByConst(InstList & code)
 		code.insert(insertPos, new RiscV64Inst("slliw", d, var, std::to_string(shift)));
 		if (!followOp.empty()) {
 			code.insert(insertPos, new RiscV64Inst(followOp, d, d, var));
+		}
+		// 负数乘法：生成 -result
+		if (needNegate) {
+			code.insert(insertPos, new RiscV64Inst("subw", d, "zero", d));
 		}
 
 		changed = true;

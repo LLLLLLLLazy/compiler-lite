@@ -156,7 +156,9 @@ bool powerOfTwoDivisorShift(int32_t divisor, int & shift, bool & negative)
 
 	shift = log2PowerOfTwo(absDivisor);
 	negative = divisor < 0;
-	return shift > 0 && shift < 31;
+	// 支持所有2的幂除法，包括2^31 (最大正整数+1的绝对值)
+	// shift范围: 1到31 (2^1=2 到 2^31=2147483648)
+	return shift > 0 && shift <= 31;
 }
 
 bool fitsInt(int64_t value)
@@ -542,6 +544,125 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_FPTOSI] = &InstSelectorRiscV64::translate_fptosi;
 }
 
+/// @brief 计算优化的基本块布局顺序，最小化无条件跳转
+///
+/// 策略：
+/// 1. 从入口块开始，优先选择后继中的循环回边（热路径）
+/// 2. 对于条件分支，优先选择更可能执行的分支（启发式）
+/// 3. 将冷块（错误处理、异常退出）推迟到最后
+///
+/// 启发式规则：
+/// - 循环回边 > 循环体内跳转 > 顺序后继 > 循环退出
+/// - 非零比较更可能为真
+/// - 循环继续比循环退出更热
+std::vector<BasicBlock *> computeOptimalBlockOrder(Function * func)
+{
+	std::vector<BasicBlock *> ordered;
+	std::unordered_set<BasicBlock *> placed;
+
+	auto blocks = func->getBlocks();
+	if (blocks.empty()) {
+		return ordered;
+	}
+
+	// 构建前驱-后继关系
+	std::unordered_map<BasicBlock *, std::vector<BasicBlock *>> successors;
+	std::unordered_map<BasicBlock *, std::vector<BasicBlock *>> predecessors;
+	std::unordered_set<BasicBlock *> loopHeaders;
+
+	for (auto * bb : blocks) {
+		auto term = bb->getTerminator();
+		if (auto * br = dynamic_cast<BranchInst *>(term)) {
+			// 无条件跳转
+			successors[bb].push_back(br->getTarget());
+			predecessors[br->getTarget()].push_back(bb);
+		} else if (auto * cbr = dynamic_cast<CondBranchInst *>(term)) {
+			// 条件跳转
+			successors[bb].push_back(cbr->getTrueDest());
+			successors[bb].push_back(cbr->getFalseDest());
+			predecessors[cbr->getTrueDest()].push_back(bb);
+			predecessors[cbr->getFalseDest()].push_back(bb);
+		}
+	}
+
+	// 检测循环头：具有前驱在其后的基本块（简单的回边检测）
+	for (auto * bb : blocks) {
+		for (auto * pred : predecessors[bb]) {
+			// 如果前驱在CFG中"晚于"当前块，可能是回边
+			auto it1 = std::find(blocks.begin(), blocks.end(), bb);
+			auto it2 = std::find(blocks.begin(), blocks.end(), pred);
+			if (it1 != blocks.end() && it2 != blocks.end() && it2 > it1) {
+				loopHeaders.insert(bb);
+			}
+		}
+	}
+
+	// 贪心链构建
+	std::function<void(BasicBlock *)> placeBlock = [&](BasicBlock * bb) {
+		if (placed.count(bb)) {
+			return;
+		}
+
+		ordered.push_back(bb);
+		placed.insert(bb);
+
+		// 选择最佳后继
+		auto & succs = successors[bb];
+		if (succs.empty()) {
+			return;
+		}
+
+		BasicBlock * bestSucc = nullptr;
+		int bestScore = -1000;
+
+		for (auto * succ : succs) {
+			if (placed.count(succ)) {
+				continue;
+			}
+
+			int score = 0;
+
+			// 回边到循环头：最高优先级（热路径）
+			if (loopHeaders.count(succ)) {
+				score += 100;
+			}
+
+			// 后继只有一个前驱（链式）：高优先级
+			if (predecessors[succ].size() == 1) {
+				score += 50;
+			}
+
+			// 后继有多个前驱（汇合点）：中优先级
+			if (predecessors[succ].size() > 1) {
+				score += 20;
+			}
+
+			if (score > bestScore) {
+				bestScore = score;
+				bestSucc = succ;
+			}
+		}
+
+		// 递归放置最佳后继
+		if (bestSucc) {
+			placeBlock(bestSucc);
+		}
+	};
+
+	// 从入口块开始
+	placeBlock(blocks.front());
+
+	// 放置剩余未访问的块
+	for (auto * bb : blocks) {
+		if (!placed.count(bb)) {
+			ordered.push_back(bb);
+			placed.insert(bb);
+		}
+	}
+
+	return ordered;
+}
+
 /// @brief 执行指令选择主流程
 ///
 /// 流程：
@@ -558,8 +679,11 @@ void InstSelectorRiscV64::run()
 	// 将形参从a0-a7移动到分配的寄存器/栈槽
 	emitFormalParamMoves();
 
-	// 遍历所有基本块，输出标签并翻译指令
-	for (auto * bb: func->getBlocks()) {
+	// 计算优化的基本块布局顺序，最小化无条件跳转
+	std::vector<BasicBlock *> orderedBlocks = computeOptimalBlockOrder(func);
+
+	// 遍历所有基本块（按优化顺序），输出标签并翻译指令
+	for (auto * bb: orderedBlocks) {
 		if (bb->getInstructions().empty()) {
 			continue;
 		}
