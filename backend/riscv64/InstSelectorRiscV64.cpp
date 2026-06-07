@@ -1616,9 +1616,11 @@ bool InstSelectorRiscV64::tryTranslateDivBySmallPowerOfTwo(Instruction * inst)
 	const std::string biasName = PlatformRiscV64::regName[bias.reg()];
 
 	// C整数除法向零截断；负数右移会向-∞取整，因此先加(d-1)形式的bias。
-	// 对于除以2（shift==1），使用优化的3指令序列：x/2 = (x + (x>>31)) >> 1
+	// 对于除以2（shift==1），bias应该是符号位：负数时为1，正数时为0
+	// 修复：使用srliw从符号掩码生成bias，而不是直接使用全1的符号掩码
 	if (shift == 1) {
 		iloc.inst("sraiw", biasName, srcName, "31");
+		iloc.inst("srliw", biasName, biasName, "31");  // 将全1变成0x1，保留最低位
 		iloc.inst("addw", dstName, srcName, biasName);
 		iloc.inst("sraiw", dstName, dstName, "1");
 		if (negativeDivisor) {
