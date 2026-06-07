@@ -7,6 +7,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <set>
+#include <string>
 #include <vector>
 
 class Function;
@@ -56,6 +58,29 @@ private:
     /// @param runner pass 执行器
     void registerLateFunctionPass(FunctionPassRunner runner);
 
+    /// @brief 注册模块级 pass（带名字，可被 MINIC_DISABLE_PASSES 关闭）
+    void registerModulePass(const std::string & name, ModulePassRunner runner);
+
+    /// @brief 注册定点函数级 pass 之前执行的模块级 pass（带名字，可关闭）
+    void registerLateModulePass(const std::string & name, ModulePassRunner runner);
+
+    /// @brief 注册单次函数级 pass（带名字，可关闭）
+    void registerFunctionPass(const std::string & name, FunctionPassRunner runner);
+
+    /// @brief 注册参与定点迭代的函数级 pass（带名字，可关闭）
+    void registerFixedPointFunctionPass(const std::string & name, FunctionPassRunner runner);
+
+    /// @brief 注册定点迭代收敛后执行一次的后置函数级 pass（带名字，可关闭）
+    void registerLateFunctionPass(const std::string & name, FunctionPassRunner runner);
+
+    /// @brief 从 MINIC_DISABLE_PASSES 环境变量加载被关闭的 pass 名集合（仅加载一次）
+    void loadPassToggles();
+
+    /// @brief 判断某个具名 pass 是否启用；并在 MINIC_DUMP_PASSES 置位时打印 pass 清单
+    /// @param name pass 名
+    /// @return true 表示该 pass 应被注册执行
+    bool isPassEnabled(const std::string & name);
+
     /// @brief 执行一组函数级 pass
     /// @param runners pass 执行器列表
     /// @return true 表示至少有一个 pass 修改了 IR
@@ -73,4 +98,9 @@ private:
     std::vector<FunctionPassRunner> fixedPointFunctionPasses;
     std::vector<FunctionPassRunner> lateFunctionPasses;
     int32_t maxFixedPointRounds = 0;
+
+    /// @brief 被 MINIC_DISABLE_PASSES 关闭的 pass 名集合
+    std::set<std::string> disabledPasses;
+    /// @brief 是否已加载过 pass 开关（避免重复解析环境变量）
+    bool togglesLoaded = false;
 };
