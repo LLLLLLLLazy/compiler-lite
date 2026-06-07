@@ -34,6 +34,7 @@
 #include "StoreInst.h"
 #include "Value.h"
 #include "AnalysisCache.h"
+#include "CostModel.h"
 #include "ZExtInst.h"
 
 namespace {
@@ -162,6 +163,16 @@ bool SimpleLoopUnroll::tryUnrollHeader(BasicBlock * header, ScalarEvolution & sc
     const int32_t tripCount = loop.tripCount;
     if (tripCount <= 0 || tripCount > kMaxUnrollTripCount) {
         return false;
+    }
+
+    // 收益性判断：完全展开把循环体复制 tripCount 份，体内每个产生结果的指令都会膨胀为
+    // 多个同时存在的临时值，过多会逼出 spill。用“结果指令数 × tripCount”作压力上界代理。
+    if (CostModel::profitabilityEnabled()) {
+        const CostModel::RegPressure rp = CostModel::estimateRegPressure(bodyInsts);
+        if ((rp.gpr + rp.fpr) * tripCount > CostModel::kUnrollMaxLiveProduct) {
+            CostModel::remark("unroll", false, "live*trip exceeds register budget");
+            return false;
+        }
     }
 
     if (!hasSingleBranchTo(preheader, header)) {
