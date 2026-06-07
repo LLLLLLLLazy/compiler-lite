@@ -31,6 +31,7 @@
 #include "StoreInst.h"
 #include "Value.h"
 #include "AnalysisCache.h"
+#include "CostModel.h"
 
 namespace {
 
@@ -992,6 +993,31 @@ bool LoopTiling::tryTileHeader(BasicBlock * header, LoopInfo & loopInfo, ScalarE
         !loopHasOnlyExit(*outerBody, outer.exit) ||
         !loopHasOnlyExit(*innerBody, inner.exit) || !isDependenceSafe(func, mod, scev, outer, inner, *innerBody)) {
         return false;
+    }
+
+    // 收益性判断(合法性已过；本地 matchCanonicalLoop 已保证两维 tripCount≥64)：
+    // 估算整个嵌套的访存工作集，若明显能放进 L1，则不存在跨 tile 的 cache 复用收益，
+    // 分块只会徒增控制流开销。用内层访存条数加权，避免误伤多数组(如 matmul)的循环。
+    if (CostModel::profitabilityEnabled() && outer.hasConstTripCount && inner.hasConstTripCount) {
+        long innerMemOps = 0;
+        for (auto * bb : *innerBody) {
+            for (auto * inst : bb->getInstructions()) {
+                const IRInstOperator op = inst->getOp();
+                if (op == IRInstOperator::IRINST_OP_LOAD || op == IRInstOperator::IRINST_OP_STORE) {
+                    ++innerMemOps;
+                }
+            }
+        }
+        if (innerMemOps == 0) {
+            innerMemOps = 1;
+        }
+        constexpr long kElemBytes = 4;  // SysY 仅 i32/f32，均为 4 字节
+        const long footprint =
+            static_cast<long>(outer.tripCount) * inner.tripCount * innerMemOps * kElemBytes;
+        if (footprint < CostModel::kL1Bytes) {
+            CostModel::remark("tiling", false, "working set fits L1 (no reuse benefit)");
+            return false;
+        }
     }
 
     auto * rowHeader = func->newBasicBlock();

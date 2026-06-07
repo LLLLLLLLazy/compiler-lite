@@ -36,6 +36,7 @@
 #include "Value.h"
 #include "VectorInst.h"
 #include "AnalysisCache.h"
+#include "CostModel.h"
 #include "Types/VectorType.h"
 
 namespace {
@@ -609,6 +610,19 @@ bool LoopVectorize::tryVectorizeHeader(BasicBlock * header, ScalarEvolution & sc
     // 当前 pass 只处理 header+单 body/latch 的最小循环，避免复杂 CFG 下错误迁移指令。
     if (!loopBodyPtr || loopBodyPtr->size() != 2 || loopAlreadyVectorized(*loopBodyPtr)) {
         return false;
+    }
+
+    // 收益性判断(合法性已过)：trip count 已知且过短时，vsetvli 设置与归约横向 reduce
+    // 的固定开销摊不开；循环体过轻同样不值得向量化。此处尚未改写 IR，可安全跳过。
+    if (CostModel::profitabilityEnabled()) {
+        if (loop.hasConstTripCount && loop.tripCount < CostModel::kVecMinTripCount) {
+            CostModel::remark("vectorize", false, "trip count below threshold");
+            return false;
+        }
+        if (CostModel::loopBodyCost(*loopBodyPtr) < CostModel::kVecMinBodyCost) {
+            CostModel::remark("vectorize", false, "loop body too light");
+            return false;
+        }
     }
 
     BasicBlock * body = loop.body;
