@@ -44,6 +44,9 @@ bool isPureLoopInvariantOp(IRInstOperator op)
         case IRInstOperator::IRINST_OP_MUL_I:
         case IRInstOperator::IRINST_OP_DIV_I:
         case IRInstOperator::IRINST_OP_MOD_I:
+        case IRInstOperator::IRINST_OP_SHL_I:
+        case IRInstOperator::IRINST_OP_ASHR_I:
+        case IRInstOperator::IRINST_OP_LSHR_I:
         case IRInstOperator::IRINST_OP_LT_I:
         case IRInstOperator::IRINST_OP_GT_I:
         case IRInstOperator::IRINST_OP_LE_I:
@@ -359,11 +362,16 @@ bool LICM::tryHoistLoop(BasicBlock * header,
                     continue;
                 }
 
-                if (dynamic_cast<LoadInst *>(inst) && !isSafeLoadToHoist(inst, loopBody)) {
+                // 已通过 isSafeLoadToHoist 确认安全的 load：地址来自只读全局或非逃逸局部
+                // 变量，且循环内无别名 store。这类 load 的地址在进入循环前已确定有效，
+                // 推测执行不会触发访存异常，因此无需满足退出点支配约束
+                bool isSafeLoad = dynamic_cast<LoadInst *>(inst) && isSafeLoadToHoist(inst, loopBody);
+                if (dynamic_cast<LoadInst *>(inst) && !isSafeLoad) {
                     continue;
                 }
 
-                if (requiresExitDominance(inst) && !dominatesAllLoopExits(bb, loopBody, domTree)) {
+                bool needsExitDom = requiresExitDominance(inst) && !isSafeLoad;
+                if (needsExitDom && !dominatesAllLoopExits(bb, loopBody, domTree)) {
                     continue;
                 }
 
@@ -599,9 +607,11 @@ bool LICM::isSafeLoadToHoist(Instruction * inst, const std::unordered_set<BasicB
     }
 
     Value * pointer = load->getPointerOperand();
-    if (auto * global = dynamic_cast<GlobalVariable *>(getPointerRoot(pointer))) {
-        return isReadOnlyGlobal(mod, global) &&
-               !blocksMayClobberLoad(pointer,
+    if (dynamic_cast<GlobalVariable *>(getPointerRoot(pointer))) {
+        // 全局变量的地址在程序启动时已静态分配，恒为可访问地址，推测执行其 load 不会
+        // 触发访存异常。因此无需要求全局只读，只要循环内没有别名 store/调用改写该地址，
+        // 外提即安全。blocksMayClobberLoad 已通过指针根对象比较判定别名
+        return !blocksMayClobberLoad(pointer,
                                      loopBody,
                                      [](CallInst * call) { return call != nullptr && !isPureCall(call); });
     }

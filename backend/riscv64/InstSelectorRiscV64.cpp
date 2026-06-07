@@ -499,6 +499,9 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_MUL_I] = &InstSelectorRiscV64::translate_mul;
 	translatorHandlers[IRInstOperator::IRINST_OP_DIV_I] = &InstSelectorRiscV64::translate_div;
 	translatorHandlers[IRInstOperator::IRINST_OP_MOD_I] = &InstSelectorRiscV64::translate_mod;
+	translatorHandlers[IRInstOperator::IRINST_OP_SHL_I] = &InstSelectorRiscV64::translate_shl;
+	translatorHandlers[IRInstOperator::IRINST_OP_ASHR_I] = &InstSelectorRiscV64::translate_ashr;
+	translatorHandlers[IRInstOperator::IRINST_OP_LSHR_I] = &InstSelectorRiscV64::translate_lshr;
 	translatorHandlers[IRInstOperator::IRINST_OP_LT_I] = &InstSelectorRiscV64::translate_icmp;
 	translatorHandlers[IRInstOperator::IRINST_OP_GT_I] = &InstSelectorRiscV64::translate_icmp;
 	translatorHandlers[IRInstOperator::IRINST_OP_LE_I] = &InstSelectorRiscV64::translate_icmp;
@@ -1267,6 +1270,68 @@ void InstSelectorRiscV64::translate_mod(Instruction * inst)
 		return;
 	}
 	translate_binary(inst, "remw");
+}
+
+/// @brief 翻译逻辑左移指令（shl）
+void InstSelectorRiscV64::translate_shl(Instruction * inst)
+{
+	translate_shift(inst, "sllw", "slliw");
+}
+
+/// @brief 翻译算术右移指令（ashr，保留符号位）
+void InstSelectorRiscV64::translate_ashr(Instruction * inst)
+{
+	translate_shift(inst, "sraw", "sraiw");
+}
+
+/// @brief 翻译逻辑右移指令（lshr，高位补 0）
+void InstSelectorRiscV64::translate_lshr(Instruction * inst)
+{
+	translate_shift(inst, "srlw", "srliw");
+}
+
+/// @brief 翻译移位指令的通用实现，根据移位量是否为常量选择立即数/寄存器形式
+///
+/// RISC-V 的 W 后缀移位指令对 32 位结果进行符号扩展，移位量取低 5 位
+void InstSelectorRiscV64::translate_shift(Instruction * inst,
+                                          const std::string & regOp,
+                                          const std::string & immOp)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	if (binary == nullptr) {
+		return;
+	}
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+
+	// 移位量为常量时使用立即数形式，仅保留低 5 位以匹配硬件语义
+	if (auto * shiftConst = asConstInteger(binary->getRHS())) {
+		int shiftAmount = shiftConst->getVal() & 31;
+		iloc.inst(immOp,
+			PlatformRiscV64::regName[dstReg],
+			PlatformRiscV64::regName[lhs.reg],
+			std::to_string(shiftAmount));
+		releaseOperand(lhs);
+		storeResult(inst, dstReg, inst);
+		return;
+	}
+
+	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
+	OperandReg rhs = loadOperand(binary->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
+	iloc.inst(regOp,
+		PlatformRiscV64::regName[dstReg],
+		PlatformRiscV64::regName[lhs.reg],
+		PlatformRiscV64::regName[rhs.reg]);
+	releaseOperand(rhs);
+	releaseOperand(lhs);
+	storeResult(inst, dstReg, inst);
 }
 
 /// @brief 翻译浮点二元运算的通用实现

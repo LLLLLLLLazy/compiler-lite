@@ -130,6 +130,14 @@ private:
 	void translate_div(Instruction * inst);
 	/// @brief 翻译mod指令（取模）
 	void translate_mod(Instruction * inst);
+	/// @brief 翻译逻辑左移指令（shl）
+	void translate_shl(Instruction * inst);
+	/// @brief 翻译算术右移指令（ashr，保留符号位）
+	void translate_ashr(Instruction * inst);
+	/// @brief 翻译逻辑右移指令（lshr，高位补 0）
+	void translate_lshr(Instruction * inst);
+	/// @brief 翻译移位指令的通用实现，根据移位量是否为常量选择立即数/寄存器形式
+	void translate_shift(Instruction * inst, const std::string & regOp, const std::string & immOp);
 	/// @brief 翻译icmp指令（整数比较）
 	void translate_icmp(Instruction * inst);
 	/// @brief 翻译fcmp指令（浮点比较）
