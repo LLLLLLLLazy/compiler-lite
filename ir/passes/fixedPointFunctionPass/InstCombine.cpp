@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <functional>
 #include <unordered_set>
 #include <unordered_map>
@@ -75,6 +76,51 @@ bool isFloatOne(Value * value)
 {
     auto * constant = dynamic_cast<ConstFloat *>(value);
     return constant && constant->getBitPattern() == getFloatBitPattern(1.0f);
+}
+
+/// @brief 判断是否为“2 的幂”浮点常量(规格化、尾数为 0)，并且其倒数也是规格化数
+/// @param value 待判断的值（除数）
+/// @param recipOut 输出倒数 1/value（仅在返回 true 时有效）
+/// @return true 表示可安全地把 x / value 改写为 x * (1/value)
+///
+/// 对 2 的幂 C 而言，1/C 在 IEEE-754 下可精确表示，x / C 与 x * (1/C) 逐位相等
+/// （二者都是对同一实数的一次舍入），因此该改写不改变任何浮点结果。
+/// 为稳妥起见，仅当倒数本身也是规格化数时才改写（排除 C=2^127 这类倒数落入非规格化的极端值）。
+bool isFloatPowerOfTwoReciprocal(Value * value, float & recipOut)
+{
+    auto * constant = dynamic_cast<ConstFloat *>(value);
+    if (!constant) {
+        return false;
+    }
+    std::uint32_t bits = constant->getBitPattern();
+    std::uint32_t exp = (bits >> 23U) & 0xFFU;
+    std::uint32_t mant = bits & 0x7FFFFFU;
+    // 规格化 2 的幂：尾数全 0，指数既非 0(零/非规格化)也非 255(inf/nan)
+    if (mant != 0 || exp == 0 || exp == 0xFFU) {
+        return false;
+    }
+    // 倒数 ±2^(127-exp) 的偏置指数为 254-exp；要求其仍为规格化数(指数 in [1,254])
+    if (254U - exp == 0U) {
+        return false;
+    }
+    recipOut = 1.0f / constant->getVal();
+    return true;
+}
+
+/// @brief 将指令 inst 插入到 before 之前（同一基本块内）
+void insertInstBefore(Instruction * before, Instruction * inst)
+{
+    if (!before || !inst || !before->getParentBlock()) {
+        return;
+    }
+    auto * bb = before->getParentBlock();
+    auto & insts = bb->getInstructions();
+    auto pos = std::find(insts.begin(), insts.end(), before);
+    if (pos == insts.end()) {
+        return;
+    }
+    inst->setParentBlock(bb);
+    insts.insert(pos, inst);
 }
 
 /// @brief 顺着新值 copy 链向前转发源值
@@ -346,6 +392,19 @@ bool InstCombine::simplifyBinary(BinaryInst * inst)
         case IRInstOperator::IRINST_OP_DIV_F:
             if (isFloatOne(rhs)) {
                 return replaceInstWithValue(inst, lhs);
+            }
+            {
+                // x / 2^k  ->  x * 2^-k （精确等价，fmul 远快于 fdiv）
+                float recip = 0.0f;
+                if (isFloatPowerOfTwoReciprocal(rhs, recip)) {
+                    auto * mul = new BinaryInst(func,
+                                                IRInstOperator::IRINST_OP_MUL_F,
+                                                lhs,
+                                                mod->newConstFloat(recip),
+                                                inst->getType());
+                    insertInstBefore(inst, mul);
+                    return replaceInstWithValue(inst, mul);
+                }
             }
             break;
 
