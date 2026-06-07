@@ -18,6 +18,7 @@
 #include "DominatorTree.h"
 #include "Function.h"
 #include "AnalysisCache.h"
+#include "CostModel.h"
 #include "Instruction.h"
 #include "PhiInst.h"
 #include "SelectInst.h"
@@ -187,6 +188,24 @@ int32_t getNonTerminatorInstructionCount(BasicBlock * block)
         }
     }
     return count;
+}
+
+/// @brief 统计基本块中非终结指令的静态代价
+/// @param block 目标基本块
+/// @return 非终结指令的代价和
+long getNonTerminatorInstructionCost(BasicBlock * block)
+{
+    if (!block) {
+        return 0;
+    }
+
+    long cost = 0;
+    for (auto * inst : block->getInstructions()) {
+        if (!inst->isTerminator()) {
+            cost += CostModel::instCost(inst);
+        }
+    }
+    return cost;
 }
 
 /// @brief 获取基本块中唯一的非终结指令
@@ -460,6 +479,14 @@ bool tryMatchTriangle(BasicBlock * merge,
             return false;
         }
 
+        // 收益性判断：转 select 会让这条原本有条件执行的指令变为无条件投机执行，
+        // 太贵(如除法/多条浮点)时得不偿失。尚未搬移，可安全跳过。
+        if (CostModel::profitabilityEnabled() &&
+            CostModel::instCost(hoistInst) > CostModel::kSelectMaxSpeculatedInstCost) {
+            CostModel::remark("phi-to-select", false, "speculated arm too expensive");
+            return false;
+        }
+
         moveInstructionBeforeTerminator(hoistInst, branchIncoming.block);
     }
 
@@ -514,6 +541,16 @@ bool tryMatchDiamond(BasicBlock * merge,
     auto * condBr = dynamic_cast<CondBranchInst *>(firstPreds.front()->getTerminator());
     if (!condBr) {
         return false;
+    }
+
+    // 收益性判断：钻石转 select 后两臂都会无条件执行，两臂总代价过高时不划算。
+    if (CostModel::profitabilityEnabled()) {
+        const long armCost = getNonTerminatorInstructionCost(first.block) +
+                             getNonTerminatorInstructionCost(second.block);
+        if (armCost > CostModel::kSelectMaxDiamondTotalCost) {
+            CostModel::remark("phi-to-select", false, "diamond arms too expensive");
+            return false;
+        }
     }
 
     if (condBr->getTrueDest() == first.block && condBr->getFalseDest() == second.block) {
