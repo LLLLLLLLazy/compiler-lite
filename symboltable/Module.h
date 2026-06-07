@@ -72,6 +72,14 @@ public:
         return funcVector;
     }
 
+    /// @brief 从模块中移除一个函数
+    ///
+    /// 移除前会调用 Function::Delete 拆除其全部 def-use 边并释放基本块，
+    /// 使该函数引用的全局值的 use 链同步更新
+    /// @param func 待移除的函数对象
+    /// @return true 表示已成功移除
+    bool removeFunction(Function * func);
+
     /// @brief 获取或创建 i32 常量对象
     ConstInteger * newConstInt32(int32_t intVal);
 

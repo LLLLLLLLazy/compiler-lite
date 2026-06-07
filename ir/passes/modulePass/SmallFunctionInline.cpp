@@ -86,6 +86,20 @@ constexpr int32_t kHotSingleUseLoopLeafMaxInsts = 160;
 constexpr int32_t kHotSingleUseLoopLeafMaxBodyBlocks = 16;
 /// @brief 非热点调用点允许的单层叶子循环函数最大直接调用点数
 constexpr int32_t kLoopLeafMaxCallSites = 4;
+/// @brief 单调用点非叶子含循环函数允许的最大基本块数
+///
+/// 用于把 main 唯一调用的初始化类函数（如 init_matrix）整体内联进 main，
+/// 使其内部访问的全局标量得以被 GlobalToLocal 提升为局部 SSA，
+/// 进而暴露给 SCEV 等循环优化
+constexpr int32_t kSingleUseNonLeafLoopMaxBlocks = 48;
+/// @brief 单调用点非叶子含循环函数允许的最大指令数
+constexpr int32_t kSingleUseNonLeafLoopMaxInsts = 200;
+/// @brief 单调用点非叶子含循环函数允许的最大循环嵌套深度
+constexpr int32_t kSingleUseNonLeafLoopMaxDepth = 3;
+/// @brief 单调用点非叶子含循环函数允许的最大自然循环个数
+constexpr int32_t kSingleUseNonLeafLoopMaxLoops = 6;
+/// @brief 单调用点非叶子含循环函数允许的 alloca 总字节数上限
+constexpr int32_t kSingleUseNonLeafLoopMaxAllocaBytes = 256;
 /// @brief 被内联函数的 alloca 总字节数上限，防止栈帧膨胀
 constexpr int32_t kMaxAllocaBytes = 128;
 /// @brief 循环内热点调用点的 alloca 总字节数上限
@@ -295,6 +309,45 @@ bool isEligibleLoopLeafCallee(Module * mod,
 
     return blockCount <= kLoopLeafMaxBlocks && instCount <= kLoopLeafMaxInsts &&
            loopSummary.maxLoopBodyBlocks <= kHotLoopLeafMaxBodyBlocks;
+}
+
+/// @brief 判断单调用点的非叶子含循环函数是否值得整体内联
+///
+/// 针对像 init_matrix 这样在 main 中只被调用一次、内部调用其他用户函数
+/// 且包含多重循环的初始化型函数。将其内联进 main 后，函数内访问的全局
+/// 标量可被 GlobalToLocal 内化为局部 SSA，从而暴露给后续循环优化
+/// @param mod 所属模块
+/// @param callee 被调函数
+/// @param loopSummary 循环摘要
+/// @param allocaBytes alloca 总字节数
+/// @param blockCount 基本块数量
+/// @param instCount 指令数量
+/// @return true 表示允许在冷的单调用点整体内联
+bool isEligibleSingleUseNonLeafLoopCallee(Module * mod,
+                                          Function * callee,
+                                          const NaturalLoopSummary & loopSummary,
+                                          int32_t allocaBytes,
+                                          int32_t blockCount,
+                                          int32_t instCount)
+{
+    if (!mod || !callee || loopSummary.loopCount == 0) {
+        return false;
+    }
+
+    if (loopSummary.loopCount > kSingleUseNonLeafLoopMaxLoops ||
+        loopSummary.maxDepth > kSingleUseNonLeafLoopMaxDepth) {
+        return false;
+    }
+
+    if (allocaBytes > kSingleUseNonLeafLoopMaxAllocaBytes) {
+        return false;
+    }
+
+    if (countDirectCallSites(mod, callee) != 1) {
+        return false;
+    }
+
+    return blockCount <= kSingleUseNonLeafLoopMaxBlocks && instCount <= kSingleUseNonLeafLoopMaxInsts;
 }
 
 bool isEligibleHotSelfRecursiveLeafCallee(Module * mod,
@@ -716,7 +769,14 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
 
     if (loopSummary.loopCount > 0) {
         if (!leafCallee) {
-            return false;
+            // 非叶子含循环函数仅在 main 等冷的单调用点整体内联，
+            // 目的是把初始化型函数访问的全局标量暴露给 GlobalToLocal
+            return !hotCallSite && isEligibleSingleUseNonLeafLoopCallee(mod,
+                                                                        callee,
+                                                                        loopSummary,
+                                                                        allocaBytes,
+                                                                        blockCount,
+                                                                        instCount);
         }
         if (hotCallSite) {
             return isEligibleHotLoopLeafCallee(mod, callee, loopSummary, allocaBytes, blockCount, instCount) ||
