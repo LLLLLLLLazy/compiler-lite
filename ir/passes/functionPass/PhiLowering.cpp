@@ -114,7 +114,9 @@ BasicBlock * splitCriticalEdge(Function * func, BasicBlock * pred, BasicBlock * 
 /// @param _func 待处理的函数
 /// @param _mod 所属模块
 PhiLowering::PhiLowering(Function * _func, Module * _mod) : func(_func), mod(_mod)
-{}
+{
+    (void) mod;
+}
 
 // ---------------------------------------------------------------------------
 // 对外入口
