@@ -4,6 +4,11 @@
 ///
 
 #include "PassManager.h"
+
+#include <cstdlib>
+#include <iostream>
+#include <sstream>
+
 #include "Function.h"
 #include "Module.h"
 #include "fixedPointFunctionPass/CFGSimplify.h"
@@ -58,55 +63,55 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         return;
     }
 
-    registerModulePass([](Module * currentModule) {
+    registerModulePass("InterproceduralConstProp", [](Module * currentModule) {
         InterproceduralConstProp pass(currentModule);
         return pass.run();
     });
 
-    registerModulePass([](Module * currentModule) {
+    registerModulePass("SmallFunctionInline", [](Module * currentModule) {
         SmallFunctionInline pass(currentModule);
         return pass.run();
     });
 
     // 内联后清除无调用者的死函数，释放其对全局标量的引用，
     // 使 GlobalToLocal 能将初始化型函数访问的全局内化到 main
-    registerModulePass([](Module * currentModule) {
+    registerModulePass("DeadFunctionElim", [](Module * currentModule) {
         DeadFunctionElim pass(currentModule);
         return pass.run();
     });
 
-    registerModulePass([](Module * currentModule) {
+    registerModulePass("GlobalToLocal", [](Module * currentModule) {
         GlobalToLocal pass(currentModule);
         return pass.run();
     });
 
-    registerFunctionPass([this](Function * func) {
+    registerFunctionPass("PureCallCSE", [this](Function * func) {
         PureCallCSE pass(func, module);
         return pass.run();
     });
 
-    registerFunctionPass([](Function * func) {
+    registerFunctionPass("ArrayScalarize", [](Function * func) {
         ArrayScalarize pass(func);
         return pass.run();
     });
 
-    registerFunctionPass([this](Function * func) {
+    registerFunctionPass("Mem2Reg", [this](Function * func) {
         Mem2Reg pass(func, module);
         pass.run();
         return false;
     });
 
-    registerFunctionPass([this](Function * func) {
+    registerFunctionPass("GVN", [this](Function * func) {
         GVN pass(func, module);
         return pass.run();
     });
 
-    registerFunctionPass([](Function * func) {
+    registerFunctionPass("TailRecursionElim", [](Function * func) {
         TailRecursionElim pass(func);
         return pass.run();
     });
 
-    registerLateModulePass([](Module * currentModule) {
+    registerLateModulePass("PostInlineCleanup", [](Module * currentModule) {
         SmallFunctionInline pass(currentModule);
         bool changed = pass.run();
         for (auto * func : currentModule->getFunctionList()) {
@@ -132,7 +137,7 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     // 晚期内联可能让更多初始化型函数变为死函数，
     // 再次清除死函数并下沉其访问的全局标量，然后用 Mem2Reg 把这些
     // 槽位提升到 SSA，为后续循环优化创造条件
-    registerLateModulePass([](Module * currentModule) {
+    registerLateModulePass("PostInlineGlobalCleanup", [](Module * currentModule) {
         DeadFunctionElim deadFuncElim(currentModule);
         bool changed = deadFuncElim.run();
 
@@ -167,19 +172,19 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     // 编译时间不计分，因此采用「变换 → 清理 → 变换 → 清理」的节奏，
     // 让后续分析（SCEV / LoopInfo 等）始终工作在干净的 IR 上，
     // 减少定点迭代收敛所需的轮次
-    registerFixedPointFunctionPass([](Function * func) {
+    registerFixedPointFunctionPass("LocalMemoryOpt", [](Function * func) {
         LocalMemoryOpt pass(func);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("GVN", [this](Function * func) {
         GVN pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("LICM", [this](Function * func) {
         LICM pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("CanonicalizeLoop", [this](Function * func) {
         CanonicalizeLoop pass(func, module);
         return pass.run();
     });
@@ -187,7 +192,7 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     // 破坏 CanonicalizeLoop 建立的 preheader / 专属 exit 规范形式，
     // 从而让下游基于 SCEV 的循环 pass（LoopExitValueRewrite / LoopTiling / LSR）
     // 误判循环形态并产生错误代码，故中期不插入 CFGSimplify
-    registerFixedPointFunctionPass([](Function * func) {
+    registerFixedPointFunctionPass("DeadInstElim", [](Function * func) {
         DeadInstElim pass(func);
         return pass.run();
     });
@@ -195,34 +200,34 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     // ---- 子组2：循环变换 ----
     // 基于 SCEV 把规范计数循环头部递推 phi 的出口取值替换为闭式表达式，
     // 随后消除因此变为无副作用且出口无依赖的空循环
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("LoopExitValueRewrite", [this](Function * func) {
         LoopExitValueRewrite pass(func, module);
         return pass.run();
     });
     // 先清除出口值替换产生的死 phi / 死指令，使更多空循环能被 RemoveEmptyLoop 消除
     // 仅用 DeadInstElim（值级清理，不改变 CFG 形状），避免破坏循环规范形影响下游循环 pass
-    registerFixedPointFunctionPass([](Function * func) {
+    registerFixedPointFunctionPass("DeadInstElim", [](Function * func) {
         DeadInstElim pass(func);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("RemoveEmptyLoop", [this](Function * func) {
         RemoveEmptyLoop pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("LoopTiling", [this](Function * func) {
         LoopTiling pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("LoopStrengthReduce", [this](Function * func) {
         LoopStrengthReduce pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("GVN", [this](Function * func) {
         GVN pass(func, module);
         return pass.run();
     });
     // 仅用值级清理：LSR / Tiling 产生的死指令及时清除，不动 CFG 形状
-    registerFixedPointFunctionPass([](Function * func) {
+    registerFixedPointFunctionPass("DeadInstElim", [](Function * func) {
         DeadInstElim pass(func);
         return pass.run();
     });
@@ -230,72 +235,72 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     // ---- 子组3：向量化 / 展开 ----
     if (enableRVVLoopVectorize) {
         // RVV 向量化放在循环规范化/强度削减之后，输入循环形态更稳定
-        registerFixedPointFunctionPass([this](Function * func) {
+        registerFixedPointFunctionPass("LoopVectorize", [this](Function * func) {
             LoopVectorize pass(func, module);
             return pass.run();
         });
     }
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("SimpleLoopUnroll", [this](Function * func) {
         SimpleLoopUnroll pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("GVN", [this](Function * func) {
         GVN pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([](Function * func) {
+    registerFixedPointFunctionPass("DeadInstElim", [](Function * func) {
         DeadInstElim pass(func);
         return pass.run();
     });
     // 注意， IndVarSimplify 一定要在 SimpleLoopUnroll 之后，否则 IndVarSimplify 会改写那些本来会被展开的循环(<16的迭代次数)，导致 SimpleLoopUnroll 无法 matchCanonicalLoop.
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("IndVarSimplify", [this](Function * func) {
         IndVarSimplify pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("ConstProp", [this](Function * func) {
         ConstProp pass(func, module);
         return pass.run();
     });
 
     // ---- 子组4：晚期值优化 ----
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("PureCallCSE", [this](Function * func) {
         PureCallCSE pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("LICM", [this](Function * func) {
         LICM pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("PureCallLoopCache", [this](Function * func) {
         PureCallLoopCache pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([](Function * func) {
+    registerFixedPointFunctionPass("PhiToSelect", [](Function * func) {
         PhiToSelect pass(func);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("InstCombine", [this](Function * func) {
         InstCombine pass(func, module);
         return pass.run();
     });
     // 子组4 清理：再做一次纯调用 CSE 与常量传播，然后消除不可达块与死指令并简化 CFG
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("PureCallCSE", [this](Function * func) {
         PureCallCSE pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([this](Function * func) {
+    registerFixedPointFunctionPass("ConstProp", [this](Function * func) {
         ConstProp pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass([](Function * func) {
+    registerFixedPointFunctionPass("UnreachableBlockElim", [](Function * func) {
         UnreachableBlockElim pass(func);
         return pass.run();
     });
-    registerFixedPointFunctionPass([](Function * func) {
+    registerFixedPointFunctionPass("DeadInstElim", [](Function * func) {
         DeadInstElim pass(func);
         return pass.run();
     });
-    registerFixedPointFunctionPass([](Function * func) {
+    registerFixedPointFunctionPass("CFGSimplify", [](Function * func) {
         CFGSimplify pass(func);
         return pass.run();
     });
@@ -304,7 +309,7 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     // RemoveEmptyLoop 等已消除大量循环体指令，原本超过指令阈值的函数
     // 可能已瘦身到可内联的规模。内联后清理死函数并下沉全局标量，
     // 若 IR 发生变化，PassManager 会再跑一轮定点迭代优化新内联的代码
-    registerPostFixedPointModulePass([](Module * currentModule) {
+    registerPostFixedPointModulePass("LateInline", [](Module * currentModule) {
         SmallFunctionInline inlinePass(currentModule);
         bool changed = inlinePass.run();
         if (changed) {
@@ -335,7 +340,7 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         return changed;
     });
 
-    registerLateFunctionPass([](Function * func) {
+    registerLateFunctionPass("PostFixedPointLoopCleanup", [](Function * func) {
         if (!func || func->isBuiltin() || func->getBlocks().empty()) {
             return false;
         }
@@ -362,7 +367,7 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     // 再提升循环内重复使用的大常量到 preheader（此时无 ConstProp/InstCombine 会还原），
     // 最后对规范计数循环做 header-test → latch-test 旋转。
     // 放在最后确保无后续 pass 破坏优化结果
-    registerLateFunctionPass([this](Function * func) {
+    registerLateFunctionPass("LateLoopOpt", [this](Function * func) {
         if (!func || func->isBuiltin() || func->getBlocks().empty()) {
             return false;
         }
@@ -395,12 +400,12 @@ void PassManager::registerPhiLoweringPipeline()
         return;
     }
 
-    registerFunctionPass([](Function * func) {
+    registerFunctionPass("PreLoweringPhiToSelect", [](Function * func) {
         PhiToSelect pass(func);
         return pass.run();
     });
 
-    registerFunctionPass([this](Function * func) {
+    registerFunctionPass("PhiLowering", [this](Function * func) {
         PhiLowering pass(func, module);
         pass.run();
         return false;
@@ -530,4 +535,101 @@ bool PassManager::runFunctionPassGroup(const std::vector<FunctionPassRunner> & r
 bool PassManager::isRunnableFunction(Function * func)
 {
     return func != nullptr && !func->isBuiltin() && !func->getBlocks().empty();
+}
+
+/// @brief 注册模块级 pass（带名字，可被 MINIC_DISABLE_PASSES 关闭）
+void PassManager::registerModulePass(const std::string & name, ModulePassRunner runner)
+{
+    if (isPassEnabled(name)) {
+        registerModulePass(std::move(runner));
+    }
+}
+
+/// @brief 注册定点函数级 pass 之前执行的模块级 pass（带名字，可关闭）
+void PassManager::registerLateModulePass(const std::string & name, ModulePassRunner runner)
+{
+    if (isPassEnabled(name)) {
+        registerLateModulePass(std::move(runner));
+    }
+}
+
+/// @brief 注册单次函数级 pass（带名字，可关闭）
+void PassManager::registerFunctionPass(const std::string & name, FunctionPassRunner runner)
+{
+    if (isPassEnabled(name)) {
+        registerFunctionPass(std::move(runner));
+    }
+}
+
+/// @brief 注册参与定点迭代的函数级 pass（带名字，可关闭）
+void PassManager::registerFixedPointFunctionPass(const std::string & name, FunctionPassRunner runner)
+{
+    if (isPassEnabled(name)) {
+        registerFixedPointFunctionPass(std::move(runner));
+    }
+}
+
+/// @brief 注册定点迭代收敛后执行的模块级 pass（带名字，可关闭）
+void PassManager::registerPostFixedPointModulePass(const std::string & name, ModulePassRunner runner)
+{
+    if (isPassEnabled(name)) {
+        registerPostFixedPointModulePass(std::move(runner));
+    }
+}
+
+/// @brief 注册定点迭代收敛后执行一次的后置函数级 pass（带名字，可关闭）
+void PassManager::registerLateFunctionPass(const std::string & name, FunctionPassRunner runner)
+{
+    if (isPassEnabled(name)) {
+        registerLateFunctionPass(std::move(runner));
+    }
+}
+
+/// @brief 从 MINIC_DISABLE_PASSES 环境变量加载被关闭的 pass 名集合（逗号/分号/空白分隔，仅加载一次）
+void PassManager::loadPassToggles()
+{
+    if (togglesLoaded) {
+        return;
+    }
+    togglesLoaded = true;
+    disabledPasses.clear();
+
+    const char * env = std::getenv("MINIC_DISABLE_PASSES");
+    if (env == nullptr || env[0] == '\0') {
+        return;
+    }
+
+    std::string token;
+    std::istringstream iss(env);
+    while (std::getline(iss, token)) {
+        // 同时支持逗号、分号、空格、制表符作为分隔符
+        std::size_t begin = 0;
+        while (begin < token.size()
+               && (token[begin] == ',' || token[begin] == ';' || token[begin] == ' '
+                   || token[begin] == '\t')) {
+            ++begin;
+        }
+        std::size_t end = token.size() - 1;
+        while (end > begin
+               && (token[end] == ',' || token[end] == ';' || token[end] == ' '
+                   || token[end] == '\t')) {
+            --end;
+        }
+        if (end >= begin) {
+            disabledPasses.insert(token.substr(begin, end - begin + 1));
+        }
+    }
+}
+
+/// @brief 判断某个具名 pass 是否启用；MINIC_DUMP_PASSES 置位时把 pass 清单打到 stderr
+/// @param name pass 名
+/// @return true 表示该 pass 应被注册执行
+bool PassManager::isPassEnabled(const std::string & name)
+{
+    loadPassToggles();
+    const bool enabled = disabledPasses.find(name) == disabledPasses.end();
+    if (std::getenv("MINIC_DUMP_PASSES") != nullptr) {
+        std::cerr << "[PassManager] " << (enabled ? "ENABLE " : "DISABLE") << " pass: " << name << '\n';
+    }
+    return enabled;
 }
