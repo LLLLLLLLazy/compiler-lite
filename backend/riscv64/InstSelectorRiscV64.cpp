@@ -24,6 +24,7 @@
 #include "BinaryInst.h"
 #include "BranchInst.h"
 #include "CallInst.h"
+#include "ConstFloat.h"
 #include "ConstInteger.h"
 #include "CondBranchInst.h"
 #include "CopyInst.h"
@@ -1275,6 +1276,31 @@ void InstSelectorRiscV64::translate_fadd(Instruction * inst)
 /// @brief 翻译浮点减法
 void InstSelectorRiscV64::translate_fsub(Instruction * inst)
 {
+	// 一元取负 -x 在前端被降为 SUB_F(+0.0, x)。在 RISC-V 上 fsgnjn.s rd,x,x 即为浮点取负(fneg)，
+	// 一条指令完成且无需材料化 0.0 常量，与 GCC/Clang 对一元 minus 的降级一致。
+	// 仅匹配 +0.0(位模式全 0) 作为左操作数，避免影响 (-0.0)-x 之类的语义。
+	if (auto * binary = dynamic_cast<BinaryInst *>(inst)) {
+		auto * lhsZero = dynamic_cast<ConstFloat *>(binary->getLHS());
+		if (lhsZero != nullptr && lhsZero->getBitPattern() == 0) {
+			int dstReg = getFloatResultReg(inst);
+			bool dstTemp = false;
+			if (dstReg < 0) {
+				dstReg = borrowFloatTemp(inst);
+				dstTemp = true;
+			}
+			FloatOperandReg src = loadFloatOperand(binary->getRHS(), inst, -1, dstReg, true);
+			iloc.inst("fsgnjn.s",
+			          PlatformRiscV64::fpRegName[dstReg],
+			          PlatformRiscV64::fpRegName[src.reg],
+			          PlatformRiscV64::fpRegName[src.reg]);
+			releaseFloatOperand(src);
+			storeFloatResult(inst, dstReg, inst);
+			if (dstTemp) {
+				releaseFloatTemp(dstReg);
+			}
+			return;
+		}
+	}
 	translate_fbinary(inst, "fsub.s");
 }
 
@@ -1465,13 +1491,23 @@ bool InstSelectorRiscV64::tryTranslateDivBySmallPowerOfTwo(Instruction * inst)
 	const std::string biasName = PlatformRiscV64::regName[bias.reg()];
 
 	// C整数除法向零截断；负数右移会向-∞取整，因此先加(d-1)形式的bias。
-	// bias用srliw从全1符号掩码生成，避免andi超出12-bit立即数范围。
-	iloc.inst("sraiw", biasName, srcName, "31");
-	iloc.inst("srliw", biasName, biasName, std::to_string(32 - shift));
-	iloc.inst("addw", dstName, srcName, biasName);
-	iloc.inst("sraiw", dstName, dstName, std::to_string(shift));
-	if (negativeDivisor) {
-		iloc.inst("subw", dstName, "zero", dstName);
+	// 对于除以2（shift==1），使用优化的3指令序列：x/2 = (x + (x>>31)) >> 1
+	if (shift == 1) {
+		iloc.inst("sraiw", biasName, srcName, "31");
+		iloc.inst("addw", dstName, srcName, biasName);
+		iloc.inst("sraiw", dstName, dstName, "1");
+		if (negativeDivisor) {
+			iloc.inst("subw", dstName, "zero", dstName);
+		}
+	} else {
+		// 通用情况：bias用srliw从全1符号掩码生成，避免andi超出12-bit立即数范围。
+		iloc.inst("sraiw", biasName, srcName, "31");
+		iloc.inst("srliw", biasName, biasName, std::to_string(32 - shift));
+		iloc.inst("addw", dstName, srcName, biasName);
+		iloc.inst("sraiw", dstName, dstName, std::to_string(shift));
+		if (negativeDivisor) {
+			iloc.inst("subw", dstName, "zero", dstName);
+		}
 	}
 
 	releaseOperand(lhs);

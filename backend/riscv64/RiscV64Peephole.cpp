@@ -71,7 +71,16 @@ bool removeSelfMoves(InstList & code)
 {
 	bool changed = false;
 	for (auto * inst : code) {
-		if (isLiveInst(inst) && inst->opcode == "mv" && inst->result == inst->arg1) {
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		const bool mvSelf = inst->opcode == "mv" && inst->result == inst->arg1;
+		// fmv.s/fsgnj.s rd,rs（rd==rs）是寄存器自拷贝，等价于无操作
+		const bool fmvSelf = (inst->opcode == "fmv.s" || inst->opcode == "fsgnj.s") &&
+		                      inst->result == inst->arg1 && inst->arg2.empty();
+		const bool fsgnjSelf = inst->opcode == "fsgnj.s" && inst->result == inst->arg1 &&
+		                        inst->arg1 == inst->arg2;
+		if (mvSelf || fmvSelf || fsgnjSelf) {
 			inst->setDead();
 			changed = true;
 		}
@@ -370,6 +379,28 @@ bool isCallArgumentRegister(const std::string & reg)
 bool isReturnValueRegister(const std::string & reg)
 {
 	return reg == "a0" || reg == "fa0";
+}
+
+bool isPhysicalRegisterName(const std::string & reg);
+
+bool isCallerSavedRegister(const std::string & reg)
+{
+	static const std::unordered_set<std::string> callerSaved = {
+		"ra",  "t0",  "t1",  "t2",  "t3",  "t4",  "t5",  "t6",
+		"a0",  "a1",  "a2",  "a3",  "a4",  "a5",  "a6",  "a7",
+		"ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7",
+		"fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7",
+		"ft8", "ft9", "ft10", "ft11",
+	};
+	return callerSaved.find(reg) != callerSaved.end();
+}
+
+bool isCopyPropagationRegister(const std::string & reg)
+{
+	if (reg == "zero") {
+		return true;
+	}
+	return isPhysicalRegisterName(reg) && reg != "ra" && reg != "sp" && reg != "gp" && reg != "tp";
 }
 
 std::string addressBaseRegister(const std::string & operand);
@@ -706,6 +737,31 @@ bool foldPowerOfTwoRemainderZeroBranch(InstList & code)
 		auto afterRemainderIt = nextMachineInst(code, remainderIt);
 		if (afterRemainderIt == code.end()) {
 			continue;
+		}
+
+		// 余数仅用于布尔判定的情形：snez/seqz boolReg, remainderReg。
+		// 对 2 的幂取模，(n % 2^k != 0) 等价于 (n & (2^k-1) != 0)，与 n 的符号无关，
+		// 因此可用位掩码替换整条有符号求余链，再让原 snez/seqz 作用于掩码结果即可。
+		// 安全前提：remainderReg 的真实值无人依赖——既不 live-out，也不在 snez/seqz 之后被读取。
+		{
+			auto * boolInst = *afterRemainderIt;
+			if (isLiveInst(boolInst) && (boolInst->opcode == "snez" || boolInst->opcode == "seqz") &&
+			    boolInst->arg1 == remainderReg && !boolInst->result.empty() &&
+			    !registerLiveOutOfBlock(liveness, boolInst, remainderReg) &&
+			    !registerUsedAfterBeforeRedefOrBoundary(code, afterRemainderIt, remainderReg)) {
+				for (auto chainIt : chainIts) {
+					(*chainIt)->setDead();
+				}
+				const int mask = (1 << quotientShiftAmount) - 1;
+				if (mask <= 2047) {
+					remainder->replace("andi", remainderReg, srcReg, std::to_string(mask));
+				} else {
+					remainder->replace("slliw", remainderReg, srcReg,
+					                    std::to_string(32 - quotientShiftAmount));
+				}
+				changed = true;
+				continue;
+			}
 		}
 
 		// 第六步：匹配零比较分支指令
@@ -1554,7 +1610,7 @@ bool foldZeroStores(InstList & code)
 	return changed;
 }
 
-/// @brief 判断指令是否为从寄存器到寄存器的move（mv或fsgnj.s同寄存器形式）
+/// @brief 判断指令是否为从寄存器到寄存器的move（mv、fmv.s或fsgnj.s同寄存器形式）
 /// @param inst 待判断的指令
 /// @param dst [out] 目标寄存器名
 /// @param src [out] 源寄存器名
@@ -1569,6 +1625,13 @@ bool isMoveFromRegister(RiscV64Inst * inst, std::string & dst, std::string & src
 		src = inst->arg1;
 		return true;
 	}
+	// fmv.s rd,rs（标准化后的形式）
+	if (inst->opcode == "fmv.s" && !inst->arg1.empty() && inst->arg2.empty()) {
+		dst = inst->result;
+		src = inst->arg1;
+		return true;
+	}
+	// fsgnj.s rd,rs,rs（未标准化的遗留形式）
 	if (inst->opcode == "fsgnj.s" && !inst->arg1.empty() && inst->arg1 == inst->arg2) {
 		dst = inst->result;
 		src = inst->arg1;
@@ -1629,22 +1692,21 @@ bool retargetSingleUseDefinitions(InstList & code)
 	return changed;
 }
 
-/// @brief 在单个基本块内传播 mv 的目标寄存器使用。
+/// @brief 在单个基本块内传播寄存器拷贝（mv 或 fsgnj.s rd,rs,rs）的目标寄存器使用。
 ///
-/// `mv dst, src` 之后，直到 dst/src 被重定义或遇到控制流边界前，
+/// `mv/fsgnj.s dst, src` 之后，直到 dst/src 被重定义或遇到控制流边界前，
 /// 后续读取 dst 等价于读取 src。这里会同时改写普通 operand 与内存地址基寄存器。
 bool propagateMoveUses(InstList & code)
 {
 	bool changed = false;
 	for (auto it = code.begin(); it != code.end(); ++it) {
 		auto * move = *it;
-		if (!isLiveInst(move) || move->opcode != "mv" || move->result.empty() || move->arg1.empty() ||
-		    move->result == move->arg1) {
+		std::string dst;
+		std::string src;
+		if (!isMoveFromRegister(move, dst, src) || dst.empty() || src.empty() || dst == src) {
 			continue;
 		}
 
-		const std::string dst = move->result;
-		const std::string src = move->arg1;
 		for (auto scan = nextLive(code, it); scan != code.end(); scan = nextLive(code, scan)) {
 			auto * inst = *scan;
 			if (isControlBoundary(inst)) {
@@ -1668,18 +1730,173 @@ bool propagateMoveUses(InstList & code)
 	return changed;
 }
 
-/// @brief 删除只在本基本块内被后续重定义覆盖的死 move。
+bool rewriteCopyUsesInBlock(const MachineBlock & block,
+                            std::size_t startIndex,
+                            const std::string & dst,
+                            const std::string & src,
+                            bool & reachesBlockEnd)
+{
+	bool changed = false;
+	reachesBlockEnd = true;
+	for (std::size_t i = startIndex; i < block.insts.size(); ++i) {
+		auto * inst = block.insts[i];
+		if (!isLiveInst(inst) || isCommentInst(inst)) {
+			continue;
+		}
+
+		if (inst->opcode == "call") {
+			reachesBlockEnd = false;
+			break;
+		}
+
+		if (usesRegister(inst, dst)) {
+			changed = replaceRegisterUse(inst, dst, src) || changed;
+			if (isMemoryOpcode(inst->opcode)) {
+				changed = replaceMemoryBase(inst, dst, src) || changed;
+			}
+		}
+
+		const bool redefinesDst = definesResultOperand(inst) && inst->result == dst;
+		const bool redefinesSrc = src != "zero" && definesResultOperand(inst) && inst->result == src;
+		if (redefinesDst || redefinesSrc || inst->opcode == "ret") {
+			reachesBlockEnd = false;
+			break;
+		}
+	}
+	return changed;
+}
+
+/// @brief 沿 CFG 传播寄存器 copy，覆盖入口 copy 后跨分支使用的场景。
+///
+/// 单基本块的 propagateMoveUses 会在条件分支处停止，因此像
+/// `fsgnj.s ft0,fa0,fa0; ...; beq ...; ret-paths-use-ft0` 这样的形参
+/// 保护 copy 会残留。这里做一个非常保守的 available-copy 转发：只有当
+/// 某个块的所有前驱都已经保持 `dst == src`，且路径上没有 call 或重定义
+/// dst/src 时，才改写该块内 dst 的读取。
+bool propagateMoveUsesAcrossBlocks(InstList & code)
+{
+	bool changed = false;
+	const MachineLiveness liveness = buildMachineLiveness(code);
+	if (liveness.blocks.empty()) {
+		return false;
+	}
+
+	std::vector<std::vector<int>> preds(liveness.blocks.size());
+	for (int i = 0; i < static_cast<int>(liveness.blocks.size()); ++i) {
+		for (int succ : liveness.blocks[i].succs) {
+			if (succ >= 0 && succ < static_cast<int>(preds.size())) {
+				preds[succ].push_back(i);
+			}
+		}
+	}
+
+	for (auto * move : code) {
+		std::string dst;
+		std::string src;
+		if (!isMoveFromRegister(move, dst, src) || dst.empty() || src.empty() || dst == src) {
+			continue;
+		}
+		if (!isCopyPropagationRegister(dst) || !isCopyPropagationRegister(src)) {
+			continue;
+		}
+
+		auto blockIt = liveness.instToBlock.find(move);
+		if (blockIt == liveness.instToBlock.end()) {
+			continue;
+		}
+
+		const int startBlock = blockIt->second;
+		const auto & startInsts = liveness.blocks[startBlock].insts;
+		auto moveInBlock = std::find(startInsts.begin(), startInsts.end(), move);
+		if (moveInBlock == startInsts.end()) {
+			continue;
+		}
+
+		std::vector<bool> availableOut(liveness.blocks.size(), false);
+		bool startOut = false;
+		changed = rewriteCopyUsesInBlock(liveness.blocks[startBlock],
+		                                  static_cast<std::size_t>(std::distance(startInsts.begin(), moveInBlock) + 1),
+		                                  dst,
+		                                  src,
+		                                  startOut) ||
+		          changed;
+		availableOut[startBlock] = startOut;
+
+		bool stateChanged = true;
+		while (stateChanged) {
+			stateChanged = false;
+			for (int blockIndex = 0; blockIndex < static_cast<int>(liveness.blocks.size()); ++blockIndex) {
+				if (blockIndex == startBlock || preds[blockIndex].empty()) {
+					continue;
+				}
+
+				bool availableIn = true;
+				for (int pred : preds[blockIndex]) {
+					availableIn = availableIn && availableOut[pred];
+				}
+				if (!availableIn) {
+					continue;
+				}
+
+				bool blockOut = false;
+				changed = rewriteCopyUsesInBlock(liveness.blocks[blockIndex], 0, dst, src, blockOut) || changed;
+				if (blockOut != availableOut[blockIndex]) {
+					availableOut[blockIndex] = blockOut;
+					stateChanged = true;
+				}
+			}
+		}
+	}
+
+	return changed;
+}
+
+/// @brief 删除只在本基本块内被后续重定义覆盖的死寄存器拷贝（mv 或 fsgnj.s rd,rs,rs）。
 bool removeDeadMoves(InstList & code)
 {
 	bool changed = false;
 	for (auto it = code.begin(); it != code.end(); ++it) {
 		auto * move = *it;
-		if (!isLiveInst(move) || move->opcode != "mv" || move->result.empty() || move->arg1.empty() ||
-		    move->result == move->arg1) {
+		std::string dst;
+		std::string src;
+		if (!isMoveFromRegister(move, dst, src) || dst.empty() || src.empty() || dst == src) {
 			continue;
 		}
-		if (registerRedefinedBeforeUseOrBoundary(code, it, move->result)) {
+		if (registerRedefinedBeforeUseOrBoundary(code, it, dst)) {
 			move->setDead();
+			changed = true;
+		}
+	}
+	return changed;
+}
+
+/// @brief 删除“结果寄存器在全函数范围内已死”的纯定义指令（无内存/控制副作用的寄存器赋值）。
+///
+/// 与 removeDeadMoves（仅块内）不同，这里借助机器级活跃性分析判断结果是否 live-out，
+/// 因此能删除跨调用/分支后仍无人使用的死定义，例如：
+///   - 经跨过程常量传播特化后，函数仍保存却再不使用的形参拷贝（mv t0,a0 / fsgnj.s ft1,fa2,fa2）；
+///   - 浮点常量去重后遗留、其 GPR 不再被读取的 lui/li 馈给指令。
+/// 仅处理已知纯净的操作码，避免误删带副作用或多定义的指令。
+bool removeDeadPureDefs(InstList & code)
+{
+	static const std::unordered_set<std::string> pureOps = {
+		"mv", "fsgnj.s", "fsgnjn.s", "fsgnjx.s", "fmv.s", "fmv.w.x", "fmv.x.w", "li", "lui",
+	};
+
+	bool changed = false;
+	const MachineLiveness liveness = buildMachineLiveness(code);
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * inst = *it;
+		if (!definesResultOperand(inst) || inst->result.empty() || !isPhysicalRegisterName(inst->result)) {
+			continue;
+		}
+		if (pureOps.find(inst->opcode) == pureOps.end()) {
+			continue;
+		}
+		// 结果寄存器既不在块内（重定义/边界前）被使用，也不 live-out ⇒ 该定义已死。
+		if (!registerUsedAfterBeforeRedefOrBoundary(code, it, inst->result) &&
+		    !registerLiveOutOfBlock(liveness, inst, inst->result)) {
+			inst->setDead();
 			changed = true;
 		}
 	}
@@ -1892,6 +2109,172 @@ bool assignPointerRegisters(InstList & code, InstIt firstLiveRangeIt, std::vecto
 		}
 	}
 	return true;
+}
+
+/// @brief 返回条件分支操作码的逻辑取反（操作数顺序不变）；无已知取反则返回空串。
+std::string invertedBranchOpcode(const std::string & op)
+{
+	if (op == "beq") return "bne";
+	if (op == "bne") return "beq";
+	if (op == "blt") return "bge";
+	if (op == "bge") return "blt";
+	if (op == "bltu") return "bgeu";
+	if (op == "bgeu") return "bltu";
+	if (op == "bgt") return "ble";
+	if (op == "ble") return "bgt";
+	if (op == "bgtu") return "bleu";
+	if (op == "bleu") return "bgtu";
+	return "";
+}
+
+/// @brief 反转“条件分支 + 跨越式无条件跳转”以省去 j 指令。
+///
+/// 形如：
+///   bCC rs1, rs2, L1     # 条件成立跳到 L1（L1 紧跟在 j 之后）
+///   j   L2               # 否则跳到 L2
+///   L1:                  # 直落目标
+/// 等价改写为：
+///   b!CC rs1, rs2, L2    # 条件不成立才跳 L2，否则直落进 L1
+///   L1:
+/// 删除一条无条件跳转、消除一个多余基本块边，且语义完全等价。
+bool invertBranchOverJump(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * branch = *it;
+		if (!isLiveInst(branch) || !isBranchOpcode(branch->opcode) || branch->arg2.empty()) {
+			continue;
+		}
+		const std::string inv = invertedBranchOpcode(branch->opcode);
+		if (inv.empty()) {
+			continue;
+		}
+		auto jumpIt = nextLive(code, it);
+		if (jumpIt == code.end() || !isLiveInst(*jumpIt) || (*jumpIt)->opcode != "j" ||
+		    (*jumpIt)->result.empty()) {
+			continue;
+		}
+		auto labelIt = nextLive(code, jumpIt);
+		if (labelIt == code.end() || !isLabel(*labelIt) || (*labelIt)->opcode != branch->arg2) {
+			continue;
+		}
+		branch->replace(inv, branch->result, branch->arg1, (*jumpIt)->result);
+		(*jumpIt)->setDead();
+		changed = true;
+	}
+	return changed;
+}
+
+/// @brief 判断 reg 在 start 之后是否“先被重定义、且重定义前未被使用”（即此前的值已死）。
+///
+/// 仅当确实先遇到重定义时返回 true；遇到使用或控制边界(此时 reg 可能 live-out)都保守返回 false。
+/// 与 registerUsedAfterBeforeRedefOrBoundary 不同：后者把“到达边界”也并入 false，无法区分
+/// “已死”与“可能 live-out”，故这里单独实现严格版本，用于安全删除一条产生 reg 的指令。
+bool registerDeadByRedefBeforeUse(InstList & code, InstIt start, const std::string & reg)
+{
+	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (usesRegister(inst, reg) || instructionImplicitlyUsesRegister(inst, reg)) {
+			return false;
+		}
+		if (isControlBoundary(inst)) {
+			return false;
+		}
+		if (definesResultOperand(inst) && inst->result == reg) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/// @brief 浮点常量材料化的局部去重。
+///
+/// 指令选择会在“每一次使用浮点常量”时各自材料化一遍，例如：
+///   lui     t3, IMM
+///   fmv.w.x fd, t3        （或 fmv.w.x fd, zero 表示 0.0）
+/// 在同一直线区间(中间无标签/分支/跳转/调用)内，若某个 FPR 已持有同一常量且未被覆写，
+/// 则后续把同一常量再次材料化到“同一寄存器”属于纯冗余，可直接删除（并连带删除紧邻、
+/// 且其结果随后即死的 lui/li 馈给指令）。该变换不改变任何数值，只消除重复指令，
+/// 尤其能消除循环展开后反复重载的同一常量（如牛顿迭代里每步都重载的 0.5）。
+bool dedupRedundantFloatConstMaterialize(InstList & code)
+{
+	bool changed = false;
+	std::unordered_map<std::string, std::string> fprHolds;   // FPR -> 当前持有的常量键
+	std::unordered_map<std::string, std::string> gprConst;   // GPR -> 由 lui/li 装载的常量键
+	std::unordered_map<std::string, InstIt> gprConstAt;      // GPR -> 对应 lui/li 指令位置
+
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * inst = *it;
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		if (isControlBoundary(inst)) {
+			// 跨基本块/调用：所有缓存失效（调用会破坏 caller-saved 寄存器）
+			fprHolds.clear();
+			gprConst.clear();
+			gprConstAt.clear();
+			continue;
+		}
+
+		const std::string & op = inst->opcode;
+
+		if ((op == "lui" || op == "li") && isPhysicalRegisterName(inst->result)) {
+			gprConst[inst->result] = op + ":" + inst->arg1;
+			gprConstAt[inst->result] = it;
+			continue;
+		}
+
+		if (op == "fmv.w.x") {
+			const std::string fd = inst->result;
+			const std::string src = inst->arg1;
+			std::string key;
+			InstIt feederIt = code.end();
+			if (src == "zero") {
+				key = "#zero";
+			} else {
+				auto kIt = gprConst.find(src);
+				if (kIt != gprConst.end()) {
+					key = kIt->second;
+					auto aIt = gprConstAt.find(src);
+					if (aIt != gprConstAt.end()) {
+						feederIt = aIt->second;
+					}
+				}
+			}
+
+			if (!key.empty()) {
+				auto held = fprHolds.find(fd);
+				if (held != fprHolds.end() && held->second == key) {
+					// fd 已持有同一常量且未被覆写：本次材料化纯冗余，删除之
+					// 注意：先判定馈给指令是否紧邻(用 nextLive)，再 setDead，
+					// 否则 setDead 后 nextLive 会跳过本条已死指令导致邻接判定失败。
+					const bool feederAdjacent =
+						feederIt != code.end() && nextLive(code, feederIt) == it;
+					inst->setDead();
+					changed = true;
+					// 紧邻且其结果寄存器随后即死的 lui/li 馈给指令也一并删除
+					if (feederAdjacent && registerDeadByRedefBeforeUse(code, it, src)) {
+						(*feederIt)->setDead();
+					}
+					continue;  // fprHolds[fd] 保持为 key 不变
+				}
+				fprHolds[fd] = key;
+				continue;
+			}
+			// 未知来源（真正的整型→浮点位拷贝等）：fd 不再持有已知常量
+			fprHolds.erase(fd);
+			continue;
+		}
+
+		// 普通指令：若覆写了某寄存器，则其缓存失效
+		if (definesResultOperand(inst)) {
+			fprHolds.erase(inst->result);
+			gprConst.erase(inst->result);
+			gprConstAt.erase(inst->result);
+		}
+	}
+
+	return changed;
 }
 
 /// @brief 缓存循环内对同一浮点地址的重复 load。
@@ -2343,6 +2726,255 @@ bool reduceAffineAddressRecurrences(InstList & code)
 	return changed;
 }
 
+/// @brief 标准化浮点符号注入指令为更清晰的伪指令形式
+///
+/// RISC-V使用fsgnj系列指令实现浮点copy/negate/abs：
+///   - fsgnj.s  rd,rs,rs 等价于 fmv.s  rd,rs（符号拷贝 = 整体拷贝）
+///   - fsgnjn.s rd,rs,rs 等价于 fneg.s rd,rs（符号取反）
+///   - fsgnjx.s rd,rs,rs 等价于 fabs.s rd,rs（符号异或自己 = 清除符号位）
+///
+/// 标准化为伪指令形式可提升可读性，且为后续优化提供统一模式。
+bool normalizeFsgnjInstructions(InstList & code)
+{
+	bool changed = false;
+	for (auto * inst : code) {
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+
+		// fsgnj.s rd,rs,rs → fmv.s rd,rs
+		if (inst->opcode == "fsgnj.s" && !inst->arg1.empty() && inst->arg1 == inst->arg2) {
+			inst->opcode = "fmv.s";
+			inst->arg2 = "";
+			changed = true;
+		}
+		// fsgnjn.s rd,rs,rs → fneg.s rd,rs
+		else if (inst->opcode == "fsgnjn.s" && !inst->arg1.empty() && inst->arg1 == inst->arg2) {
+			inst->opcode = "fneg.s";
+			inst->arg2 = "";
+			changed = true;
+		}
+		// fsgnjx.s rd,rs,rs → fabs.s rd,rs
+		else if (inst->opcode == "fsgnjx.s" && !inst->arg1.empty() && inst->arg1 == inst->arg2) {
+			inst->opcode = "fabs.s";
+			inst->arg2 = "";
+			changed = true;
+		}
+	}
+	return changed;
+}
+
+/// @brief 消除 andi x,y,1 后的冗余 snez 指令
+///
+/// 模式：
+///   andi dst, src, 1
+///   snez tmp, dst
+///   beq/bne tmp, zero, label
+///
+/// 优化为：
+///   andi dst, src, 1
+///   beq/bne dst, zero, label
+///
+/// 原因：andi x,y,1 的结果已经是 0 或 1，snez 是冗余的。
+bool foldRedundantSnezAfterAndi(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * andi = *it;
+		if (!isLiveInst(andi) || andi->opcode != "andi") {
+			continue;
+		}
+		// 检查是否为 andi x,y,1
+		if (andi->addition != "1") {
+			continue;
+		}
+
+		// 查找下一条指令
+		auto nextIt = nextMachineInst(code, it);
+		if (nextIt == code.end()) {
+			continue;
+		}
+		auto * snez = *nextIt;
+		if (!isLiveInst(snez) || snez->opcode != "snez") {
+			continue;
+		}
+		// 检查 snez 的源是否为 andi 的目标
+		if (snez->arg1 != andi->result) {
+			continue;
+		}
+
+		// 查找使用 snez 结果的指令
+		std::string snezDst = snez->result;
+		std::string andiDst = andi->result;
+
+		// 检查 andi 的结果在 snez 后是否还被使用
+		bool andiUsedAfterSnez = false;
+		for (auto checkIt = std::next(nextIt); checkIt != code.end(); ++checkIt) {
+			auto * inst = *checkIt;
+			if (!isLiveInst(inst)) {
+				continue;
+			}
+			// 如果遇到标签，停止检查（可能跨基本块）
+			if (isLabel(inst)) {
+				break;
+			}
+			// 如果 andi 结果被重定义，停止
+			if (inst->result == andiDst) {
+				break;
+			}
+			// 检查是否使用了 andi 的结果
+			if (inst->arg1 == andiDst || inst->arg2 == andiDst) {
+				andiUsedAfterSnez = true;
+				break;
+			}
+		}
+
+		// 如果 andi 结果还被使用，不能优化（需要保留两个值）
+		if (andiUsedAfterSnez) {
+			continue;
+		}
+
+		// 替换所有使用 snez 结果的地方为 andi 结果
+		bool replacedAny = false;
+		for (auto replIt = std::next(nextIt); replIt != code.end(); ++replIt) {
+			auto * inst = *replIt;
+			if (!isLiveInst(inst)) {
+				continue;
+			}
+			// 遇到标签停止（基本块边界）
+			if (isLabel(inst)) {
+				break;
+			}
+			// 如果 snez 目标被重定义，停止
+			if (inst->result == snezDst) {
+				break;
+			}
+			// 替换使用
+			if (inst->arg1 == snezDst) {
+				inst->arg1 = andiDst;
+				replacedAny = true;
+			}
+			if (inst->arg2 == snezDst) {
+				inst->arg2 = andiDst;
+				replacedAny = true;
+			}
+		}
+
+		if (replacedAny) {
+			snez->setDead();
+			changed = true;
+		}
+	}
+	return changed;
+}
+
+/// @brief 合并函数尾部的多个 ret 指令，减少代码大小
+///
+/// 模式：
+///   label1:
+///     ret
+///   label2:
+///     ret
+///
+/// 优化为：
+///   label1:
+///   label2:
+///     ret
+///
+/// 将跳转到第一个 ret 的分支重定向到最后一个 ret，然后删除冗余的 ret。
+bool mergeDuplicateReturns(InstList & code)
+{
+	bool changed = false;
+
+	// 查找所有 ret 指令
+	std::vector<InstIt> retInstructions;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		if (isLiveInst(*it) && (*it)->opcode == "ret") {
+			retInstructions.push_back(it);
+		}
+	}
+
+	// 如果只有一个 ret，无需优化
+	if (retInstructions.size() <= 1) {
+		return false;
+	}
+
+	// 选择最后一个 ret 作为统一的返回点
+	InstIt canonicalRetIt = retInstructions.back();
+
+	// 查找紧邻每个 ret 之前的标签
+	std::unordered_map<std::string, InstIt> labelToRet;
+	for (auto retIt : retInstructions) {
+		// 向前查找标签
+		auto labelIt = retIt;
+		while (labelIt != code.begin()) {
+			--labelIt;
+			if (isLiveInst(*labelIt)) {
+				if (isLabel(*labelIt)) {
+					labelToRet[(*labelIt)->opcode] = retIt;
+				}
+				break; // 遇到第一个活跃指令就停止
+			}
+		}
+	}
+
+	// 找到跳转到各个 ret 的分支指令，重定向到统一的返回点
+	std::string canonicalRetLabel;
+	// 为统一返回点创建或找到标签
+	auto labelIt = canonicalRetIt;
+	while (labelIt != code.begin()) {
+		--labelIt;
+		if (isLiveInst(*labelIt)) {
+			if (isLabel(*labelIt)) {
+				canonicalRetLabel = (*labelIt)->opcode;
+			}
+			break;
+		}
+	}
+
+	// 如果没有找到标签，创建一个
+	if (canonicalRetLabel.empty()) {
+		canonicalRetLabel = ".L_unified_return";
+		code.insert(canonicalRetIt, new RiscV64Inst(canonicalRetLabel, ":"));
+	}
+
+	// 重定向所有跳转到其他 ret 的分支
+	for (const auto & entry : labelToRet) {
+		const std::string & label = entry.first;
+		InstIt retIt = entry.second;
+
+		// 跳过统一返回点自己
+		if (retIt == canonicalRetIt) {
+			continue;
+		}
+
+		// 查找所有跳转到这个标签的指令
+		for (auto it = code.begin(); it != code.end(); ++it) {
+			auto * inst = *it;
+			if (!isLiveInst(inst)) {
+				continue;
+			}
+
+			// 处理无条件跳转
+			if (inst->opcode == "j" && inst->result == label) {
+				inst->result = canonicalRetLabel;
+				changed = true;
+			}
+			// 处理条件分支
+			else if (isBranchOpcode(inst->opcode) && !inst->arg2.empty() && inst->arg2 == label) {
+				inst->arg2 = canonicalRetLabel;
+				changed = true;
+			}
+		}
+
+		// 删除这个冗余的 ret
+		(*retIt)->setDead();
+		changed = true;
+	}
+
+	return changed;
+}
+
 } // namespace
 
 bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceRetargeting)
@@ -2358,6 +2990,10 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 			localChanged = fuseFMA(code) || localChanged;
 		}
 		localChanged = cacheLoopInvariantFloatLoads(code) || localChanged;
+		// 浮点常量材料化去重：删除直线区间内对同一寄存器重复材料化的同一常量
+		localChanged = dedupRedundantFloatConstMaterialize(code) || localChanged;
+		// 标准化浮点符号注入指令：fsgnj.s rd,rs,rs → fmv.s; fsgnjn.s rd,rs,rs → fneg.s
+		localChanged = normalizeFsgnjInstructions(code) || localChanged;
 		// 仿射地址递推优化：将循环内 base+i*stride 地址计算改为指针步进
 		localChanged = reduceAffineAddressRecurrences(code) || localChanged;
 		localChanged = foldInvariantAddressOffsetsIntoRecurrences(code) || localChanged;
@@ -2366,6 +3002,8 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		// 2的幂取模零值分支优化：将 x % ±2^k ==/!= 0 的余数计算链替换为位掩码测试
 		localChanged = foldPowerOfTwoRemainderZeroBranch(code) || localChanged;
 		localChanged = foldZeroSubCompare(code) || localChanged;
+		// 消除 andi x,y,1 后的冗余 snez 指令
+		localChanged = foldRedundantSnezAfterAndi(code) || localChanged;
 		// 折叠立即数/地址材料化后的冗余move：li x,imm; mv y,x -> li y,imm
 		localChanged = foldMaterializationMoves(code) || localChanged;
 		// 折叠零值 store，减少局部数组清零中的 li 0 序列
@@ -2378,11 +3016,19 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		}
 		// 在单基本块内传播mv的目标寄存器使用，消除冗余move链
 		localChanged = propagateMoveUses(code) || localChanged;
+		// 沿 CFG 传播可用 copy，覆盖入口 copy 穿过条件分支后被使用的场景
+		localChanged = propagateMoveUsesAcrossBlocks(code) || localChanged;
 		// 删除只在本基本块内被后续重定义覆盖的死move
 		localChanged = removeDeadMoves(code) || localChanged;
+		// 借助机器级活跃性删除全函数范围内已死的纯定义（含特化后遗留的形参拷贝、去重后遗留的 lui/li）
+		localChanged = removeDeadPureDefs(code) || localChanged;
 		localChanged = removeSelfMoves(code) || localChanged;
 		localChanged = removeConsecutiveDuplicates(code) || localChanged;
 		localChanged = removeJumpToNextLabel(code) || localChanged;
+		// 反转”条件分支 + 跨越式 j”以删除多余无条件跳转
+		localChanged = invertBranchOverJump(code) || localChanged;
+		// 合并多个 ret 指令到统一返回点
+		localChanged = mergeDuplicateReturns(code) || localChanged;
 		changed = changed || localChanged;
 	} while (localChanged);
 	return changed;
