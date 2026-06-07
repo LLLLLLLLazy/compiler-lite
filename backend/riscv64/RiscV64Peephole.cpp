@@ -590,6 +590,67 @@ bool registerLiveOutOfBlock(const MachineLiveness & info, RiscV64Inst * inst, co
 	return info.blocks[it->second].liveOut.find(reg) != info.blocks[it->second].liveOut.end();
 }
 
+/// @brief 判断寄存器是否可作为死定义清扫的候选
+///
+/// 仅对调用者保存的临时/参数寄存器（t0-t6、a0-a7、ft0-ft11、fa0-fa7）做死定义消除。
+/// 被调用者保存寄存器（s/fs 系列）、sp、ra、gp、tp 承载跨过程或栈帧语义，
+/// 其定义即便在本函数内看似无后续使用，也可能在返回后被调用方依赖，
+/// 因此一律不在此清扫，避免破坏调用约定
+bool isEliminableDefRegister(const std::string & reg)
+{
+	static const std::unordered_set<std::string> kRemovable = {
+		"t0",  "t1",  "t2",  "t3",  "t4",   "t5",   "t6",   "a0",  "a1",  "a2",  "a3",
+		"a4",  "a5",  "a6",  "a7",  "ft0",  "ft1",  "ft2",  "ft3", "ft4", "ft5", "ft6",
+		"ft7", "ft8", "ft9", "ft10", "ft11", "fa0", "fa1",  "fa2", "fa3", "fa4", "fa5",
+		"fa6", "fa7",
+	};
+	return kRemovable.find(reg) != kRemovable.end();
+}
+
+/// @brief 基于机器级活跃性分析的通用死定义清扫
+///
+/// 对每个基本块做一次反向扫描，维护活跃寄存器集合；若某条指令定义的物理寄存器
+/// 在该指令之后不再被使用（既不在块内后续使用，也不在块出口活跃集合中），
+/// 且该寄存器属于可清扫集合，则将其标记为死代码
+///
+/// 该清扫覆盖寄存器分配与其它 peephole 改写后残留的死 mv / li / fmv.w.x /
+/// 地址计算等指令，而无需为每种模式单独编写规则
+bool eliminateDeadDefinitions(InstList & code)
+{
+	const MachineLiveness liveness = buildMachineLiveness(code);
+	bool changed = false;
+	for (const auto & block : liveness.blocks) {
+		std::unordered_set<std::string> live = block.liveOut;
+		for (auto it = block.insts.rbegin(); it != block.insts.rend(); ++it) {
+			auto * inst = *it;
+			if (!isLiveInst(inst)) {
+				continue;
+			}
+			const auto defs = instructionDefSet(inst);
+			const auto uses = instructionUseSet(inst);
+			bool removable = !defs.empty();
+			for (const auto & def : defs) {
+				if (!isEliminableDefRegister(def) || live.find(def) != live.end()) {
+					removable = false;
+					break;
+				}
+			}
+			if (removable) {
+				inst->setDead();
+				changed = true;
+				continue;
+			}
+			for (const auto & def : defs) {
+				live.erase(def);
+			}
+			for (const auto & use : uses) {
+				live.insert(use);
+			}
+		}
+	}
+	return changed;
+}
+
 /// @brief 将 `% ±2^k ==/!= 0` 的 signed-rem 降低序列改写为位测试。
 ///
 /// 对于零比较，`x % ±2^k` 是否为 0 只取决于 x 的低 k 位；即便 x 为负数，
@@ -1894,6 +1955,154 @@ bool assignPointerRegisters(InstList & code, InstIt firstLiveRangeIt, std::vecto
 	return true;
 }
 
+/// @brief 统计整个函数中以分支或跳转方式引用某标签的次数
+int countLabelBranchReferences(const InstList & code, const std::string & label)
+{
+	int count = 0;
+	for (auto * inst : code) {
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		if ((isBranchOpcode(inst->opcode) || inst->opcode == "j" || inst->opcode == "jal") &&
+		    referencedLabel(inst) == label) {
+			++count;
+		}
+	}
+	return count;
+}
+
+/// @brief 将循环体内重复物化的 float 常量提升到循环外
+///
+/// 后端对 ConstFloat 不分配寄存器，每次引用都会重新生成
+///   lui R, hi; addiw R, R, lo; fmv.w.x F, R
+/// 序列。当该序列位于循环体内且常量在循环内不变时，可将其整体提升到循环
+/// 前导块（preheader），使常量在整个循环执行期间只物化一次
+///
+/// 安全条件：
+/// - 循环结构为已识别的 header/body/latch 单回边循环
+/// - 目标 FPR F 在循环体内仅由该 fmv.w.x 定义一次
+/// - 中间 GPR R 在循环体内只在该三指令序列中出现
+/// - 循环头标签在全函数中仅被 latch 回边引用一次，且头部由前导块顺序进入，
+///   以保证提升点支配整个循环
+bool hoistLoopInvariantFloatConstants(InstList & code)
+{
+	for (auto headerIt = code.begin(); headerIt != code.end(); ++headerIt) {
+		auto * header = *headerIt;
+		if (!isLabel(header)) {
+			continue;
+		}
+
+		auto branchIt = nextLive(code, headerIt);
+		auto exitJumpIt = nextLive(code, branchIt);
+		if (branchIt == code.end() || exitJumpIt == code.end()) {
+			continue;
+		}
+
+		auto * branch = *branchIt;
+		if (!isLiveInst(branch) || branch->opcode != "blt" || branch->arg2.empty() || !isInst(*exitJumpIt, "j")) {
+			continue;
+		}
+
+		const std::string headerLabel = header->opcode;
+		const std::string bodyLabel = branch->arg2;
+		InstIt bodyLabelIt = code.end();
+		for (auto it = exitJumpIt; it != code.end(); ++it) {
+			if (isLabel(*it) && (*it)->opcode == bodyLabel) {
+				bodyLabelIt = it;
+				break;
+			}
+		}
+		if (bodyLabelIt == code.end()) {
+			continue;
+		}
+
+		auto bodyBegin = nextLive(code, bodyLabelIt);
+		InstIt latchIt = code.end();
+		for (auto it = bodyBegin; it != code.end(); it = nextLive(code, it)) {
+			if (it != bodyBegin && isLabel(*it)) {
+				break;
+			}
+			if (isInst(*it, "j", headerLabel)) {
+				latchIt = it;
+				break;
+			}
+		}
+		if (latchIt == code.end() || loopBodyHasUnsafeControlOrCall(code, bodyBegin, latchIt)) {
+			continue;
+		}
+
+		// 仅当循环头只被 latch 回边引用一次时，提升到头标签前才支配整个循环
+		if (countLabelBranchReferences(code, headerLabel) != 1) {
+			continue;
+		}
+		// 提升点前驱必须顺序落入循环头：前一条真实指令不能是无条件跳转或返回
+		InstIt prevIt = code.end();
+		for (auto scan = headerIt; scan != code.begin();) {
+			--scan;
+			if (isLiveInst(*scan) && !isCommentInst(*scan)) {
+				prevIt = scan;
+				break;
+			}
+		}
+		if (prevIt == code.end()) {
+			continue;
+		}
+		auto * prev = *prevIt;
+		if (isLabel(prev) || prev->opcode == "j" || prev->opcode == "ret") {
+			continue;
+		}
+
+		// 在循环体内查找 float 常量物化序列 lui R,hi; addiw R,R,lo; fmv.w.x F,R
+		for (auto luiIt = bodyBegin; luiIt != latchIt && luiIt != code.end(); luiIt = nextMachineInst(code, luiIt)) {
+			auto * lui = *luiIt;
+			if (!isInst(lui, "lui") || lui->result.empty()) {
+				continue;
+			}
+			auto addiIt = nextMachineInst(code, luiIt);
+			auto fmvIt = nextMachineInst(code, addiIt);
+			if (addiIt == code.end() || fmvIt == code.end()) {
+				continue;
+			}
+			auto * addi = *addiIt;
+			auto * fmv = *fmvIt;
+			const std::string tmpReg = lui->result;
+			if (!isInst(addi, "addiw", tmpReg, tmpReg) || !isInst(fmv, "fmv.w.x") || fmv->arg1 != tmpReg ||
+			    fmv->result.empty()) {
+				continue;
+			}
+			const std::string fpReg = fmv->result;
+
+			// fpReg 在循环体内只能由该 fmv 定义一次；tmpReg 只能出现在该三指令序列中
+			bool blocked = false;
+			for (auto scan = bodyBegin; scan != latchIt && scan != code.end(); scan = nextMachineInst(code, scan)) {
+				if (scan == luiIt || scan == addiIt || scan == fmvIt) {
+					continue;
+				}
+				auto * inst = *scan;
+				if ((definesResultOperand(inst) && inst->result == fpReg) ||
+				    instructionMentionsRegister(inst, tmpReg)) {
+					blocked = true;
+					break;
+				}
+			}
+			if (blocked) {
+				continue;
+			}
+
+			// 将三指令序列复制到循环头标签前的前导块，并删除循环体内的原序列
+			code.insert(headerIt, new RiscV64Inst(lui->opcode, lui->result, lui->arg1, lui->arg2));
+			code.insert(headerIt, new RiscV64Inst(addi->opcode, addi->result, addi->arg1, addi->arg2));
+			code.insert(headerIt, new RiscV64Inst(fmv->opcode, fmv->result, fmv->arg1, fmv->arg2));
+			lui->setDead();
+			addi->setDead();
+			fmv->setDead();
+			return true;
+		}
+	}
+
+	return false;
+}
+
 /// @brief 缓存循环内对同一浮点地址的重复 load。
 ///
 /// 匹配形如：循环前 fsw v,0(p)，循环体中反复 flw x,0(p)，且 p 在循环体内不被重定义、
@@ -2358,6 +2567,8 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 			localChanged = fuseFMA(code) || localChanged;
 		}
 		localChanged = cacheLoopInvariantFloatLoads(code) || localChanged;
+		// 将循环体内重复物化的 float 常量提升到循环前导块，只物化一次
+		localChanged = hoistLoopInvariantFloatConstants(code) || localChanged;
 		// 仿射地址递推优化：将循环内 base+i*stride 地址计算改为指针步进
 		localChanged = reduceAffineAddressRecurrences(code) || localChanged;
 		localChanged = foldInvariantAddressOffsetsIntoRecurrences(code) || localChanged;
@@ -2383,6 +2594,8 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		localChanged = removeSelfMoves(code) || localChanged;
 		localChanged = removeConsecutiveDuplicates(code) || localChanged;
 		localChanged = removeJumpToNextLabel(code) || localChanged;
+		// 基于活跃性分析的通用死定义清扫，消除跨控制流边界仍可证明无用的定义
+		localChanged = eliminateDeadDefinitions(code) || localChanged;
 		changed = changed || localChanged;
 	} while (localChanged);
 	return changed;
