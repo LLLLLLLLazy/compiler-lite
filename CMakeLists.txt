@@ -217,6 +217,8 @@ set(IR_SRCS
 	ir/analysis/DominanceFrontier.cpp
 	ir/analysis/AnalysisCache.h
 	ir/analysis/AnalysisCache.cpp
+	ir/analysis/CostModel.h
+	ir/analysis/CostModel.cpp
 	ir/analysis/FunctionSideEffectAnalysis.h
 	ir/analysis/FunctionSideEffectAnalysis.cpp
 	ir/analysis/LocalMemoryAnalysis.h
