@@ -47,7 +47,7 @@ public:
 private:
     Function * func;
     // 预留给后续可能需要创建新常量的优化过程使用
-    [[maybe_unused]] Module * mod;
+    Module * mod;
 
     /// 将一个前驱块 pred 中收集到的并行复制集合
     ///   copies: vector of (dst_phi_value*, src_value*)
