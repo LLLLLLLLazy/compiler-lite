@@ -255,6 +255,10 @@ set(IR_SRCS
 	ir/passes/functionPass/LoopRotate.cpp
 	ir/passes/fixedPointFunctionPass/SimpleLoopUnroll.h
 	ir/passes/fixedPointFunctionPass/SimpleLoopUnroll.cpp
+	ir/passes/fixedPointFunctionPass/LoopExitValueRewrite.h
+	ir/passes/fixedPointFunctionPass/LoopExitValueRewrite.cpp
+	ir/passes/fixedPointFunctionPass/RemoveEmptyLoop.h
+	ir/passes/fixedPointFunctionPass/RemoveEmptyLoop.cpp
 	ir/passes/toolPass/CFGStateCleanup.h
 	ir/passes/toolPass/CFGStateCleanup.cpp
 	ir/passes/fixedPointFunctionPass/CFGSimplify.h
@@ -263,6 +267,8 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/DeadInstElim.cpp
 	ir/passes/modulePass/GlobalToLocal.h
 	ir/passes/modulePass/GlobalToLocal.cpp
+	ir/passes/modulePass/DeadFunctionElim.h
+	ir/passes/modulePass/DeadFunctionElim.cpp
 	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.h
 	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.cpp
 	ir/passes/fixedPointFunctionPass/UnreachableBlockElim.h

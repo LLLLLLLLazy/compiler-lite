@@ -13,10 +13,12 @@
 #include "fixedPointFunctionPass/GVN.h"
 #include "fixedPointFunctionPass/InstCombine.h"
 #include "fixedPointFunctionPass/LICM.h"
+#include "fixedPointFunctionPass/LoopExitValueRewrite.h"
 #include "fixedPointFunctionPass/LoopStrengthReduce.h"
 #include "fixedPointFunctionPass/LoopTiling.h"
 #include "fixedPointFunctionPass/LoopVectorize.h"
 #include "fixedPointFunctionPass/LocalMemoryOpt.h"
+#include "fixedPointFunctionPass/RemoveEmptyLoop.h"
 #include "fixedPointFunctionPass/SimpleLoopUnroll.h"
 #include "fixedPointFunctionPass/UnreachableBlockElim.h"
 #include "fixedPointFunctionPass/PureCallLoopCache.h"
@@ -27,6 +29,7 @@
 #include "functionPass/PhiLowering.h"
 #include "functionPass/PureCallCSE.h"
 #include "functionPass/TailRecursionElim.h"
+#include "modulePass/DeadFunctionElim.h"
 #include "modulePass/GlobalToLocal.h"
 #include "modulePass/InterproceduralConstProp.h"
 #include "modulePass/SmallFunctionInline.h"
@@ -123,6 +126,13 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         return pass.run();
     });
 
+    // 内联后清除无调用者的死函数，释放其对全局标量的引用，
+    // 使 GlobalToLocal 能将初始化型函数访问的全局内化到 main
+    registerModulePass([](Module * currentModule) {
+        DeadFunctionElim pass(currentModule);
+        return pass.run();
+    });
+
     registerModulePass([](Module * currentModule) {
         GlobalToLocal pass(currentModule);
         return pass.run();
@@ -161,6 +171,22 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         return changed;
     });
 
+    // 晚期内联可能让更多初始化型函数变为死函数（如 get_random），
+    // 再次清除死函数并下沉其访问的全局标量，然后用 Mem2Reg 把这些
+    // 槽位提升到 SSA，为后续循环优化（SCEV 等）创造条件
+    registerLateModulePass([](Module * currentModule) {
+        DeadFunctionElim deadFuncElim(currentModule);
+        bool changed = deadFuncElim.run();
+
+        GlobalToLocal globalToLocal(currentModule);
+        changed = globalToLocal.run() || changed;
+
+        if (changed) {
+            runPostInlineCleanupPipeline(currentModule);
+        }
+        return changed;
+    });
+
     maxFixedPointRounds = kDefaultMaxFixedPointRounds;
 
     registerFixedPointFunctionPass([](Function * func) {
@@ -180,6 +206,18 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
 
     registerFixedPointFunctionPass([this](Function * func) {
         CanonicalizeLoop pass(func, module);
+        return pass.run();
+    });
+
+    // 基于 SCEV 把规范计数循环头部递推 phi 的出口取值替换为闭式表达式，
+    // 随后消除因此变为无副作用且出口无依赖的空循环
+    registerFixedPointFunctionPass([this](Function * func) {
+        LoopExitValueRewrite pass(func, module);
+        return pass.run();
+    });
+
+    registerFixedPointFunctionPass([this](Function * func) {
+        RemoveEmptyLoop pass(func, module);
         return pass.run();
     });
 

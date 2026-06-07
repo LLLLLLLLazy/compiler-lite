@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "Common.h"
+#include "Function.h"
 #include "FunctionType.h"
 #include "FloatType.h"
 #include "IntegerType.h"
@@ -153,6 +154,30 @@ bool Module::removeGlobalVariable(GlobalVariable * val)
     globalVariableMap.erase(val->getName());
     globalVariableVector.erase(vectorIt);
     delete val;
+    return true;
+}
+
+/// @brief 从模块中移除一个函数
+/// @param func 待移除的函数对象
+/// @return true 表示已成功移除
+bool Module::removeFunction(Function * func)
+{
+    if (func == nullptr) {
+        return false;
+    }
+
+    auto vectorIt = std::find(funcVector.begin(), funcVector.end(), func);
+    if (vectorIt == funcVector.end()) {
+        return false;
+    }
+
+    // 先拆除该函数全部 def-use 边并释放基本块，
+    // 同步更新其引用的全局值 use 链
+    func->Delete();
+
+    funcMap.erase(func->getName());
+    funcVector.erase(vectorIt);
+    delete func;
     return true;
 }
 
