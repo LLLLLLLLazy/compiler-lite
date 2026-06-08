@@ -2960,6 +2960,30 @@ bool mergeDuplicateReturns(InstList & code)
 			continue;
 		}
 
+		// 检查：如果删除这个 ret，会不会导致 fall-through 到下一条指令？
+		// 需要跳过所有紧邻的标签，找到下一条实际执行的指令
+		auto nextIt = retIt;
+		++nextIt;
+		bool canDelete = true;
+
+		// 跳过紧邻的标签
+		while (nextIt != code.end() && isLiveInst(*nextIt) && isLabel(*nextIt)) {
+			++nextIt;
+		}
+
+		// 如果找到了非标签的指令，检查是否是另一个 ret
+		if (nextIt != code.end() && isLiveInst(*nextIt)) {
+			// 如果下一条指令不是 ret，说明会 fall-through 到其他代码，不能删除
+			if ((*nextIt)->opcode != "ret") {
+				canDelete = false;
+			}
+		}
+
+		if (!canDelete) {
+			// 不能删除这个 ret，跳过
+			continue;
+		}
+
 		// 查找所有跳转到这个标签的指令
 		for (auto it = code.begin(); it != code.end(); ++it) {
 			auto * inst = *it;

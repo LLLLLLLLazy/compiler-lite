@@ -27,6 +27,7 @@
 #include "ArrayType.h"
 #include "BasicBlock.h"
 #include "CallInst.h"
+#include "ConditionalLeafAnalysis.h"
 #include "Function.h"
 #include "GlobalVariable.h"
 #include "ILocRiscV64.h"
@@ -140,22 +141,51 @@ bool requiresFramePointer(Function * func)
 /// @param func 当前函数
 /// @param allocMap 寄存器分配映射表
 /// @param useFramePointer 是否建立s0帧指针
+/// @param enableShrinkWrap 是否启用 shrink-wrapping 优化
 /// @return 需要保存的寄存器编号列表（按栈帧中保存顺序排列）
 ///
 /// 策略：
 /// - 若函数包含调用指令，则必须保存ra（返回地址）
 /// - 仅在确实需要帧指针时保存s0
 /// - 对于s1-s11（编号9,18-27），仅当寄存器分配器实际使用了该寄存器时才保存
+///
+/// 优化：
+/// - 叶子函数（无调用指令）不需要保存ra，因为ra不会被覆盖
+/// - 条件性叶子优化：如果只有部分路径需要调用，在调用点保存ra而非函数入口
 std::vector<int> computeSavedRegs(
 	Function * func,
 	const std::unordered_map<Value *, RegAllocInfo> & allocMap,
 	const std::unordered_map<int, std::vector<std::pair<int, int>>> & allocatedGprLiveRanges,
-	bool useFramePointer)
+	bool useFramePointer,
+	bool enableShrinkWrap,
+	bool & outShrinkWrapRA)
 {
 	std::vector<int> regs;
-	if (hasCallInst(func)) {
-		// 函数内有调用，需要保存返回地址寄存器ra
-		regs.push_back(RISCV64_RA_REG_NO);
+	outShrinkWrapRA = false;  // 默认不使用 shrink-wrapping
+
+	// 检查函数是否包含调用指令
+	bool hasCalls = hasCallInst(func);
+
+	if (hasCalls) {
+		// 如果启用 shrink-wrapping，进行条件性叶子分析
+		if (enableShrinkWrap) {
+			CallPathAnalysis analysis = analyzeCallPaths(func);
+
+			// 如果存在叶子路径（不是所有路径都有调用），可以优化
+			// 此时仍然为 ra 分配栈空间，但在调用点保存而非入口保存
+			if (analysis.canOptimize) {
+				// 注意：仍然添加 ra 到 regs，为其分配栈空间
+				// 但会通过 InstSelector 的标志在调用点保存，而非 prologue
+				regs.push_back(RISCV64_RA_REG_NO);
+				outShrinkWrapRA = true;  // 标记需要 shrink-wrapping
+			} else {
+				// 所有路径都有调用，传统方式在入口保存 ra
+				regs.push_back(RISCV64_RA_REG_NO);
+			}
+		} else {
+			// 未启用优化，传统方式保存 ra
+			regs.push_back(RISCV64_RA_REG_NO);
+		}
 	}
 
 	if (useFramePointer) {
@@ -393,6 +423,7 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	iloc.setSavedRegs(currentSavedRegs);
 	iloc.setSavedFPRs(currentSavedFPRs);
 	iloc.setFrameSize(greedyAllocator.getFrameSize());
+	iloc.setShrinkWrapRA(currentShrinkWrapRA);  // 设置 shrink-wrapping 标志
 
 	// 执行指令选择，将IR翻译为RISC-V64汇编指令
 	// 指令选择过程中创建ScratchValue（虚拟寄存器）
@@ -930,10 +961,13 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 	adjustFormalParamInsts(func);
 	// 计算当前函数需要保存的callee-saved寄存器列表
 	const bool useFramePointer = requiresFramePointer(func);
+	const bool enableShrinkWrap = true;
 	currentSavedRegs = computeSavedRegs(func,
 	                                    greedyAllocator.getAllocationMap(),
 	                                    greedyAllocator.getAllocatedGprLiveRanges(),
-	                                    useFramePointer);
+	                                    useFramePointer,
+	                                    enableShrinkWrap,
+	                                    currentShrinkWrapRA);
 	// 收集被使用的callee-saved FPR
 	currentSavedFPRs = greedyAllocator.getUsedCalleeSavedFPRs();
 	// 为未分配寄存器和溢出的变量分配栈槽

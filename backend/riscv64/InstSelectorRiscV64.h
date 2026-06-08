@@ -342,4 +342,10 @@ private:
 
 	/// @brief 是否已在调用点保存ra（避免重复保存）
 	bool raSavedAtCallSite = false;
+
+	/// @brief 优化的基本块顺序，用于判断后继块是否紧邻
+	std::vector<BasicBlock *> orderedBlocks_;
+
+	/// @brief 当前正在翻译的基本块在orderedBlocks_中的索引
+	size_t currentBlockIndex_ = 0;
 };

@@ -98,6 +98,9 @@ private:
 	/// @brief 当前函数需要保存的callee-saved FPR编号
 	std::vector<int> currentSavedFPRs;
 
+	/// @brief 当前函数是否对 ra 使用 shrink-wrapping
+	bool currentShrinkWrapRA = false;
+
 	/// @brief 当前代码生成器启用的RA配置
 	bool enableRVV_ = true;            ///< 是否输出 RVV 目标汇编
 	bool enableCalleeSavedFPR_ = false;  ///< 是否启用callee-saved FPR分配
