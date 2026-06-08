@@ -131,6 +131,10 @@ set(BACKEND_SRCS
 	backend/riscv64/RegCoalescer.h
 	backend/riscv64/LiveIntervalSplitter.cpp
 	backend/riscv64/LiveIntervalSplitter.h
+	backend/riscv64/ShrinkWrapping.cpp
+	backend/riscv64/ShrinkWrapping.h
+	backend/riscv64/ConditionalLeafAnalysis.cpp
+	backend/riscv64/ConditionalLeafAnalysis.h
 )
 
 # 中间IR(ir)源代码集合
