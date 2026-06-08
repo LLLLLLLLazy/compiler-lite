@@ -682,15 +682,23 @@ void InstSelectorRiscV64::run()
 	emitFormalParamMoves();
 
 	// 计算优化的基本块布局顺序，最小化无条件跳转
-	std::vector<BasicBlock *> orderedBlocks = computeOptimalBlockOrder(func);
+	orderedBlocks_ = computeOptimalBlockOrder(func);
 
 	// 遍历所有基本块（按优化顺序），输出标签并翻译指令
-	for (auto * bb: orderedBlocks) {
+	for (size_t i = 0; i < orderedBlocks_.size(); ++i) {
+		auto * bb = orderedBlocks_[i];
+		currentBlockIndex_ = i;
+
+		// 重要：即使基本块为空，也必须输出标签，因为可能有其他块跳转到这里
+		// 只有入口块可以省略标签（不会被跳转）
+		if (i > 0 || !bb->getInstructions().empty()) {
+			iloc.label(blockLabel(bb));
+		}
+
 		if (bb->getInstructions().empty()) {
 			continue;
 		}
 
-		iloc.label(blockLabel(bb));
 		for (auto * inst: bb->getInstructions()) {
 			emitSplitTransfersBefore(inst);
 			if (!inst->isDead()) {
@@ -2039,11 +2047,20 @@ void InstSelectorRiscV64::translate_fcmp(Instruction * inst)
 
 /// @brief 翻译br指令（无条件跳转）
 /// @param inst IR指令
+///
+/// 优化：如果目标块是下一个基本块，省略跳转指令
 void InstSelectorRiscV64::translate_br(Instruction * inst)
 {
 	auto * br = dynamic_cast<BranchInst *>(inst);
 	if (br != nullptr) {
-		iloc.jump(blockLabel(br->getTarget()));
+		BasicBlock * target = br->getTarget();
+		// 优化：如果目标是下一个基本块，则不需要生成跳转
+		bool targetIsNext = (currentBlockIndex_ + 1 < orderedBlocks_.size() &&
+		                     orderedBlocks_[currentBlockIndex_ + 1] == target);
+
+		if (!targetIsNext) {
+			iloc.jump(blockLabel(target));
+		}
 	}
 }
 
@@ -2150,14 +2167,24 @@ bool InstSelectorRiscV64::translateDirectIcmpBranch(ICmpInst * icmp, CondBranchI
 	if (!emitDirectIcmpTrueBranch(icmp, condBr, trueLabel)) {
 		return false;
 	}
-	iloc.jump(blockLabel(condBr->getFalseDest()));
+
+	// 优化：如果false分支是下一个基本块，则不需要生成跳转
+	// 程序会自然地顺序执行到下一个块
+	BasicBlock * falseDest = condBr->getFalseDest();
+	bool falseIsNext = (currentBlockIndex_ + 1 < orderedBlocks_.size() &&
+	                    orderedBlocks_[currentBlockIndex_ + 1] == falseDest);
+
+	if (!falseIsNext) {
+		iloc.jump(blockLabel(falseDest));
+	}
 	return true;
 }
 
 /// @brief 翻译cond_br指令（条件跳转）
 /// @param inst IR指令
 ///
-/// 生成：bne cond, zero, trueLabel; j falseLabel
+/// 生成：bne cond, zero, trueLabel; [j falseLabel]
+/// 优化：如果true或false分支是下一个基本块，省略对应的跳转指令
 void InstSelectorRiscV64::translate_cond_br(Instruction * inst)
 {
 	auto * condBr = dynamic_cast<CondBranchInst *>(inst);
@@ -2171,10 +2198,34 @@ void InstSelectorRiscV64::translate_cond_br(Instruction * inst)
 		}
 	}
 
+	BasicBlock * trueDest = condBr->getTrueDest();
+	BasicBlock * falseDest = condBr->getFalseDest();
+
+	// 检查哪个分支是下一个块
+	bool trueIsNext = (currentBlockIndex_ + 1 < orderedBlocks_.size() &&
+	                   orderedBlocks_[currentBlockIndex_ + 1] == trueDest);
+	bool falseIsNext = (currentBlockIndex_ + 1 < orderedBlocks_.size() &&
+	                    orderedBlocks_[currentBlockIndex_ + 1] == falseDest);
+
 	OperandReg cond = loadOperand(condBr->getCondition(), inst);
-	iloc.inst("bne", PlatformRiscV64::regName[cond.reg], "zero", blockLabel(condBr->getTrueDest()));
+
+	// 情况1：true 分支是下一个块 → 生成 beq cond, zero, falseLabel（条件为假时跳转）
+	// 这样条件为真时会 fall-through 到下一个块（true 分支）
+	if (trueIsNext && !falseIsNext) {
+		iloc.inst("beq", PlatformRiscV64::regName[cond.reg], "zero", blockLabel(falseDest));
+		releaseOperand(cond);
+		return;
+	}
+
+	// 情况2：false 分支是下一个块（或两者都不是）→ 生成 bne cond, zero, trueLabel
+	// 条件为真时跳转到 true 分支，条件为假时 fall-through 到下一个块（false 分支）
+	iloc.inst("bne", PlatformRiscV64::regName[cond.reg], "zero", blockLabel(trueDest));
 	releaseOperand(cond);
-	iloc.jump(blockLabel(condBr->getFalseDest()));
+
+	// 如果 false 分支不是下一个块，需要显式跳转
+	if (!falseIsNext) {
+		iloc.jump(blockLabel(falseDest));
+	}
 }
 
 /// @brief 翻译ret指令（函数返回）
@@ -2403,8 +2454,31 @@ void InstSelectorRiscV64::translate_call(Instruction * inst)
 		}
 	}
 
+	// Shrink-wrapping: 在调用点保存ra（如果需要）
+	emitCallSiteSaveRA(inst);
+
 	// 生成call指令
 	iloc.call_fun(call->getCallee()->getName());
+
+	// Shrink-wrapping: 在调用后立即恢复 ra（如果之前保存了）
+	if (raSavedAtCallSite) {
+		const int offset = raSaveOffset();
+		if (offset >= 0) {
+			auto tmp = tempMgr.borrow(inst);
+			if (PlatformRiscV64::isDisp(offset)) {
+				iloc.inst("ld", PlatformRiscV64::regName[RISCV64_RA_REG_NO],
+				          std::to_string(offset) + "(sp)");
+			} else {
+				iloc.load_imm(tmp.reg(), offset);
+				iloc.inst("add", PlatformRiscV64::regName[tmp.reg()], "sp",
+				          PlatformRiscV64::regName[tmp.reg()]);
+				iloc.inst("ld", PlatformRiscV64::regName[RISCV64_RA_REG_NO],
+				          "0(" + PlatformRiscV64::regName[tmp.reg()] + ")");
+			}
+		}
+		// 重置标志，使得下一个call可以再次保存ra
+		raSavedAtCallSite = false;
+	}
 
 	// 若有返回值，将a0（或fa0→a0）存储到结果位置
 	if (call->hasResultValue()) {
@@ -2956,10 +3030,18 @@ void InstSelectorRiscV64::emitEpilogue()
 	auto tmp = tempMgr.borrow(nullptr);
 
 	// 逆序恢复callee-saved寄存器（与prologue中保存顺序相反）
+	// 注意：如果启用 shrink-wrapping，ra 在调用点管理，这里跳过
 	for (int i = static_cast<int>(savedRegs.size()) - 1; i >= 0; --i) {
+		const int reg = savedRegs[i];
+
+		// 如果是 ra 且启用了 shrink-wrapping，跳过在 epilogue 中恢复
+		if (reg == RISCV64_RA_REG_NO && iloc.getShrinkWrapRA()) {
+			continue;
+		}
+
 		const int offset = frameSize - (i + 1) * 8;
 		// 通过寄存器编号查找对应的寄存器名称
-		emitLoad64(PlatformRiscV64::regName[savedRegs[i]], offset, tmp.reg());
+		emitLoad64(PlatformRiscV64::regName[reg], offset, tmp.reg());
 	}
 
 	// 逆序恢复callee-saved FPR（与prologue中保存顺序相反）

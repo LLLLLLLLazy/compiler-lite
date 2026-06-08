@@ -173,6 +173,9 @@ class ILocRiscV64 {
 	/// @brief 当前函数需要在栈帧中保存的callee-saved FPR
 	std::vector<int> savedFPRs;
 
+	/// @brief 是否对 ra 使用 shrink-wrapping（调用点保存而非入口保存）
+	bool shrinkWrapRA = false;
+
 	/// @brief 机器指令计数器（每次emit递增）
 	int machineInstCount = 0;
 
@@ -221,6 +224,19 @@ public:
 	const std::vector<int> & getSavedRegs() const
 	{
 		return savedRegs;
+	}
+
+	/// @brief 设置是否对 ra 使用 shrink-wrapping（调用点保存而非入口保存）
+	/// @param enable true 表示 ra 在调用点保存，prologue/epilogue 中跳过
+	void setShrinkWrapRA(bool enable)
+	{
+		shrinkWrapRA = enable;
+	}
+
+	/// @brief 获取是否对 ra 使用 shrink-wrapping
+	bool getShrinkWrapRA() const
+	{
+		return shrinkWrapRA;
 	}
 
 	/// @brief 当前函数是否在prologue中建立s0帧指针

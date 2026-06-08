@@ -254,6 +254,8 @@ RegAllocInfo & ILocRiscV64::getRegAllocInfo(Value * val)
 /// @brief 删除无用的Label指令
 /// 优化策略：先收集所有被跳转指令引用的内部标签，再遍历标签指令，
 /// 将未被引用的标签标记为dead，避免O(n^2)的逐标签遍历。
+///
+/// 注意：紧跟在条件分支后的标签可能是 fall-through 目标，即使没有显式跳转也不能删除。
 void ILocRiscV64::deleteUnusedLabel()
 {
 	// 收集所有被跳转/分支指令引用的内部标签（以".L"开头）
@@ -276,10 +278,33 @@ void ILocRiscV64::deleteUnusedLabel()
 		collectLabel(inst->addition);
 	}
 
-	// 将未被任何跳转指令引用的内部标签标记为dead
+	// 收集紧跟在条件分支后的标签（fall-through 目标）
+	// 这些标签即使没有显式跳转也不应该删除
+	std::unordered_set<std::string> fallThroughLabels;
+	RiscV64Inst * prevInst = nullptr;
+	for (RiscV64Inst * inst : code) {
+		// 如果前一条指令是条件分支（beq, bne, blt, bge, bltu, bgeu）
+		// 且当前指令是标签，则该标签是 fall-through 目标
+		if (prevInst != nullptr && isInternalLabelInst(inst)) {
+			const std::string & op = prevInst->opcode;
+			// 检查是否是条件分支指令
+			if (op == "beq" || op == "bne" || op == "blt" || op == "bge" ||
+			    op == "bltu" || op == "bgeu" || op == "flt.s" || op == "fle.s" ||
+			    op == "feq.s" || op == "flt.d" || op == "fle.d" || op == "feq.d") {
+				fallThroughLabels.insert(inst->opcode);
+			}
+		}
+		prevInst = inst;
+	}
+
+	// 将未被任何跳转指令引用且不是 fall-through 目标的内部标签标记为dead
 	for (RiscV64Inst * inst: code) {
-		if (isInternalLabelInst(inst) && referencedLabels.find(inst->opcode) == referencedLabels.end()) {
-			inst->setDead();
+		if (isInternalLabelInst(inst)) {
+			const std::string & labelName = inst->opcode;
+			if (referencedLabels.find(labelName) == referencedLabels.end() &&
+			    fallThroughLabels.find(labelName) == fallThroughLabels.end()) {
+				inst->setDead();
+			}
 		}
 	}
 }
@@ -762,10 +787,18 @@ void ILocRiscV64::allocStack(Function * func, int tmp_reg_no)
 
 	// 逐个保存callee-saved寄存器到栈帧顶部
 	// savedRegs由CodeGeneratorRiscV64根据实际使用情况计算得出，仅保存必要的寄存器
+	// 注意：如果启用 shrink-wrapping，ra 会在调用点保存，这里跳过
 	for (int i = 0; i < static_cast<int>(savedRegs.size()); ++i) {
+		const int reg = savedRegs[i];
+
+		// 如果是 ra 且启用了 shrink-wrapping，跳过在 prologue 中保存
+		if (reg == RISCV64_RA_REG_NO && shrinkWrapRA) {
+			continue;
+		}
+
 		int offset = currentFrameSize - (i + 1) * 8;
 		// 通过寄存器编号查找对应的寄存器名称
-		const std::string & regName = PlatformRiscV64::regName[savedRegs[i]];
+		const std::string & regName = PlatformRiscV64::regName[reg];
 		if (PlatformRiscV64::isDisp(offset)) {
 			emit("sd", regName, std::to_string(offset) + "(sp)");
 		} else {
