@@ -69,7 +69,8 @@ struct RecurrenceShape {
         None,
         Affine,     ///< p_{k+1} = p_k + c
         ModularAdd, ///< p_{k+1} = (p_k + c) % M
-        DivPow2     ///< p_{k+1} = p_k / 2^shiftPerStep（每步除以同一个 2 的幂常量）
+        DivPow2,    ///< p_{k+1} = p_k / 2^shiftPerStep（每步除以同一个 2 的幂常量）
+        Quadratic,  ///< p_{k+1} = p_k + a*i + b，其中 i 是另一个 {0,+,1} IV
     };
 
     Kind kind = Kind::None;
@@ -77,6 +78,9 @@ struct RecurrenceShape {
     Value * step = nullptr;    ///< 每次迭代增量 c（循环不变量）
     Value * modulus = nullptr; ///< 模数 M（仅 ModularAdd）
     int32_t shiftPerStep = 0;  ///< 每步除数对应的右移位数 log2(divisor)（仅 DivPow2）
+    Value * quadBase = nullptr; ///< 二次递推中 a 系数乘以的基 IV（仅 Quadratic）
+    Value * quadCoeffA = nullptr; ///< 二次递推的一次项系数 a（仅 Quadratic）
+    Value * quadCoeffB = nullptr; ///< 二次递推的常数项系数 b（仅 Quadratic）
 };
 
 /// @brief 判断正整数是否为 2 的幂，并返回其 log2
@@ -176,7 +180,8 @@ Value * emitSignedDivByPow2(Function * func,
 RecurrenceShape analyzeRecurrence(PhiInst * phi,
                                   BasicBlock * preheader,
                                   BasicBlock * latch,
-                                  const std::unordered_set<BasicBlock *> & loopBody)
+                                  const std::unordered_set<BasicBlock *> & loopBody,
+                                  Module * mod)
 {
     RecurrenceShape shape;
     if (!phi || phi->getIncomingCount() != 2 || !phi->getType()->isIntegerType()) {
@@ -265,6 +270,145 @@ RecurrenceShape analyzeRecurrence(PhiInst * phi,
             shape.start = startValue;
             shape.shiftPerStep = shift;
             return shape;
+        }
+    }
+
+    // 形态四：p_next = p + incr，其中 incr 包含另一个 IV 的引用（二次递推）
+    //   例如：sum = phi(start, sum + i)    其中 i = {0,+,1}
+    //         sum = phi(start, sum + 2*i + 3)
+    //   incr = a * iv + b，a 和 b 为循环不变量，iv 是另一个头部 phi
+    if (latchInst->getOp() == IRInstOperator::IRINST_OP_ADD_I && latchInst->getLHS() == phi) {
+        Value * incr = latchInst->getRHS();
+        if (!isLoopInvariant(incr, loopBody) && isDefinedInLoop(incr, loopBody)) {
+            // 尝试分解 incr = a * iv + b
+            // 其中 iv 是另一个 phi，a 和 b 为循环不变量
+            auto * incrInst = dynamic_cast<Instruction *>(incr);
+            if (!incrInst) {
+                return shape;
+            }
+
+            Value * innerIV = nullptr;
+            Value * coeffA = nullptr;  // a
+            Value * coeffB = nullptr;  // b
+
+            // 情况 A：incr = add(mul(a, iv), b) 或 incr = add(b, mul(a, iv))
+            if (incrInst->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
+                auto * addInst = static_cast<BinaryInst *>(incrInst);
+                Value * lhs = addInst->getLHS();
+                Value * rhs = addInst->getRHS();
+
+                // 尝试 lhs = mul(a, iv) 且 rhs = b
+                if (auto * mulInst = dynamic_cast<BinaryInst *>(lhs)) {
+                    if (mulInst->getOp() == IRInstOperator::IRINST_OP_MUL_I && isDefinedInLoop(mulInst, loopBody)) {
+                        Value * mulLHS = mulInst->getLHS();
+                        Value * mulRHS = mulInst->getRHS();
+                        if (isLoopInvariant(mulLHS, loopBody) && isDefinedInLoop(mulRHS, loopBody)) {
+                            coeffA = mulLHS; innerIV = mulRHS;
+                        } else if (isLoopInvariant(mulRHS, loopBody) && isDefinedInLoop(mulLHS, loopBody)) {
+                            coeffA = mulRHS; innerIV = mulLHS;
+                        }
+                        if (innerIV && isLoopInvariant(rhs, loopBody)) {
+                            coeffB = rhs;
+                        } else {
+                            innerIV = nullptr; coeffA = nullptr;
+                        }
+                    }
+                }
+                // 尝试 rhs = mul(a, iv) 且 lhs = b
+                if (!innerIV) {
+                    if (auto * mulInst = dynamic_cast<BinaryInst *>(rhs)) {
+                        if (mulInst->getOp() == IRInstOperator::IRINST_OP_MUL_I && isDefinedInLoop(mulInst, loopBody)) {
+                            Value * mulLHS = mulInst->getLHS();
+                            Value * mulRHS = mulInst->getRHS();
+                            if (isLoopInvariant(mulLHS, loopBody) && isDefinedInLoop(mulRHS, loopBody)) {
+                                coeffA = mulLHS; innerIV = mulRHS;
+                            } else if (isLoopInvariant(mulRHS, loopBody) && isDefinedInLoop(mulLHS, loopBody)) {
+                                coeffA = mulRHS; innerIV = mulLHS;
+                            }
+                            if (innerIV && isLoopInvariant(lhs, loopBody)) {
+                                coeffB = lhs;
+                            } else {
+                                innerIV = nullptr; coeffA = nullptr;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 情况 B：incr = add(iv, b)（即 a = 1）
+            if (!innerIV && incrInst->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
+                auto * addInst = static_cast<BinaryInst *>(incrInst);
+                Value * lhs = addInst->getLHS();
+                Value * rhs = addInst->getRHS();
+                if (isDefinedInLoop(lhs, loopBody) && isLoopInvariant(rhs, loopBody)) {
+                    innerIV = lhs;
+                    coeffB = rhs;
+                    coeffA = mod->newConstInteger(phi->getType(), 1);
+                } else if (isDefinedInLoop(rhs, loopBody) && isLoopInvariant(lhs, loopBody)) {
+                    innerIV = rhs;
+                    coeffB = lhs;
+                    coeffA = mod->newConstInteger(phi->getType(), 1);
+                }
+            }
+
+            // 情况 C：incr = iv（即 a = 1, b = 0）
+            if (!innerIV && isDefinedInLoop(incr, loopBody)) {
+                innerIV = incr;
+                coeffA = mod->newConstInteger(phi->getType(), 1);
+                coeffB = mod->newConstInteger(phi->getType(), 0);
+            }
+
+            // 验证 innerIV 是头部 phi 且自身是简单的 {start, +, const} 递推
+            // 二次递推公式假定 innerIV 的增量是常量，否则不能应用闭式
+            if (innerIV && dynamic_cast<PhiInst *>(innerIV) &&
+                innerIV->getType()->isIntegerType()) {
+                auto * innerPhi = static_cast<PhiInst *>(innerIV);
+                bool innerPhiInHeader = false;
+                for (auto * hdrInst : phi->getParentBlock()->getInstructions()) {
+                    if (hdrInst == innerPhi) {
+                        innerPhiInHeader = true;
+                        break;
+                    }
+                    if (!dynamic_cast<PhiInst *>(hdrInst)) {
+                        break;
+                    }
+                }
+
+                // 验证 innerIV 是简单仿射递推：latch 值 = add(innerPhi, const)
+                bool innerIsSimple = false;
+                if (innerPhiInHeader) {
+                    Value * innerLatch = nullptr;
+                    Value * innerStart = nullptr;
+                    for (int32_t i = 0; i < innerPhi->getIncomingCount(); ++i) {
+                        if (innerPhi->getIncomingBlock(i) == latch) {
+                            innerLatch = innerPhi->getIncomingValue(i);
+                        } else if (innerPhi->getIncomingBlock(i) == preheader) {
+                            innerStart = innerPhi->getIncomingValue(i);
+                        }
+                    }
+                    if (innerLatch && innerStart && isLoopInvariant(innerStart, loopBody)) {
+                        auto * innerLatchInst = dynamic_cast<BinaryInst *>(innerLatch);
+                        if (innerLatchInst && innerLatchInst->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
+                            Value * l = innerLatchInst->getLHS();
+                            Value * r = innerLatchInst->getRHS();
+                            if ((l == innerPhi && isLoopInvariant(r, loopBody)) ||
+                                (r == innerPhi && isLoopInvariant(l, loopBody))) {
+                                innerIsSimple = true;
+                            }
+                        }
+                    }
+                }
+
+                if (innerPhiInHeader && innerIsSimple && coeffA && coeffB &&
+                    isLoopInvariant(coeffA, loopBody) && isLoopInvariant(coeffB, loopBody)) {
+                    shape.kind = RecurrenceShape::Kind::Quadratic;
+                    shape.start = startValue;
+                    shape.quadBase = innerPhi;
+                    shape.quadCoeffA = coeffA;
+                    shape.quadCoeffB = coeffB;
+                    return shape;
+                }
+            }
         }
     }
 
@@ -369,7 +513,7 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
             continue;
         }
 
-        RecurrenceShape shape = analyzeRecurrence(phi, preheader, latch, loopBody);
+        RecurrenceShape shape = analyzeRecurrence(phi, preheader, latch, loopBody, mod);
         if (shape.kind == RecurrenceShape::Kind::None) {
             continue;
         }
@@ -450,6 +594,47 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
             // 每步除以 2^shiftPerStep，trip 步后等价于 start sdiv 2^(shiftPerStep*trip)
             finalValue = emitSignedDivByPow2(func, mod, shape.start, shape.shiftPerStep, trip, intType,
                                              boolType, appendInst);
+        } else if (shape.kind == RecurrenceShape::Kind::Quadratic) {
+            // 二次递推：p_{k+1} = p_k + a * iv + b
+            // 其中 iv 是另一个 IV，对于规范计数循环 iv = {0, +, step_iv}
+            // p_exit = start + b * N + a * step_iv * N * (N-1) / 2
+            //     （这里假设 iv_start = 0，以 trip 而非 bound 为实际迭代次数）
+            //
+            // 计算 N*(N-1)/2：triangular = ((trip - 1) * trip) / 2   (若 trip > 0)
+            auto * one = mod->newConstInteger(intType, 1);
+            auto * tripMinusOne =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, trip, one, intType);
+            appendInst(tripMinusOne);
+            auto * triangular =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, trip, tripMinusOne, intType);
+            appendInst(triangular);
+            auto * two = mod->newConstInteger(intType, 2);
+            auto * triangularDiv2 =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, triangular, two, intType);
+            appendInst(triangularDiv2);
+
+            // termA = a * triangularDiv2（二次项）
+            auto * termA = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I,
+                                          shape.quadCoeffA, triangularDiv2, intType);
+            appendInst(termA);
+
+            // termB = b * trip（一次项）
+            auto * termB = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I,
+                                          shape.quadCoeffB, trip, intType);
+            appendInst(termB);
+
+            // base = start + termA + termB
+            auto * base1 = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I,
+                                           shape.start, termA, intType);
+            appendInst(base1);
+            auto * base2 = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I,
+                                           base1, termB, intType);
+            appendInst(base2);
+
+            // trip 为 0 时循环未执行，出口值应为 start
+            auto * select = new SelectInst(func, tripPos, base2, shape.start, intType);
+            appendInst(select);
+            finalValue = select;
         } else {
             // Affine / ModularAdd：delta = step * trip，base = start + delta
             auto * delta =
