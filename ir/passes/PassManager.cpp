@@ -601,22 +601,18 @@ void PassManager::loadPassToggles()
 
     std::string token;
     std::istringstream iss(env);
-    while (std::getline(iss, token)) {
-        // 同时支持逗号、分号、空格、制表符作为分隔符
+    while (std::getline(iss, token, ',')) {
+        // 去除前后空白
         std::size_t begin = 0;
-        while (begin < token.size()
-               && (token[begin] == ',' || token[begin] == ';' || token[begin] == ' '
-                   || token[begin] == '\t')) {
+        while (begin < token.size() && (token[begin] == ' ' || token[begin] == '\t')) {
             ++begin;
         }
-        std::size_t end = token.size() - 1;
-        while (end > begin
-               && (token[end] == ',' || token[end] == ';' || token[end] == ' '
-                   || token[end] == '\t')) {
+        std::size_t end = token.size();
+        while (end > begin && (token[end - 1] == ' ' || token[end - 1] == '\t')) {
             --end;
         }
-        if (end >= begin) {
-            disabledPasses.insert(token.substr(begin, end - begin + 1));
+        if (end > begin) {
+            disabledPasses.insert(token.substr(begin, end - begin));
         }
     }
 }

@@ -121,8 +121,22 @@ bool RemoveEmptyLoop::isRemovableLoop(BasicBlock * header,
         }
     }
 
+    // 出口块的 phi 若有来自循环体内块的 incoming edge，说明循环的控制流
+    // 决定了该 phi 的取值。删除循环会将所有循环→出口边重定向到 preheader，
+    // 导致 phi 失去区分不同路径的能力，产生错误语义，因此不可删除
+    for (auto * inst : exit->getInstructions()) {
+        auto * phi = dynamic_cast<PhiInst *>(inst);
+        if (!phi) {
+            break;
+        }
+        for (int32_t i = 0; i < phi->getIncomingCount(); ++i) {
+            if (loopBody.find(phi->getIncomingBlock(i)) != loopBody.end()) {
+                return false;
+            }
+        }
+    }
+
     (void) header;
-    (void) exit;
     return true;
 }
 
