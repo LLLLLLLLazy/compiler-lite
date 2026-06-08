@@ -13,6 +13,7 @@
 #include "fixedPointFunctionPass/GVN.h"
 #include "fixedPointFunctionPass/InstCombine.h"
 #include "fixedPointFunctionPass/LICM.h"
+#include "fixedPointFunctionPass/LoopConstantPromotion.h"
 #include "fixedPointFunctionPass/LoopExitValueRewrite.h"
 #include "fixedPointFunctionPass/LoopStrengthReduce.h"
 #include "fixedPointFunctionPass/LoopTiling.h"
@@ -24,6 +25,7 @@
 #include "fixedPointFunctionPass/PureCallLoopCache.h"
 #include "functionPass/ArrayScalarize.h"
 #include "functionPass/LateLoopCFGCleanup.h"
+#include "functionPass/LoopRotate.h"
 #include "functionPass/Mem2Reg.h"
 #include "functionPass/PhiToSelect.h"
 #include "functionPass/PhiLowering.h"
@@ -345,6 +347,34 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
 
             changed = localChanged || changed;
         } while (localChanged);
+
+        return changed;
+    });
+
+    // 晚期循环优化：在所有优化收敛且 CFG 化简完成后执行。
+    // 先重跑 CanonicalizeLoop 重建可能被 CFGSimplify 破坏的 preheader/dedicated exit，
+    // 再提升循环内重复使用的大常量到 preheader（此时无 ConstProp/InstCombine 会还原），
+    // 最后对规范计数循环做 header-test → latch-test 旋转。
+    // 放在最后确保无后续 pass 破坏优化结果
+    registerLateFunctionPass([this](Function * func) {
+        if (!func || func->isBuiltin() || func->getBlocks().empty()) {
+            return false;
+        }
+
+        bool changed = false;
+
+        // 重建循环规范形式（preheader、dedicated exit）
+        CanonicalizeLoop canonicalizeLoop(func);
+        changed = canonicalizeLoop.run() || changed;
+
+        // 循环常量提升：将循环体内被多次引用的大立即数和浮点常量
+        // 固化为 preheader 中的虚拟寄存器值，避免后端重复物化
+        LoopConstantPromotion constPromo(func, module);
+        changed = constPromo.run() || changed;
+
+        // 对规范计数循环做旋转
+        LoopRotate loopRotate(func);
+        changed = loopRotate.run() || changed;
 
         return changed;
     });
