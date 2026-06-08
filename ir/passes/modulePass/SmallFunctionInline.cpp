@@ -26,6 +26,7 @@
 #include "CallInst.h"
 #include "CondBranchInst.h"
 #include "CopyInst.h"
+#include "CostModel.h"
 #include "DominatorTree.h"
 #include "FCmpInst.h"
 #include "FPToSIInst.h"
@@ -50,22 +51,6 @@ namespace {
 
 /// @brief 内联最大轮次，防止无限循环
 constexpr int32_t kMaxInlineRounds = 256;
-/// @brief 叶子函数允许的最大基本块数
-constexpr int32_t kLeafMaxBlocks = 8;
-/// @brief 叶子函数允许的最大指令数
-constexpr int32_t kLeafMaxInsts = 36;
-/// @brief 非叶子小函数允许的最大基本块数
-constexpr int32_t kSmallMaxBlocks = 8;
-/// @brief 非叶子小函数允许的最大指令数
-constexpr int32_t kSmallMaxInsts = 40;
-/// @brief 循环内热点调用点允许的叶子函数最大基本块数
-constexpr int32_t kHotLeafMaxBlocks = 64;
-/// @brief 循环内热点调用点允许的叶子函数最大指令数
-constexpr int32_t kHotLeafMaxInsts = 300;
-/// @brief 循环内热点调用点允许的非叶子函数最大基本块数
-constexpr int32_t kHotSmallMaxBlocks = 32;
-/// @brief 循环内热点调用点允许的非叶子函数最大指令数
-constexpr int32_t kHotSmallMaxInsts = 180;
 /// @brief 循环内热点调用点允许的单层叶子循环函数最大基本块数
 constexpr int32_t kHotLoopLeafMaxBlocks = 12;
 /// @brief 循环内热点调用点允许的单层叶子循环函数最大指令数
@@ -86,10 +71,6 @@ constexpr int32_t kHotSingleUseLoopLeafMaxInsts = 160;
 constexpr int32_t kHotSingleUseLoopLeafMaxBodyBlocks = 16;
 /// @brief 非热点调用点允许的单层叶子循环函数最大直接调用点数
 constexpr int32_t kLoopLeafMaxCallSites = 4;
-/// @brief 被内联函数的 alloca 总字节数上限，防止栈帧膨胀
-constexpr int32_t kMaxAllocaBytes = 128;
-/// @brief 循环内热点调用点的 alloca 总字节数上限
-constexpr int32_t kHotMaxAllocaBytes = 256;
 /// @brief 热点调用点允许的自递归叶子 helper 最大基本块数
 constexpr int32_t kHotSelfRecursiveLeafMaxBlocks = 10;
 /// @brief 热点调用点允许的自递归叶子 helper 最大指令数
@@ -216,6 +197,86 @@ int32_t countDirectCallSites(Module * mod, Function * callee)
         }
     }
     return count;
+}
+
+/// @brief 计算函数的内联成本（使用 CostModel 加权）
+/// @param func 目标函数
+/// @return 加权成本值
+int32_t calculateInlineCost(Function * func)
+{
+    if (!func) {
+        return INT32_MAX;
+    }
+
+    long totalCost = 0;
+    for (auto * bb : func->getBlocks()) {
+        totalCost += CostModel::blockCost(bb);
+    }
+
+    // 防止溢出，限制在 INT32_MAX
+    if (totalCost > INT32_MAX) {
+        return INT32_MAX;
+    }
+
+    return static_cast<int32_t>(totalCost);
+}
+
+/// @brief 判断内联是否有收益
+/// @param mod 所属模块
+/// @param caller 调用方
+/// @param callee 被调函数
+/// @param callLoopDepth 调用点循环深度
+/// @param calleeCost 被调函数成本
+/// @return true 表示有收益
+bool isProfitableToInline(Module * mod,
+                          Function * caller,
+                          Function * callee,
+                          int32_t callLoopDepth,
+                          int32_t calleeCost)
+{
+    if (!mod || !caller || !callee) {
+        return false;
+    }
+
+    // 如果收益门关闭，总是内联（保持历史行为）
+    if (!CostModel::profitabilityEnabled()) {
+        return true;
+    }
+
+    // 计算阈值：热点调用点使用更高阈值
+    int32_t threshold = CostModel::getInlineThreshold();
+    const bool hotCallSite = callLoopDepth > 0;
+    if (hotCallSite) {
+        threshold *= CostModel::getInlineHotMultiplier();
+    }
+
+    // 自递归函数使用递归阈值
+    const bool selfRecursive = containsSelfCall(callee);
+    if (selfRecursive) {
+        threshold = CostModel::kInlineRecursiveThreshold;
+    }
+
+    // 成本超过阈值不内联
+    if (calleeCost > threshold) {
+        CostModel::remark("inline", false, "cost exceeds threshold");
+        return false;
+    }
+
+    // 小函数总是内联
+    if (calleeCost <= CostModel::kInlineSmallThreshold) {
+        CostModel::remark("inline", true, "small function");
+        return true;
+    }
+
+    // 单次调用点总是内联（无代码膨胀）
+    if (countDirectCallSites(mod, callee) == 1) {
+        CostModel::remark("inline", true, "single call site");
+        return true;
+    }
+
+    // 通过收益检查
+    CostModel::remark("inline", true, "profitable");
+    return true;
 }
 
 /// @brief 判断热点调用点上的单层叶子循环函数是否值得内联
@@ -599,7 +660,7 @@ int32_t getAllocaBytes(Function * func)
 
             int32_t size = alloca->getAllocaType()->getSize();
             if (size < 0) {
-                return kMaxAllocaBytes + 1;
+                return CostModel::kInlineMaxAllocaBytes + 1;
             }
             bytes += size;
         }
@@ -718,7 +779,8 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
         return false;
     }
 
-    if (callee->getParams().size() > 8) {
+    // 参数数量限制：使用 CostModel 常量
+    if (callee->getParams().size() > static_cast<size_t>(CostModel::kInlineMaxParams)) {
         return false;
     }
 
@@ -727,13 +789,15 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
     }
 
     const bool hotCallSite = callLoopDepth > 0;
-    const bool leafCallee = !hasNonSelfUserCall(callee);
-    const int32_t maxAllocaBytes = hotCallSite ? kHotMaxAllocaBytes : kMaxAllocaBytes;
+
+    // alloca 字节数限制：使用 CostModel 常量
+    const int32_t maxAllocaBytes = hotCallSite ? CostModel::kInlineHotMaxAllocaBytes : CostModel::kInlineMaxAllocaBytes;
     const int32_t allocaBytes = getAllocaBytes(callee);
     if (allocaBytes > maxAllocaBytes) {
         return false;
     }
 
+    // 检查是否所有指令都支持内联
     for (auto * bb : callee->getBlocks()) {
         for (auto * inst : bb->getInstructions()) {
             if (!isSupportedInlineInstruction(inst)) {
@@ -742,11 +806,28 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
         }
     }
 
+    // 基本块数量限制：使用 CostModel 常量
     int32_t blockCount = static_cast<int32_t>(callee->getBlocks().size());
-    int32_t instCount = countInstructions(callee);
+    if (blockCount > CostModel::kInlineMaxBlocks) {
+        return false;
+    }
+
+    // 计算被调函数的内联成本（使用加权成本模型）
+    int32_t calleeCost = calculateInlineCost(callee);
+
+    // 判断是否有收益（基于 GCC/Clang 参数的成本模型）
+    if (!isProfitableToInline(mod, caller, callee, callLoopDepth, calleeCost)) {
+        return false;
+    }
+
+    // 以下是特殊情况的额外检查，保留原有逻辑以确保兼容性
+
+    const bool leafCallee = !hasNonSelfUserCall(callee);
     const NaturalLoopSummary loopSummary = analyzeNaturalLoops(callee);
     const bool selfRecursiveCallee = containsSelfCall(callee);
+    int32_t instCount = countInstructions(callee);
 
+    // 自递归函数：额外的结构限制
     if (selfRecursiveCallee) {
         if (!hotCallSite || !leafCallee) {
             return false;
@@ -754,6 +835,7 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
         return isEligibleHotSelfRecursiveLeafCallee(mod, callee, allocaBytes, blockCount, instCount);
     }
 
+    // 包含循环的函数：额外的结构限制
     if (loopSummary.loopCount > 0) {
         if (!leafCallee) {
             return false;
@@ -770,17 +852,8 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
         return isEligibleLoopLeafCallee(mod, callee, loopSummary, allocaBytes, blockCount, instCount);
     }
 
-    // 叶子函数：普通调用点保守，循环内热点调用点使用更宽松阈值。
-    if (leafCallee) {
-        const int32_t maxBlocks = hotCallSite ? kHotLeafMaxBlocks : kLeafMaxBlocks;
-        const int32_t maxInsts = hotCallSite ? kHotLeafMaxInsts : kLeafMaxInsts;
-        return blockCount <= maxBlocks && instCount <= maxInsts;
-    }
-
-    // 非叶子小函数：仍限制体积，热点调用点允许更大的非递归小函数。
-    const int32_t maxBlocks = hotCallSite ? kHotSmallMaxBlocks : kSmallMaxBlocks;
-    const int32_t maxInsts = hotCallSite ? kHotSmallMaxInsts : kSmallMaxInsts;
-    return blockCount <= maxBlocks && instCount <= maxInsts;
+    // 通过了成本检查和所有结构限制
+    return true;
 }
 
 /// @brief 克隆指令的外壳（不填充操作数），用于内联时复制 callee 指令
