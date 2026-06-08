@@ -16,6 +16,7 @@
 #include "fixedPointFunctionPass/LoopConstantPromotion.h"
 #include "fixedPointFunctionPass/LoopExitValueRewrite.h"
 #include "fixedPointFunctionPass/LoopStrengthReduce.h"
+#include "fixedPointFunctionPass/IndVarSimplify.h"
 #include "fixedPointFunctionPass/LoopTiling.h"
 #include "fixedPointFunctionPass/LoopVectorize.h"
 #include "fixedPointFunctionPass/LocalMemoryOpt.h"
@@ -244,6 +245,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     });
     registerFixedPointFunctionPass([](Function * func) {
         DeadInstElim pass(func);
+        return pass.run();
+    });
+    // 注意， IndVarSimplify 一定要在 SimpleLoopUnroll 之后，否则 IndVarSimplify 会改写那些本来会被展开的循环(<16的迭代次数)，导致 SimpleLoopUnroll 无法 matchCanonicalLoop.
+    registerFixedPointFunctionPass([this](Function * func) {
+        IndVarSimplify pass(func, module);
         return pass.run();
     });
     registerFixedPointFunctionPass([this](Function * func) {

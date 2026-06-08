@@ -178,9 +178,12 @@ bool LoopConstantPromotion::run()
             }
         }
 
-        // 第二遍扫描：对出现 1 次及以上的常量创建 preheader 物化指令并替换
+        // 第二遍扫描：对出现足够次数的常量创建 preheader 物化指令并替换
+        // 浮点常量即使只使用一次也值得提升——后端每次物化需要 lui+addiw+fmv.w.x 三条指令
+        // 整数常量（尤其小立即数）只需一条 addi，阈值保持 >= 2
         for (auto & [constant, count] : useCounts) {
-            if (count < 2) {
+            bool isFloatConst = dynamic_cast<ConstFloat *>(constant) != nullptr;
+            if (isFloatConst ? count < 1 : count < 2) {
                 continue;
             }
 

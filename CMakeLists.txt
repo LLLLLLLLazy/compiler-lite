@@ -251,6 +251,8 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/LoopVectorize.cpp
 	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.h
 	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.cpp
+	ir/passes/fixedPointFunctionPass/IndVarSimplify.h
+	ir/passes/fixedPointFunctionPass/IndVarSimplify.cpp
 	ir/passes/fixedPointFunctionPass/LoopConstantPromotion.h
 	ir/passes/fixedPointFunctionPass/LoopConstantPromotion.cpp
 	ir/passes/functionPass/LoopRotate.h
