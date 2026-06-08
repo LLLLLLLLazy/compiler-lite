@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "AnalysisCache.h"
 #include "BasicBlock.h"
 #include "BranchInst.h"
 #include "CondBranchInst.h"
@@ -21,6 +22,7 @@
 #include "Module.h"
 #include "PhiInst.h"
 #include "ScalarEvolution.h"
+#include "Type.h"
 #include "Value.h"
 
 namespace {
@@ -89,6 +91,12 @@ bool LoopRotate::run()
         if (!localChanged) {
             break;
         }
+    }
+
+    if (changed) {
+        // 循环旋转修改了 preheader 终结指令并新增 latch 比较指令，影响 CFG 形状，
+        // 使所有 CFG 派生分析失效以便后续 pass 重算
+        func->getAnalysisCache().invalidateCFGAnalyses();
     }
 
     return changed;
@@ -213,12 +221,15 @@ bool LoopRotate::tryRotateHeader(BasicBlock * header, LoopInfo & loopInfo, Scala
     if (!replaceCondBranchWithBranch(header, loop.body)) {
         return false;
     }
+    // 在清除 loop.cmp 之前保存其类型；eraseInstructionIfUnused 会 delete 该指令，
+    // 后续创建 latchCmp 时不可再访问 loop.cmp
+    Type * cmpType = loop.cmp->getType();
     eraseInstructionIfUnused(loop.cmp);
     header->removeSuccessor(loop.exit);
     loop.exit->removePredecessor(header);
 
     auto & latchInsts = loop.latch->getInstructions();
-    auto * latchCmp = new ICmpInst(func, compareOp, nextInduction, loop.boundValue, loop.cmp->getType());
+    auto * latchCmp = new ICmpInst(func, compareOp, nextInduction, loop.boundValue, cmpType);
     latchCmp->setParentBlock(loop.latch);
     latchInsts.insert(std::prev(latchInsts.end()), latchCmp);
     if (!replaceBranchWithCondBranch(loop.latch, latchCmp, header, loop.exit)) {
