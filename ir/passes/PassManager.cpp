@@ -9,8 +9,11 @@
 #include <iostream>
 #include <sstream>
 
+#include "BasicBlock.h"
 #include "Function.h"
+#include "GetElementPtrInst.h"
 #include "Module.h"
+#include "PhiInst.h"
 #include "fixedPointFunctionPass/CFGSimplify.h"
 #include "fixedPointFunctionPass/ConstProp.h"
 #include "fixedPointFunctionPass/CanonicalizeLoop.h"
@@ -24,6 +27,7 @@
 #include "fixedPointFunctionPass/IndVarSimplify.h"
 #include "fixedPointFunctionPass/LoopTiling.h"
 #include "fixedPointFunctionPass/LoopVectorize.h"
+#include "fixedPointFunctionPass/MatMulInterchange.h"
 #include "fixedPointFunctionPass/LocalMemoryOpt.h"
 #include "fixedPointFunctionPass/RemoveEmptyLoop.h"
 #include "fixedPointFunctionPass/SimpleLoopUnroll.h"
@@ -45,6 +49,54 @@
 namespace {
 
 constexpr int32_t kDefaultMaxFixedPointRounds = 18;
+
+/// @brief 调试用：检测 GEP 基址链上的环与 phi 入边/前驱不一致（MINIC_CHECK_GEP_CYCLE 置位时启用）
+void checkGEPCycles(Function * func, const std::string & passName)
+{
+    static const bool enabled = std::getenv("MINIC_CHECK_GEP_CYCLE") != nullptr;
+    if (!enabled || func == nullptr) {
+        return;
+    }
+
+    for (auto * bb : func->getBlocks()) {
+        for (auto * inst : bb->getInstructions()) {
+            if (auto * phi = dynamic_cast<PhiInst *>(inst)) {
+                for (int32_t i = 0; i < phi->getIncomingCount(); ++i) {
+                    BasicBlock * incoming = phi->getIncomingBlock(i);
+                    const auto & preds = bb->getPredecessors();
+                    if (std::find(preds.begin(), preds.end(), incoming) == preds.end()) {
+                        std::string blockStr;
+                        bb->toString(blockStr);
+                        std::cerr << "[phi-stale-incoming] after pass " << passName << " in func "
+                                  << func->getName() << "\n  block:\n" << blockStr << "\n";
+                        std::abort();
+                    }
+                }
+            }
+            auto * gep = dynamic_cast<GetElementPtrInst *>(inst);
+            if (!gep) {
+                continue;
+            }
+            Value * cursor = gep->getBasePointer();
+            for (int step = 0; step < 64 && cursor != nullptr; ++step) {
+                if (cursor == gep) {
+                    std::string gepStr;
+                    gep->toString(gepStr);
+                    std::string blockStr;
+                    bb->toString(blockStr);
+                    std::cerr << "[gep-cycle] after pass " << passName << " in func " << func->getName()
+                              << "\n  inst: " << gepStr << "\n  block:\n" << blockStr << "\n";
+                    std::abort();
+                }
+                auto * baseGEP = dynamic_cast<GetElementPtrInst *>(cursor);
+                if (!baseGEP) {
+                    break;
+                }
+                cursor = baseGEP->getBasePointer();
+            }
+        }
+    }
+}
 
 } // namespace
 
@@ -224,6 +276,12 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     });
     registerFixedPointFunctionPass("GVN", [this](Function * func) {
         GVN pass(func, module);
+        return pass.run();
+    });
+    // matmul 列访问归约的 j-k 交换：放在强度削减收敛之后（匹配指针游标形态）、
+    // 向量化之前（交换出的单位步长内层循环可继续被向量化）。
+    registerFixedPointFunctionPass("MatMulInterchange", [this](Function * func) {
+        MatMulInterchange pass(func, module);
         return pass.run();
     });
     // 仅用值级清理：LSR / Tiling 产生的死指令及时清除，不动 CFG 形状
@@ -565,7 +623,11 @@ void PassManager::registerFunctionPass(const std::string & name, FunctionPassRun
 void PassManager::registerFixedPointFunctionPass(const std::string & name, FunctionPassRunner runner)
 {
     if (isPassEnabled(name)) {
-        registerFixedPointFunctionPass(std::move(runner));
+        fixedPointFunctionPasses.push_back([name, runner = std::move(runner)](Function * func) {
+            const bool changed = runner(func);
+            checkGEPCycles(func, name);
+            return changed;
+        });
     }
 }
 
