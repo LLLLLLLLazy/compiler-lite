@@ -41,7 +41,7 @@ fi
 OK_NUM=0
 NG_NUM=0
 TOTAL_RUN=0
-TOTAL_MINIC_IR_LLVM_RUN=0
+TOTAL_GCC_RUN=0
 TOTAL_LLVM_ALL_RUN=0
 STATUS_COL_WIDTH=50
 PARALLEL_JOBS=${MINIC_RISCV64_PARALLEL:-$(echo 8)}
@@ -65,6 +65,7 @@ Suites:
   2026              -> tests/2026_function
   2026_perf         -> tests/2026_performance
   2026_performance  -> tests/2026_performance
+  matmul            -> tests/matmul_performance
   all               -> all suites above
 
 Environment:
@@ -153,6 +154,9 @@ suite_dir_from_key() {
 		2026_perf|2026_performance)
 			echo "2026_performance"
 			;;
+		matmul|matmul_performance)
+			echo "matmul_performance"
+			;;
 		*)
 			return 1
 			;;
@@ -178,6 +182,9 @@ infer_suite_from_testcase() {
 			;;
 		2026_perf_*)
 			echo "2026_performance"
+			;;
+		matmul_val_*)
+			echo "matmul_performance"
 			;;
 		*)
 			return 1
@@ -302,7 +309,7 @@ run_riscv64_check() {
 	local result_file="${result_dir}/${testcase}.rv64.result"
 	local exit_code=0
 	local t0 t1 t_compile=0 t_assemble=0 t_link=0 t_run=0
-	local t_minic_ir_llvm_run="N/A"
+	local t_gcc_run="N/A"
 	local t_llvm_all_run="N/A"
 	source_name=$(basename "${cfile}")
 
@@ -390,14 +397,61 @@ run_riscv64_check() {
 		fi
 	fi
 
-	# llvm baselines:
-	# - minic_ir_llvm: minic generates LLVM IR, clang compiles to riscv64, link, run under qemu
-	# - llvm_all: clang compiles source directly to riscv64, link, run under qemu
+	# g++ baseline: g++ compiles source directly to riscv64, link, run under qemu
+	# Preprocess .sy: rewrite starttime()/stoptime() to the runtime entry points
+	# with the expected line-number argument, add extern "C" wrapper, then compile with g++ and link with sylib.c
+	local gcc_cfile="${result_dir}/${testcase}.gcc.c"
+	local gcc_obj="${result_dir}/${testcase}.gcc.rv64.o"
+	local gcc_exe="${result_dir}/${testcase}.gcc.rv64"
+	local gcc_output="${result_dir}/${testcase}.gcc.rv64.output"
+	local gcc_stderr="${result_dir}/${testcase}.gcc.rv64.stderr"
+	local gcc_opt_level="0"
+	if [[ "${is_perf_test}" == "1" ]]; then
+		gcc_opt_level="2"
+	fi
+
+	# g++ compiles source directly to riscv64 -> link -> qemu run
+	if {
+		cat <<'EOF'
+#ifdef __cplusplus
+extern "C" {
+#endif
+int getint(void);
+int getch(void);
+int getarray(int a[]);
+float getfloat(void);
+int getfarray(float a[]);
+void putint(int a);
+void putch(int a);
+void putarray(int n, int a[]);
+void putfloat(float a);
+void putfarray(int n, float a[]);
+void putf(char a[], ...);
+void _sysy_starttime(int lineno);
+void _sysy_stoptime(int lineno);
+#ifdef __cplusplus
+}
+#endif
+EOF
+		sed -E 's/\<starttime\>[[:space:]]*\([[:space:]]*\)/_sysy_starttime(__LINE__)/g; s/\<stoptime\>[[:space:]]*\([[:space:]]*\)/_sysy_stoptime(__LINE__)/g' "${cfile}"
+	} > "${gcc_cfile}" 2>/dev/null && \
+	   timeout --foreground "${RISCV64_TIMEOUT}" riscv64-linux-gnu-g++ "${gcc_arch_args[@]}" -O"${gcc_opt_level}" -c -o "${gcc_obj}" "${gcc_cfile}" >/dev/null 2>&1 && \
+	   timeout --foreground "${RISCV64_TIMEOUT}" riscv64-linux-gnu-g++ "${gcc_arch_args[@]}" -static -o "${gcc_exe}" "${gcc_obj}" "${RUNTIME_LIB}" >/dev/null 2>&1; then
+		t0=$(date +%s%N)
+		if [[ -f "${infile}" ]]; then
+			timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${gcc_exe}" < "${infile}" > "${gcc_output}" 2> "${gcc_stderr}"
+		else
+			timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${gcc_exe}" > "${gcc_output}" 2> "${gcc_stderr}"
+		fi
+		local gcc_status=$?
+		if [[ "${gcc_status}" -ne 124 && "${gcc_status}" -ne 125 && "${gcc_status}" -ne 126 && "${gcc_status}" -ne 127 ]]; then
+			t1=$(date +%s%N)
+			t_gcc_run=$(( (t1 - t0) / 1000000 ))
+		fi
+	fi
+
+	# llvm baseline: clang compiles source directly to riscv64 with -O2, link, run under qemu
 	local llfile="${result_dir}/${testcase}.rv64.ll"
-	local minic_ir_llvm_obj="${result_dir}/${testcase}.minic_ir_llvm.rv64.o"
-	local minic_ir_llvm_exe="${result_dir}/${testcase}.minic_ir_llvm.rv64"
-	local minic_ir_llvm_output="${result_dir}/${testcase}.minic_ir_llvm.rv64.output"
-	local minic_ir_llvm_stderr="${result_dir}/${testcase}.minic_ir_llvm.rv64.stderr"
 	local llvm_all_obj="${result_dir}/${testcase}.llvm_all.rv64.o"
 	local llvm_all_exe="${result_dir}/${testcase}.llvm_all.rv64"
 	local llvm_all_output="${result_dir}/${testcase}.llvm_all.rv64.output"
@@ -405,24 +459,6 @@ run_riscv64_check() {
 	local llvm_opt_level="0"
 	if [[ "${is_perf_test}" == "1" ]]; then
 		llvm_opt_level="2"
-	fi
-
-	# minic IR -> llvm compile & link -> qemu run
-	if timeout --foreground "${RISCV64_TIMEOUT}" "${MINIC_BIN}" -S "${frontend_args[@]}" "${rvv_args[@]}" -O"${opt_level}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1 && \
-	   [[ -s "${llfile}" ]] && \
-	   timeout --foreground "${RISCV64_TIMEOUT}" "${CLANG_BIN}" --target=riscv64-linux-gnu -O"${llvm_opt_level}" -Wno-override-module -c -o "${minic_ir_llvm_obj}" "${llfile}" >/dev/null 2>&1 && \
-	   timeout --foreground "${RISCV64_TIMEOUT}" "${RISCV64_GCC_BIN}" "${gcc_arch_args[@]}" -static -o "${minic_ir_llvm_exe}" "${minic_ir_llvm_obj}" "${RUNTIME_LIB}" >/dev/null 2>&1; then
-		t0=$(date +%s%N)
-		if [[ -f "${infile}" ]]; then
-			timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${minic_ir_llvm_exe}" < "${infile}" > "${minic_ir_llvm_output}" 2> "${minic_ir_llvm_stderr}"
-		else
-			timeout --foreground "${RISCV64_TIMEOUT}" "${QEMU_RISCV64_BIN}" "${QEMU_RISCV64_EXTRA_ARGS[@]}" "${minic_ir_llvm_exe}" > "${minic_ir_llvm_output}" 2> "${minic_ir_llvm_stderr}"
-		fi
-		local minic_ir_llvm_status=$?
-		if [[ "${minic_ir_llvm_status}" -ne 124 && "${minic_ir_llvm_status}" -ne 125 && "${minic_ir_llvm_status}" -ne 126 && "${minic_ir_llvm_status}" -ne 127 ]]; then
-			t1=$(date +%s%N)
-			t_minic_ir_llvm_run=$(( (t1 - t0) / 1000000 ))
-		fi
 	fi
 
 	# clang compiles source directly to riscv64 -> link -> qemu run
@@ -463,19 +499,19 @@ EOF
 	fi
 
 	local summary_file="${result_dir}/${testcase}.summary"
-	printf '%s\n' "${t_run}" "${t_minic_ir_llvm_run}" "${t_llvm_all_run}" > "${summary_file}"
+	printf '%s\n' "${t_run}" "${t_gcc_run}" "${t_llvm_all_run}" > "${summary_file}"
 
-	local minic_ir_llvm_run_text="${t_minic_ir_llvm_run}"
+	local gcc_run_text="${t_gcc_run}"
 	local llvm_all_run_text="${t_llvm_all_run}"
-	if [[ "${minic_ir_llvm_run_text}" != "N/A" ]]; then
-		minic_ir_llvm_run_text="${minic_ir_llvm_run_text}ms"
+	if [[ "${gcc_run_text}" != "N/A" ]]; then
+		gcc_run_text="${gcc_run_text}ms"
 	fi
 	if [[ "${llvm_all_run_text}" != "N/A" ]]; then
 		llvm_all_run_text="${llvm_all_run_text}ms"
 	fi
 
 	printf "%-${STATUS_COL_WIDTH}s %s\n" "${source_name} OK [riscv64]" \
-		"compile=${t_compile}ms link=${t_link}ms run=${t_run}ms minic_ir_llvm_run=${minic_ir_llvm_run_text} llvm_all_run=${llvm_all_run_text}"
+		"compile=${t_compile}ms link=${t_link}ms run=${t_run}ms gcc_run=${gcc_run_text} llvm_all_run=${llvm_all_run_text}"
 
 	return 0
 }
@@ -607,15 +643,15 @@ run_suite() {
 				# Accumulate timing from summary file
 				local summary_file="${result_dir}/${tc}.summary"
 				if [[ -f "${summary_file}" ]]; then
-					local t_run_val t_minic_ir_llvm_val t_llvm_all_val
+					local t_run_val t_gcc_val t_llvm_all_val
 					{
 						read -r t_run_val
-						read -r t_minic_ir_llvm_val
+						read -r t_gcc_val
 						read -r t_llvm_all_val
 					} < "${summary_file}"
 					TOTAL_RUN=$((TOTAL_RUN + t_run_val))
-					if [[ "${t_minic_ir_llvm_val}" != "N/A" ]]; then
-						TOTAL_MINIC_IR_LLVM_RUN=$((TOTAL_MINIC_IR_LLVM_RUN + t_minic_ir_llvm_val))
+					if [[ "${t_gcc_val}" != "N/A" ]]; then
+						TOTAL_GCC_RUN=$((TOTAL_GCC_RUN + t_gcc_val))
 					fi
 					if [[ "${t_llvm_all_val}" != "N/A" ]]; then
 						TOTAL_LLVM_ALL_RUN=$((TOTAL_LLVM_ALL_RUN + t_llvm_all_val))
@@ -745,6 +781,7 @@ elif [[ "${suite_key}" == "all" ]]; then
 	run_suite "2025_performance"
 	run_suite "2026_function"
 	run_suite "2026_performance"
+	run_suite "matmul_performance"
 else
 	suite_dir=$(suite_dir_from_key "${suite_key}") || \
 		fail_with_usage "Unknown suite: ${suite_key}"
@@ -762,7 +799,7 @@ else
 fi
 
 echo "OK number=${OK_NUM}, NG number=${NG_NUM}"
-echo "total_run=${TOTAL_RUN}ms, total_minic_ir_llvm_run=${TOTAL_MINIC_IR_LLVM_RUN}ms, total_llvm_all_run=${TOTAL_LLVM_ALL_RUN}ms"
+echo "total_run=${TOTAL_RUN}ms, total_gcc_run=${TOTAL_GCC_RUN}ms, total_llvm_all_run=${TOTAL_LLVM_ALL_RUN}ms"
 
 if [[ ${NG_NUM} -ne 0 ]]; then
 	exit 1
