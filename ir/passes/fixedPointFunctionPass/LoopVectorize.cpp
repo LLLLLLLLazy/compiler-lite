@@ -52,6 +52,7 @@ struct AccessInfo {
     // 将 load/store 地址规约为 root + offset + phi-step，便于做保守别名判断。
     Value * pointer = nullptr;
     Value * root = nullptr;
+    PhiInst * basePhi = nullptr;
     int32_t offset = 0;
     int32_t stride = 1;
     Type * elemType = nullptr;
@@ -200,6 +201,58 @@ Value * stripToRoot(Value * value)
     return stripConstantGEP(value, ignored);
 }
 
+/// @brief 不关心偏移、只为定位根对象时可剥离任意下标的 GEP
+Value * stripAllGEPs(Value * value)
+{
+    while (auto * gep = dynamic_cast<GetElementPtrInst *>(value)) {
+        value = gep->getBasePointer();
+    }
+    return value;
+}
+
+/// @brief 穿透 phi 解析指针的底层对象：所有非自递推入边必须收敛到同一对象。
+/// 游标链通常只有几个节点，超出 kMaxUnderlyingObjectWalk 视为解析失败，
+/// 避免在大函数的深层 phi 网络上做高代价遍历。
+/// 解析失败返回 nullptr，调用方应回退到旧的保守 root。
+constexpr std::size_t kMaxUnderlyingObjectWalk = 32;
+
+Value * resolveUnderlyingObject(Value * value, std::unordered_set<Value *> & visiting)
+{
+    value = stripAllGEPs(value);
+    if (!value || visiting.size() >= kMaxUnderlyingObjectWalk || !visiting.insert(value).second) {
+        return nullptr;
+    }
+
+    if (auto * phi = dynamic_cast<PhiInst *>(value)) {
+        Value * merged = nullptr;
+        for (int32_t i = 0; i < phi->getIncomingCount(); ++i) {
+            Value * incoming = stripAllGEPs(phi->getIncomingValue(i));
+            if (incoming == phi) {
+                // 指针递推的自身入边
+                continue;
+            }
+            Value * resolved = resolveUnderlyingObject(incoming, visiting);
+            if (!resolved) {
+                return nullptr;
+            }
+            if (!merged) {
+                merged = resolved;
+            } else if (merged != resolved) {
+                return nullptr;
+            }
+        }
+        return merged;
+    }
+
+    return value;
+}
+
+Value * resolveUnderlyingObject(Value * value)
+{
+    std::unordered_set<Value *> visiting;
+    return resolveUnderlyingObject(value, visiting);
+}
+
 Value * getPhiIncomingFrom(PhiInst * phi, BasicBlock * block)
 {
     if (!phi || !block) {
@@ -241,7 +294,10 @@ bool matchPointerPhi(PhiInst * phi, BasicBlock * preheader, BasicBlock * latch, 
     }
 
     info.phi = phi;
-    info.root = stripToRoot(init);
+    info.root = resolveUnderlyingObject(init);
+    if (!info.root) {
+        info.root = stripToRoot(init);
+    }
     info.step = step;
     return info.root != nullptr;
 }
@@ -355,7 +411,10 @@ bool storesAreAliasSafe(const std::vector<AccessInfo> & loads, const std::vector
             if (!rootsCanAlias(store.root, load.root)) {
                 continue;
             }
-            if (store.root == load.root && store.offset == load.offset && store.stride == load.stride) {
+            // 同一指针 phi 同偏移同步长 => 每次迭代读写同一地址，strip 内先读后写安全；
+            // 仅 root 相同不足以保证（不同游标可指向同一对象的不同位置）。
+            if (store.basePhi != nullptr && store.basePhi == load.basePhi && store.offset == load.offset &&
+                store.stride == load.stride) {
                 continue;
             }
             return false;
@@ -445,6 +504,7 @@ public:
 
         access.pointer = materializedPointer;
         access.root = it->second.root;
+        access.basePhi = pointerPhi;
         access.offset = offset;
         access.stride = it->second.step;
         access.elemType = elemType;
