@@ -119,6 +119,18 @@ public:
         loopParallelSource = LoopParallelSource::None;
     }
 
+    /// @brief 标记此循环头为 matmul 交换的 guard 回落版本，禁止再次版本化
+    void markMatMulInterchangeFallback()
+    {
+        matmulInterchangeFallback = true;
+    }
+
+    /// @brief 查询是否为 matmul 交换的 guard 回落循环头
+    bool isMatMulInterchangeFallback() const
+    {
+        return matmulInterchangeFallback;
+    }
+
     void toString(std::string & str);
 
 private:
@@ -129,4 +141,5 @@ private:
     int loopDepth = 0;
     bool loopParallelSafe = false;                     ///< 是否标记为循环并行安全
     LoopParallelSource loopParallelSource = LoopParallelSource::None; ///< 并行安全来源
+    bool matmulInterchangeFallback = false;            ///< matmul 交换 guard 的回落循环头
 };
