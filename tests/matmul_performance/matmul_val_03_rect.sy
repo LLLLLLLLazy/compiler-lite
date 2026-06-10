@@ -1,0 +1,62 @@
+// 矩形形态: C[M][N] = A[M][K] * B[K][N], 三个维度互不相同且来自输入 -> 直接累加
+int A[96][96];
+int B[96][128];
+int C[96][128];
+
+int main() {
+    int m = getint();
+    int t = getint();
+    int n = getint();
+    int i = 0;
+    while (i < m) {
+        int j = 0;
+        while (j < t) {
+            A[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < t) {
+        int j = 0;
+        while (j < n) {
+            B[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    starttime();
+    i = 0;
+    while (i < m) {
+        int j = 0;
+        while (j < n) {
+            int k = 0;
+            int sum = 0;
+            while (k < t) {
+                sum = sum + A[i][k] * B[k][j];
+                k = k + 1;
+            }
+            C[i][j] = sum;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    stoptime();
+
+    int total = 0;
+    i = 0;
+    while (i < m) {
+        int j = 0;
+        while (j < n) {
+            total = total + C[i][j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    putint(total);
+    putch(10);
+    putint(C[m - 1][n - 1]);
+    putch(10);
+    return 0;
+}

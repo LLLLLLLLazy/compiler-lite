@@ -1,0 +1,61 @@
+// 原地形态: A = C * A (Z 与 Y 同根), 运行期规模 -> 行缓冲 + 运行期 guard
+int A[128][128];
+int C[128][128];
+
+int main() {
+    int n = getint();
+    int i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            A[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            C[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    starttime();
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            int k = 0;
+            int sum = 0;
+            while (k < n) {
+                sum = sum + C[i][k] * A[k][j];
+                k = k + 1;
+            }
+            A[i][j] = sum;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    stoptime();
+
+    int total = 0;
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            total = total + A[i][j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    putint(total);
+    putch(10);
+    putint(A[0][0]);
+    putch(10);
+    putint(A[n - 1][n - 1]);
+    putch(10);
+    return 0;
+}

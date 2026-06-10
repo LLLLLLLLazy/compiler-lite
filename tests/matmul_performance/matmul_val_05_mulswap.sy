@@ -1,0 +1,58 @@
+// 操作数顺序变体: 乘法两侧交换(B[k][j]*A[i][k]) 且累加写成 乘积+sum, 识别不应依赖书写顺序
+int A[64][64];
+int B[64][64];
+int C[64][64];
+
+int main() {
+    int n = getint();
+    int i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            A[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            B[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    starttime();
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            int k = 0;
+            int sum = 0;
+            while (k < n) {
+                sum = B[k][j] * A[i][k] + sum;
+                k = k + 1;
+            }
+            C[i][j] = sum;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    stoptime();
+
+    int total = 0;
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            total = total + C[i][j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    putint(total);
+    putch(10);
+    return 0;
+}
