@@ -1,0 +1,51 @@
+// 矩阵-向量形态: y[j] = sum_k x[k] * M[k][j], 无外层 i 循环也应识别(模式只依赖 j-k 子嵌套)
+int M[512][512];
+int x[512];
+int y[512];
+
+int main() {
+    int t = getint();
+    int n = getint();
+    int k = 0;
+    while (k < t) {
+        x[k] = getint();
+        k = k + 1;
+    }
+    k = 0;
+    while (k < t) {
+        int j = 0;
+        while (j < n) {
+            M[k][j] = getint();
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+
+    starttime();
+    int j = 0;
+    while (j < n) {
+        int kk = 0;
+        int sum = 0;
+        while (kk < t) {
+            sum = sum + x[kk] * M[kk][j];
+            kk = kk + 1;
+        }
+        y[j] = sum;
+        j = j + 1;
+    }
+    stoptime();
+
+    int total = 0;
+    j = 0;
+    while (j < n) {
+        total = total + y[j];
+        j = j + 1;
+    }
+    putint(total);
+    putch(10);
+    putint(y[0]);
+    putch(10);
+    putint(y[n - 1]);
+    putch(10);
+    return 0;
+}

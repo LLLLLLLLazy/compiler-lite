@@ -1,0 +1,64 @@
+// 浮点形态: C = A * B (float)。交换保持每个元素的加法结合顺序, 结果应与参考实现逐位一致
+float A[64][64];
+float B[64][64];
+float C[64][64];
+
+int main() {
+    int n = getint();
+    int i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            A[i][j] = getfloat();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            B[i][j] = getfloat();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    starttime();
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            int k = 0;
+            float sum = 0;
+            while (k < n) {
+                sum = sum + A[i][k] * B[k][j];
+                k = k + 1;
+            }
+            C[i][j] = sum;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    stoptime();
+
+    putfloat(C[0][0]);
+    putch(10);
+    putfloat(C[n / 2][n / 2]);
+    putch(10);
+    putfloat(C[n - 1][n - 1]);
+    putch(10);
+    float total = 0;
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            total = total + C[i][j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    putfloat(total);
+    putch(10);
+    return 0;
+}

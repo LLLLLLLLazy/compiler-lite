@@ -1,0 +1,58 @@
+// 反例: A = A * B (写目标与 X 操作数同根)。原序中 A 行 i 在 j 推进时被逐列覆盖、
+// 后续 j 迭代读到的是已更新值, 交换会改变语义 -> 必须不触发交换, 仅验证结果正确
+int A[80][80];
+int B[80][80];
+
+int main() {
+    int n = getint();
+    int i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            A[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            B[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    starttime();
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            int k = 0;
+            int sum = 0;
+            while (k < n) {
+                sum = sum + A[i][k] * B[k][j];
+                k = k + 1;
+            }
+            A[i][j] = sum;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    stoptime();
+
+    int total = 0;
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            total = total + A[i][j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    putint(total);
+    putch(10);
+    return 0;
+}

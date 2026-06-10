@@ -1,0 +1,57 @@
+// 常量边界 + 原地: 编译期已知 n=96<=行宽, 走行缓冲且不生成运行期 guard, 旧循环应被删除
+int A[96][96];
+int C[96][96];
+
+int main() {
+    int n = 96;
+    int i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            A[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            C[i][j] = getint();
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    starttime();
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            int k = 0;
+            int sum = 0;
+            while (k < n) {
+                sum = sum + C[i][k] * A[k][j];
+                k = k + 1;
+            }
+            A[i][j] = sum;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    stoptime();
+
+    int total = 0;
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) {
+            total = total + A[i][j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    putint(total);
+    putch(10);
+    return 0;
+}
