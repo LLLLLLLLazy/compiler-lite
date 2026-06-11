@@ -134,6 +134,12 @@ private:
     /// @brief 用扁平循环对大数组执行运行时清零
     bool emitFlatLoopZeroInitializer(Value * addr, Type * type);
 
+    /// @brief 在已退化到指定子对象的地址上发射扁平零填充循环
+    /// @param addr 起始地址，其指针类型的 pointee 必须等于 @p type
+    /// @param type @p addr 实际指向的对象类型（可为 ArrayType 或标量），用于决定数组层级 decay 走法
+    /// @param scalarCount 自该地址起需要清零的标量元素总数
+    bool emitFlatLoopZeroSlots(Value * addr, Type * type, std::size_t scalarCount);
+
     /// @brief 将全局数组的常量初始化列表扁平化为标量值向量
     bool collectGlobalArrayInitScalars(
         Type * type, const std::vector<ast_node *> & items, std::size_t begin, std::size_t end,
