@@ -295,12 +295,16 @@ run_asm_check() {
     local output_file="${TMP_DIR}/${testcase}.asm.output"
     local stderr_file="${TMP_DIR}/${testcase}.asm.stderr"
     local result_file="${TMP_DIR}/${testcase}.asm.result"
+    local compile_err_file="${TMP_DIR}/${testcase}.compile.err"
+    local link_err_file="${TMP_DIR}/${testcase}.link.err"
     local exit_code=0
     source_name=$(basename "${cfile}")
 
     if ! timeout --foreground "${TEST_TIMEOUT}" \
-        "${MINIC_BIN}" -S "${compiler_args[@]}" -O1 -t "${ASM_TARGET}" -o "${asmfile}" "${cfile}" >/dev/null 2>&1; then
+        "${MINIC_BIN}" -S "${compiler_args[@]}" -O1 -t "${ASM_TARGET}" -o "${asmfile}" "${cfile}" >/dev/null 2>"${compile_err_file}"; then
         echo "${source_name} compile NG [asm]"
+        echo "  [compile stderr]"
+        sed 's/^/    /' "${compile_err_file}"
         return 1
     fi
 
@@ -310,8 +314,10 @@ run_asm_check() {
     fi
 
     if ! timeout --foreground "${TEST_TIMEOUT}" \
-        "${RISCV64_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${RUNTIME_SOURCE}" >/dev/null 2>&1; then
+        "${RISCV64_GCC_BIN}" -g -static -o "${exe_file}" "${asmfile}" "${RUNTIME_SOURCE}" >/dev/null 2>"${link_err_file}"; then
         echo "${source_name} link NG [asm]"
+        echo "  [link stderr]"
+        sed 's/^/    /' "${link_err_file}"
         return 1
     fi
 
@@ -345,11 +351,15 @@ run_llvmir_check() {
     local output_file="${TMP_DIR}/${testcase}.llvmir.output"
     local stderr_file="${TMP_DIR}/${testcase}.llvmir.stderr"
     local result_file="${TMP_DIR}/${testcase}.llvmir.result"
+    local compile_err_file="${TMP_DIR}/${testcase}.compile.err"
+    local link_err_file="${TMP_DIR}/${testcase}.link.err"
     local exit_code=0
     source_name=$(basename "${cfile}")
 
-    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${compiler_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${MINIC_BIN}" -S "${compiler_args[@]}" -L -o "${llfile}" "${cfile}" >/dev/null 2>"${compile_err_file}"; then
         echo "${source_name} compile NG [llvmir]"
+        echo "  [compile stderr]"
+        sed 's/^/    /' "${compile_err_file}"
         return 1
     fi
 
@@ -358,8 +368,10 @@ run_llvmir_check() {
         return 1
     fi
 
-    if ! timeout --foreground "${TEST_TIMEOUT}" "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${RUNTIME_SOURCE}" >/dev/null 2>&1; then
+    if ! timeout --foreground "${TEST_TIMEOUT}" "${CLANG_BIN}" -Wno-override-module -o "${exe_file}" "${llfile}" "${RUNTIME_SOURCE}" >/dev/null 2>"${link_err_file}"; then
         echo "${source_name} link NG [llvmir]"
+        echo "  [link stderr]"
+        sed 's/^/    /' "${link_err_file}"
         return 1
     fi
 
