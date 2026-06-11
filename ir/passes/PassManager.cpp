@@ -11,9 +11,7 @@
 
 #include "BasicBlock.h"
 #include "Function.h"
-#include "GetElementPtrInst.h"
 #include "Module.h"
-#include "PhiInst.h"
 #include "fixedPointFunctionPass/CFGSimplify.h"
 #include "fixedPointFunctionPass/ConstProp.h"
 #include "fixedPointFunctionPass/CanonicalizeLoop.h"
@@ -49,54 +47,6 @@
 namespace {
 
 constexpr int32_t kDefaultMaxFixedPointRounds = 18;
-
-/// @brief 调试用：检测 GEP 基址链上的环与 phi 入边/前驱不一致（MINIC_CHECK_GEP_CYCLE 置位时启用）
-void checkGEPCycles(Function * func, const std::string & passName)
-{
-    static const bool enabled = std::getenv("MINIC_CHECK_GEP_CYCLE") != nullptr;
-    if (!enabled || func == nullptr) {
-        return;
-    }
-
-    for (auto * bb : func->getBlocks()) {
-        for (auto * inst : bb->getInstructions()) {
-            if (auto * phi = dynamic_cast<PhiInst *>(inst)) {
-                for (int32_t i = 0; i < phi->getIncomingCount(); ++i) {
-                    BasicBlock * incoming = phi->getIncomingBlock(i);
-                    const auto & preds = bb->getPredecessors();
-                    if (std::find(preds.begin(), preds.end(), incoming) == preds.end()) {
-                        std::string blockStr;
-                        bb->toString(blockStr);
-                        std::cerr << "[phi-stale-incoming] after pass " << passName << " in func "
-                                  << func->getName() << "\n  block:\n" << blockStr << "\n";
-                        std::abort();
-                    }
-                }
-            }
-            auto * gep = dynamic_cast<GetElementPtrInst *>(inst);
-            if (!gep) {
-                continue;
-            }
-            Value * cursor = gep->getBasePointer();
-            for (int step = 0; step < 64 && cursor != nullptr; ++step) {
-                if (cursor == gep) {
-                    std::string gepStr;
-                    gep->toString(gepStr);
-                    std::string blockStr;
-                    bb->toString(blockStr);
-                    std::cerr << "[gep-cycle] after pass " << passName << " in func " << func->getName()
-                              << "\n  inst: " << gepStr << "\n  block:\n" << blockStr << "\n";
-                    std::abort();
-                }
-                auto * baseGEP = dynamic_cast<GetElementPtrInst *>(cursor);
-                if (!baseGEP) {
-                    break;
-                }
-                cursor = baseGEP->getBasePointer();
-            }
-        }
-    }
-}
 
 } // namespace
 
@@ -623,11 +573,7 @@ void PassManager::registerFunctionPass(const std::string & name, FunctionPassRun
 void PassManager::registerFixedPointFunctionPass(const std::string & name, FunctionPassRunner runner)
 {
     if (isPassEnabled(name)) {
-        fixedPointFunctionPasses.push_back([name, runner = std::move(runner)](Function * func) {
-            const bool changed = runner(func);
-            checkGEPCycles(func, name);
-            return changed;
-        });
+        registerFixedPointFunctionPass(std::move(runner));
     }
 }
 
