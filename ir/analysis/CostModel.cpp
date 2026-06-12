@@ -206,42 +206,4 @@ double loopDepthWeight(int depth)
     return std::pow(10.0, static_cast<double>(depth));
 }
 
-int getInlineThreshold()
-{
-    static int threshold = -1;
-    static bool initialized = false;
-
-    if (!initialized) {
-        const char * env = std::getenv("MINIC_INLINE_THRESHOLD");
-        if (env != nullptr) {
-            int value = std::atoi(env);
-            if (value > 0) {
-                threshold = value;
-            }
-        }
-        initialized = true;
-    }
-
-    return threshold > 0 ? threshold : kInlineDefaultThreshold;
-}
-
-int getInlineHotMultiplier()
-{
-    static int multiplier = -1;
-    static bool initialized = false;
-
-    if (!initialized) {
-        const char * env = std::getenv("MINIC_INLINE_HOT_MULTIPLIER");
-        if (env != nullptr) {
-            int value = std::atoi(env);
-            if (value > 0) {
-                multiplier = value;
-            }
-        }
-        initialized = true;
-    }
-
-    return multiplier > 0 ? multiplier : kInlineHotMultiplier;
-}
-
 } // namespace CostModel

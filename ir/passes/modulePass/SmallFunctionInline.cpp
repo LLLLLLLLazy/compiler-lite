@@ -1,13 +1,6 @@
 ///
 /// @file SmallFunctionInline.cpp
-/// @brief 保守的小函数内联优化 pass 实现。
-///
-/// 对满足体积和结构约束的 callee 进行内联展开：
-///   - 叶子函数（不调用其他用户函数）：最多 4 个基本块、18 条指令
-///   - 非叶子小函数（调用其他用户函数）：最多 8 个基本块、40 条指令
-///   - 循环内热点调用点上的单层叶子循环函数：要求无 alloca、调用点数量受限
-/// 内联后删除 call 指令，将 callee 体复制到 caller 中，
-/// 用 phi 节点合并多个返回值，使后续 mem2reg/LICM/SCCP 能跨函数体优化。
+/// @brief 函数内联
 ///
 
 #include "SmallFunctionInline.h"
@@ -26,7 +19,6 @@
 #include "CallInst.h"
 #include "CondBranchInst.h"
 #include "CopyInst.h"
-#include "CostModel.h"
 #include "DominatorTree.h"
 #include "FCmpInst.h"
 #include "FPToSIInst.h"
@@ -51,39 +43,10 @@ namespace {
 
 /// @brief 内联最大轮次，防止无限循环
 constexpr int32_t kMaxInlineRounds = 256;
-/// @brief 循环内热点调用点允许的单层叶子循环函数最大基本块数
-constexpr int32_t kHotLoopLeafMaxBlocks = 12;
-/// @brief 循环内热点调用点允许的单层叶子循环函数最大指令数
-constexpr int32_t kHotLoopLeafMaxInsts = 64;
-/// @brief 非热点调用点允许的单层叶子循环函数最大基本块数
-constexpr int32_t kLoopLeafMaxBlocks = 6;
-/// @brief 非热点调用点允许的单层叶子循环函数最大指令数
-constexpr int32_t kLoopLeafMaxInsts = 32;
-/// @brief 循环内热点调用点允许的单层叶子循环函数最大循环体基本块数
-constexpr int32_t kHotLoopLeafMaxBodyBlocks = 8;
-/// @brief 循环内热点调用点允许的单层叶子循环函数最大直接调用点数
-constexpr int32_t kHotLoopLeafMaxCallSites = 8;
-/// @brief 热点循环中的单调用点单层叶子循环函数最大基本块数
-constexpr int32_t kHotSingleUseLoopLeafMaxBlocks = 24;
-/// @brief 热点循环中的单调用点单层叶子循环函数最大指令数
-constexpr int32_t kHotSingleUseLoopLeafMaxInsts = 160;
-/// @brief 热点循环中的单调用点单层叶子循环函数最大循环体基本块数
-constexpr int32_t kHotSingleUseLoopLeafMaxBodyBlocks = 16;
-/// @brief 非热点调用点允许的单层叶子循环函数最大直接调用点数
-constexpr int32_t kLoopLeafMaxCallSites = 4;
-/// @brief 热点调用点允许的自递归叶子 helper 最大基本块数
-constexpr int32_t kHotSelfRecursiveLeafMaxBlocks = 10;
-/// @brief 热点调用点允许的自递归叶子 helper 最大指令数
-constexpr int32_t kHotSelfRecursiveLeafMaxInsts = 48;
-/// @brief 热点调用点允许的自递归叶子 helper 最大直接调用点数
-constexpr int32_t kHotSelfRecursiveLeafMaxCallSites = 16;
-
-/// @brief 自然循环摘要
-struct NaturalLoopSummary {
-    int32_t loopCount = 0;
-    int32_t maxDepth = 0;
-    int32_t maxLoopBodyBlocks = 0;
-};
+/// @brief 被内联函数的指令总数上限，防止代码膨胀
+constexpr int32_t kMaxInlineInsts = 200;
+/// @brief 被内联函数的 alloca 总字节数上限，防止栈帧膨胀
+constexpr int32_t kMaxAllocaBytes = 256;
 
 /// @brief 统计函数中的指令总数
 /// @param func 目标函数
@@ -121,263 +84,6 @@ bool containsSelfCall(Function * func)
     }
 
     return false;
-}
-
-/// @brief 判断函数是否调用了非自身的用户函数（即非叶子函数）
-/// @param func 目标函数
-/// @return true 表示函数调用了其他用户函数
-bool hasNonSelfUserCall(Function * func)
-{
-    if (!func) {
-        return true;
-    }
-
-    for (auto * bb : func->getBlocks()) {
-        for (auto * inst : bb->getInstructions()) {
-            auto * call = dynamic_cast<CallInst *>(inst);
-            if (call && call->getCallee() != func && !call->getCallee()->isBuiltin()) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-/// @brief 分析函数中的自然循环规模与嵌套情况
-/// @param func 目标函数
-/// @return 自然循环摘要
-NaturalLoopSummary analyzeNaturalLoops(Function * func)
-{
-    NaturalLoopSummary summary;
-    if (!func || func->getBlocks().empty()) {
-        return summary;
-    }
-
-    DominatorTree domTree(func);
-    LoopInfo loopInfo(func, &domTree);
-    for (auto * bb : func->getBlocks()) {
-        summary.maxDepth = std::max(summary.maxDepth, loopInfo.getLoopDepth(bb));
-        if (loopInfo.isLoopHeader(bb)) {
-            ++summary.loopCount;
-            if (const auto * body = loopInfo.getLoopBody(bb)) {
-                summary.maxLoopBodyBlocks =
-                    std::max(summary.maxLoopBodyBlocks, static_cast<int32_t>(body->size()));
-            }
-        }
-    }
-    return summary;
-}
-
-/// @brief 统计模块中直接调用某个函数的调用点数量
-///
-/// 遍历模块中所有非内置函数，统计直接调用 callee 的调用点个数。
-/// 用于判断 callee 是否为单调用点函数
-/// @param mod 所属模块
-/// @param callee 被调用函数
-/// @return 直接调用点个数
-int32_t countDirectCallSites(Module * mod, Function * callee)
-{
-    if (!mod || !callee) {
-        return 0;
-    }
-
-    int32_t count = 0;
-    for (auto * function : mod->getFunctionList()) {
-        if (!function || function->isBuiltin()) {
-            continue;
-        }
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                auto * call = dynamic_cast<CallInst *>(inst);
-                if (call && call->getCallee() == callee) {
-                    ++count;
-                }
-            }
-        }
-    }
-    return count;
-}
-
-/// @brief 计算函数的内联成本（使用 CostModel 加权）
-/// @param func 目标函数
-/// @return 加权成本值
-int32_t calculateInlineCost(Function * func)
-{
-    if (!func) {
-        return INT32_MAX;
-    }
-
-    long totalCost = 0;
-    for (auto * bb : func->getBlocks()) {
-        totalCost += CostModel::blockCost(bb);
-    }
-
-    // 防止溢出，限制在 INT32_MAX
-    if (totalCost > INT32_MAX) {
-        return INT32_MAX;
-    }
-
-    return static_cast<int32_t>(totalCost);
-}
-
-/// @brief 判断内联是否有收益
-/// @param mod 所属模块
-/// @param caller 调用方
-/// @param callee 被调函数
-/// @param callLoopDepth 调用点循环深度
-/// @param calleeCost 被调函数成本
-/// @return true 表示有收益
-bool isProfitableToInline(Module * mod,
-                          Function * caller,
-                          Function * callee,
-                          int32_t callLoopDepth,
-                          int32_t calleeCost)
-{
-    if (!mod || !caller || !callee) {
-        return false;
-    }
-
-    // 如果收益门关闭，总是内联（保持历史行为）
-    if (!CostModel::profitabilityEnabled()) {
-        return true;
-    }
-
-    // 计算阈值：热点调用点使用更高阈值
-    int32_t threshold = CostModel::getInlineThreshold();
-    const bool hotCallSite = callLoopDepth > 0;
-    if (hotCallSite) {
-        threshold *= CostModel::getInlineHotMultiplier();
-    }
-
-    // 自递归函数使用递归阈值
-    const bool selfRecursive = containsSelfCall(callee);
-    if (selfRecursive) {
-        threshold = CostModel::kInlineRecursiveThreshold;
-    }
-
-    // 成本超过阈值不内联
-    if (calleeCost > threshold) {
-        CostModel::remark("inline", false, "cost exceeds threshold");
-        return false;
-    }
-
-    // 小函数总是内联
-    if (calleeCost <= CostModel::kInlineSmallThreshold) {
-        CostModel::remark("inline", true, "small function");
-        return true;
-    }
-
-    // 单次调用点总是内联（无代码膨胀）
-    if (countDirectCallSites(mod, callee) == 1) {
-        CostModel::remark("inline", true, "single call site");
-        return true;
-    }
-
-    // 通过收益检查
-    CostModel::remark("inline", true, "profitable");
-    return true;
-}
-
-/// @brief 判断热点调用点上的单层叶子循环函数是否值得内联
-/// @param mod 所属模块
-/// @param callee 被调函数
-/// @param loopSummary 循环摘要
-/// @param allocaBytes alloca 总字节数
-/// @param blockCount 基本块数量
-/// @param instCount 指令数量
-/// @return true 表示允许在热点调用点内联
-bool isEligibleHotLoopLeafCallee(Module * mod,
-                                 Function * callee,
-                                 const NaturalLoopSummary & loopSummary,
-                                 int32_t allocaBytes,
-                                 int32_t blockCount,
-                                 int32_t instCount)
-{
-    if (!mod || !callee || loopSummary.loopCount != 1 || loopSummary.maxDepth > 1) {
-        return false;
-    }
-
-    if (allocaBytes != 0) {
-        return false;
-    }
-
-    if (countDirectCallSites(mod, callee) > kHotLoopLeafMaxCallSites) {
-        return false;
-    }
-
-    return blockCount <= kHotLoopLeafMaxBlocks && instCount <= kHotLoopLeafMaxInsts &&
-           loopSummary.maxLoopBodyBlocks <= kHotLoopLeafMaxBodyBlocks;
-}
-
-bool isEligibleHotSingleUseLoopLeafCallee(Module * mod,
-                                          Function * callee,
-                                          const NaturalLoopSummary & loopSummary,
-                                          int32_t allocaBytes,
-                                          int32_t blockCount,
-                                          int32_t instCount)
-{
-    if (!mod || !callee || loopSummary.loopCount == 0 || loopSummary.loopCount > 2 ||
-        loopSummary.maxDepth > 1) {
-        return false;
-    }
-
-    if (allocaBytes != 0) {
-        return false;
-    }
-
-    if (countDirectCallSites(mod, callee) != 1) {
-        return false;
-    }
-
-    return blockCount <= kHotSingleUseLoopLeafMaxBlocks &&
-           instCount <= kHotSingleUseLoopLeafMaxInsts &&
-           loopSummary.maxLoopBodyBlocks <= kHotSingleUseLoopLeafMaxBodyBlocks;
-}
-
-bool isEligibleLoopLeafCallee(Module * mod,
-                              Function * callee,
-                              const NaturalLoopSummary & loopSummary,
-                              int32_t allocaBytes,
-                              int32_t blockCount,
-                              int32_t instCount)
-{
-    if (!mod || !callee || loopSummary.loopCount != 1 || loopSummary.maxDepth > 1) {
-        return false;
-    }
-
-    if (allocaBytes != 0) {
-        return false;
-    }
-
-    if (countDirectCallSites(mod, callee) > kLoopLeafMaxCallSites) {
-        return false;
-    }
-
-    return blockCount <= kLoopLeafMaxBlocks && instCount <= kLoopLeafMaxInsts &&
-           loopSummary.maxLoopBodyBlocks <= kHotLoopLeafMaxBodyBlocks;
-}
-
-bool isEligibleHotSelfRecursiveLeafCallee(Module * mod,
-                                          Function * callee,
-                                          int32_t allocaBytes,
-                                          int32_t blockCount,
-                                          int32_t instCount)
-{
-    if (!mod || !callee) {
-        return false;
-    }
-
-    if (allocaBytes != 0) {
-        return false;
-    }
-
-    if (countDirectCallSites(mod, callee) > kHotSelfRecursiveLeafMaxCallSites) {
-        return false;
-    }
-
-    return blockCount <= kHotSelfRecursiveLeafMaxBlocks &&
-           instCount <= kHotSelfRecursiveLeafMaxInsts;
 }
 
 using SideEffectAnalyzer = FunctionSideEffectAnalysis;
@@ -577,46 +283,6 @@ bool shouldPreserveForPureCallLoopCache(CallInst * call)
     return true;
 }
 
-/// @brief 判断调用点是否位于自然循环内。
-bool isCallInLoop(CallInst * call)
-{
-    if (!call || !call->getFunction() || !call->getParentBlock()) {
-        return false;
-    }
-
-    Function * caller = call->getFunction();
-    if (caller->getBlocks().empty()) {
-        return false;
-    }
-
-    DominatorTree domTree(caller);
-    LoopInfo loopInfo(caller, &domTree);
-    return loopInfo.getLoopDepth(call->getParentBlock()) > 0;
-}
-
-/// @brief 判断函数体是否包含自然循环。
-/// 通过构建支配树和循环信息，检查是否存在循环头基本块。
-/// 用于避免将包含循环的"循环密集型"函数内联到循环内的热点调用点，
-/// 防止内联后循环嵌套加深导致性能退化。
-/// @param func 待检查的函数
-/// @return 若函数体包含自然循环则返回true
-bool containsNaturalLoop(Function * func)
-{
-    if (!func || func->isBuiltin() || func->getBlocks().empty()) {
-        return false;
-    }
-
-    DominatorTree domTree(func);
-    LoopInfo loopInfo(func, &domTree);
-    for (auto * bb : func->getBlocks()) {
-        if (loopInfo.isLoopHeader(bb)) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 /// @brief 判断指令是否属于内联支持的指令类型
 /// @param inst 待检查的指令
 /// @return true 表示该指令可以被安全地克隆和内联
@@ -660,7 +326,7 @@ int32_t getAllocaBytes(Function * func)
 
             int32_t size = alloca->getAllocaType()->getSize();
             if (size < 0) {
-                return CostModel::kInlineMaxAllocaBytes + 1;
+                return kMaxAllocaBytes + 1;
             }
             bytes += size;
         }
@@ -741,9 +407,6 @@ bool SmallFunctionInline::inlineFirstCall()
             continue;
         }
 
-        // 为当前 caller 构建支配树和循环信息，用于判断调用点是否在循环内
-        DominatorTree domTree(caller);
-        LoopInfo loopInfo(caller, &domTree);
         std::vector<BasicBlock *> blocks = caller->getBlocks();
         for (auto * bb : blocks) {
             std::vector<Instruction *> insts(bb->getInstructions().begin(), bb->getInstructions().end());
@@ -753,7 +416,7 @@ bool SmallFunctionInline::inlineFirstCall()
                     continue;
                 }
 
-                if (shouldInlineCallee(caller, call, loopInfo.getLoopDepth(bb))) {
+                if (shouldInlineCallee(caller, call)) {
                     return inlineCall(call);
                 }
             }
@@ -766,38 +429,35 @@ bool SmallFunctionInline::inlineFirstCall()
 /// @brief 判断 callee 是否满足内联条件
 /// @param caller 调用方函数
 /// @param call 调用点
-/// @param callLoopDepth 调用点所在循环深度
 /// @return true 表示可以内联该 callee
-bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call, int32_t callLoopDepth)
+bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call)
 {
     Function * callee = call ? call->getCallee() : nullptr;
     if (!caller || !callee || callee->isBuiltin() || callee == caller || callee->getBlocks().empty()) {
         return false;
     }
 
-    if (blockedRecursiveCloneCalls.find(call) != blockedRecursiveCloneCalls.end()) {
+    // 递归函数推迟处理，避免内联 pass 无限展开
+    if (containsSelfCall(callee)) {
         return false;
     }
 
-    // 参数数量限制：使用 CostModel 常量
-    if (callee->getParams().size() > static_cast<size_t>(CostModel::kInlineMaxParams)) {
+    // 参数过多时 ABI 传参开销可能抵消内联收益
+    if (callee->getParams().size() > 8) {
         return false;
     }
 
+    // 与 PureCallLoopCache 的协作：保留可被缓存的 latch 纯调用
     if (shouldPreserveForPureCallLoopCache(call)) {
         return false;
     }
 
-    const bool hotCallSite = callLoopDepth > 0;
-
-    // alloca 字节数限制：使用 CostModel 常量
-    const int32_t maxAllocaBytes = hotCallSite ? CostModel::kInlineHotMaxAllocaBytes : CostModel::kInlineMaxAllocaBytes;
-    const int32_t allocaBytes = getAllocaBytes(callee);
-    if (allocaBytes > maxAllocaBytes) {
+    // 防止极端栈帧膨胀
+    if (getAllocaBytes(callee) > kMaxAllocaBytes) {
         return false;
     }
 
-    // 检查是否所有指令都支持内联
+    // 含有不支持克隆的指令类型的函数无法安全内联
     for (auto * bb : callee->getBlocks()) {
         for (auto * inst : bb->getInstructions()) {
             if (!isSupportedInlineInstruction(inst)) {
@@ -806,54 +466,8 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call,
         }
     }
 
-    // 基本块数量限制：使用 CostModel 常量
-    int32_t blockCount = static_cast<int32_t>(callee->getBlocks().size());
-    if (blockCount > CostModel::kInlineMaxBlocks) {
-        return false;
-    }
-
-    // 计算被调函数的内联成本（使用加权成本模型）
-    int32_t calleeCost = calculateInlineCost(callee);
-
-    // 判断是否有收益（基于 GCC/Clang 参数的成本模型）
-    if (!isProfitableToInline(mod, caller, callee, callLoopDepth, calleeCost)) {
-        return false;
-    }
-
-    // 以下是特殊情况的额外检查，保留原有逻辑以确保兼容性
-
-    const bool leafCallee = !hasNonSelfUserCall(callee);
-    const NaturalLoopSummary loopSummary = analyzeNaturalLoops(callee);
-    const bool selfRecursiveCallee = containsSelfCall(callee);
-    int32_t instCount = countInstructions(callee);
-
-    // 自递归函数：额外的结构限制
-    if (selfRecursiveCallee) {
-        if (!hotCallSite || !leafCallee) {
-            return false;
-        }
-        return isEligibleHotSelfRecursiveLeafCallee(mod, callee, allocaBytes, blockCount, instCount);
-    }
-
-    // 包含循环的函数：额外的结构限制
-    if (loopSummary.loopCount > 0) {
-        if (!leafCallee) {
-            return false;
-        }
-        if (hotCallSite) {
-            return isEligibleHotLoopLeafCallee(mod, callee, loopSummary, allocaBytes, blockCount, instCount) ||
-                   isEligibleHotSingleUseLoopLeafCallee(mod,
-                                                        callee,
-                                                        loopSummary,
-                                                        allocaBytes,
-                                                        blockCount,
-                                                        instCount);
-        }
-        return isEligibleLoopLeafCallee(mod, callee, loopSummary, allocaBytes, blockCount, instCount);
-    }
-
-    // 通过了成本检查和所有结构限制
-    return true;
+    // 唯一的体积限制：总指令数
+    return countInstructions(callee) < kMaxInlineInsts;
 }
 
 /// @brief 克隆指令的外壳（不填充操作数），用于内联时复制 callee 指令
@@ -945,7 +559,6 @@ bool SmallFunctionInline::inlineCall(CallInst * call)
 
     Function * caller = call->getFunction();
     Function * callee = call->getCallee();
-    const bool selfRecursiveCallee = containsSelfCall(callee);
     BasicBlock * callBlock = call->getParentBlock();
     auto & callInsts = callBlock->getInstructions();
     auto callPos = std::find(callInsts.begin(), callInsts.end(), static_cast<Instruction *>(call));
@@ -1027,13 +640,6 @@ bool SmallFunctionInline::inlineCall(CallInst * call)
 
         for (int32_t i = 0; i < cloned->getOperandsNum(); ++i) {
             cloned->setOperand(i, mapValue(cloned->getOperand(i)));
-        }
-
-        if (selfRecursiveCallee) {
-            auto * clonedCall = dynamic_cast<CallInst *>(cloned);
-            if (clonedCall && clonedCall->getCallee() == callee) {
-                blockedRecursiveCloneCalls.insert(clonedCall);
-            }
         }
     }
 

@@ -9,7 +9,6 @@
 #pragma once
 
 #include <cstdint>
-#include <unordered_set>
 
 class CallInst;
 class Function;
@@ -32,14 +31,12 @@ private:
     /// @brief 判断 callee 是否满足内联条件
     /// @param caller 调用方函数
     /// @param call 调用点
-    /// @param callLoopDepth 调用点所在循环深度
     /// @return true 表示可以内联该 callee
-    bool shouldInlineCallee(Function * caller, CallInst * call, int32_t callLoopDepth);
+    bool shouldInlineCallee(Function * caller, CallInst * call);
     /// @brief 对一个调用点执行内联展开
     bool inlineCall(CallInst * call);
     /// @brief 克隆指令的外壳（不填充操作数）
     Instruction * cloneInstructionShell(Instruction * inst, Function * caller);
 
     Module * mod = nullptr;
-    std::unordered_set<CallInst *> blockedRecursiveCloneCalls;
 };
