@@ -507,6 +507,9 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_SHL_I] = &InstSelectorRiscV64::translate_shl;
 	translatorHandlers[IRInstOperator::IRINST_OP_ASHR_I] = &InstSelectorRiscV64::translate_ashr;
 	translatorHandlers[IRInstOperator::IRINST_OP_LSHR_I] = &InstSelectorRiscV64::translate_lshr;
+	translatorHandlers[IRInstOperator::IRINST_OP_AND_I] = &InstSelectorRiscV64::translate_and;
+	translatorHandlers[IRInstOperator::IRINST_OP_OR_I] = &InstSelectorRiscV64::translate_or;
+	translatorHandlers[IRInstOperator::IRINST_OP_XOR_I] = &InstSelectorRiscV64::translate_xor;
 	translatorHandlers[IRInstOperator::IRINST_OP_LT_I] = &InstSelectorRiscV64::translate_icmp;
 	translatorHandlers[IRInstOperator::IRINST_OP_GT_I] = &InstSelectorRiscV64::translate_icmp;
 	translatorHandlers[IRInstOperator::IRINST_OP_LE_I] = &InstSelectorRiscV64::translate_icmp;
@@ -1456,6 +1459,71 @@ void InstSelectorRiscV64::translate_shift(Instruction * inst,
 		releaseOperand(lhs);
 		storeResult(inst, dstReg, inst);
 		return;
+	}
+
+	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
+	OperandReg rhs = loadOperand(binary->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
+	iloc.inst(regOp,
+		PlatformRiscV64::regName[dstReg],
+		PlatformRiscV64::regName[lhs.reg],
+		PlatformRiscV64::regName[rhs.reg]);
+	releaseOperand(rhs);
+	releaseOperand(lhs);
+	storeResult(inst, dstReg, inst);
+}
+
+/// @brief 翻译按位与指令（and）
+void InstSelectorRiscV64::translate_and(Instruction * inst)
+{
+	translate_bitwise(inst, "and", "andi");
+}
+
+/// @brief 翻译按位或指令（or）
+void InstSelectorRiscV64::translate_or(Instruction * inst)
+{
+	translate_bitwise(inst, "or", "ori");
+}
+
+/// @brief 翻译按位异或指令（xor）
+void InstSelectorRiscV64::translate_xor(Instruction * inst)
+{
+	translate_bitwise(inst, "xor", "xori");
+}
+
+/// @brief 翻译按位运算指令的通用实现
+///
+/// RV64 的 and/or/xor 无 W 变体，对两个已按 i32 符号扩展的寄存器做按位
+/// 运算结果仍保持符号扩展性质，因此无需额外的 sext.w。
+/// 右操作数为 12 位有符号范围内的常量时使用立即数形式
+void InstSelectorRiscV64::translate_bitwise(Instruction * inst,
+                                            const std::string & regOp,
+                                            const std::string & immOp)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	if (binary == nullptr) {
+		return;
+	}
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+
+	if (auto * rhsConst = asConstInteger(binary->getRHS())) {
+		const int32_t imm = rhsConst->getVal();
+		if (imm >= -2048 && imm <= 2047) {
+			iloc.inst(immOp,
+				PlatformRiscV64::regName[dstReg],
+				PlatformRiscV64::regName[lhs.reg],
+				std::to_string(imm));
+			releaseOperand(lhs);
+			storeResult(inst, dstReg, inst);
+			return;
+		}
 	}
 
 	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;

@@ -444,6 +444,15 @@ private:
                     return rhs.intConstant == 0 ? LatticeValue::getOverdefined()
                                                 : LatticeValue::getIntegerConstant(lhs.intConstant % rhs.intConstant);
 
+                case IRInstOperator::IRINST_OP_AND_I:
+                    return LatticeValue::getIntegerConstant(lhs.intConstant & rhs.intConstant);
+
+                case IRInstOperator::IRINST_OP_OR_I:
+                    return LatticeValue::getIntegerConstant(lhs.intConstant | rhs.intConstant);
+
+                case IRInstOperator::IRINST_OP_XOR_I:
+                    return LatticeValue::getIntegerConstant(lhs.intConstant ^ rhs.intConstant);
+
                 default:
                     break;
             }
@@ -818,6 +827,9 @@ private:
             case IRInstOperator::IRINST_OP_MUL_I:
             case IRInstOperator::IRINST_OP_DIV_I:
             case IRInstOperator::IRINST_OP_MOD_I:
+            case IRInstOperator::IRINST_OP_AND_I:
+            case IRInstOperator::IRINST_OP_OR_I:
+            case IRInstOperator::IRINST_OP_XOR_I:
             case IRInstOperator::IRINST_OP_ADD_F:
             case IRInstOperator::IRINST_OP_SUB_F:
             case IRInstOperator::IRINST_OP_MUL_F:

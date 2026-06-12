@@ -126,6 +126,9 @@ bool Instruction::isSpeculatable() const
         case IRInstOperator::IRINST_OP_SHL_I:
         case IRInstOperator::IRINST_OP_ASHR_I:
         case IRInstOperator::IRINST_OP_LSHR_I:
+        case IRInstOperator::IRINST_OP_AND_I:
+        case IRInstOperator::IRINST_OP_OR_I:
+        case IRInstOperator::IRINST_OP_XOR_I:
         case IRInstOperator::IRINST_OP_LT_I:
         case IRInstOperator::IRINST_OP_GT_I:
         case IRInstOperator::IRINST_OP_LE_I:
