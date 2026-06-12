@@ -3117,6 +3117,10 @@ int InstSelectorRiscV64::raSaveOffset() const
 /// @param inst 当前call指令（用于借用临时寄存器）
 void InstSelectorRiscV64::emitCallSiteSaveRA(Instruction * inst)
 {
+	if (!iloc.getShrinkWrapRA()) {
+		return;  // 未启用 shrink-wrapping，ra 已在 prologue 保存
+	}
+
 	if (raSavedAtCallSite) {
 		return;  // 已经保存过，避免重复保存
 	}
