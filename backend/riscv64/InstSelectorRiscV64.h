@@ -138,6 +138,14 @@ private:
 	void translate_lshr(Instruction * inst);
 	/// @brief 翻译移位指令的通用实现，根据移位量是否为常量选择立即数/寄存器形式
 	void translate_shift(Instruction * inst, const std::string & regOp, const std::string & immOp);
+	/// @brief 翻译按位与指令（and）
+	void translate_and(Instruction * inst);
+	/// @brief 翻译按位或指令（or）
+	void translate_or(Instruction * inst);
+	/// @brief 翻译按位异或指令（xor）
+	void translate_xor(Instruction * inst);
+	/// @brief 翻译按位运算指令的通用实现，右操作数为 12 位有符号常量时用立即数形式
+	void translate_bitwise(Instruction * inst, const std::string & regOp, const std::string & immOp);
 	/// @brief 翻译icmp指令（整数比较）
 	void translate_icmp(Instruction * inst);
 	/// @brief 翻译fcmp指令（浮点比较）

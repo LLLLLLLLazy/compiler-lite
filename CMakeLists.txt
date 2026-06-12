@@ -249,6 +249,8 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/InstCombine.cpp
 	ir/passes/fixedPointFunctionPass/GVN.h
 	ir/passes/fixedPointFunctionPass/GVN.cpp
+	ir/passes/fixedPointFunctionPass/BitwiseLoopIdiom.h
+	ir/passes/fixedPointFunctionPass/BitwiseLoopIdiom.cpp
 	ir/passes/fixedPointFunctionPass/LoopTiling.h
 	ir/passes/fixedPointFunctionPass/LoopTiling.cpp
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.h

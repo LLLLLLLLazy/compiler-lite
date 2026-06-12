@@ -22,6 +22,9 @@ enum class IRInstOperator : std::int8_t {
     IRINST_OP_SHL_I,   ///< 逻辑左移
     IRINST_OP_ASHR_I,  ///< 算术右移（保留符号位）
     IRINST_OP_LSHR_I,  ///< 逻辑右移（高位补 0）
+    IRINST_OP_AND_I,   ///< 按位与
+    IRINST_OP_OR_I,    ///< 按位或
+    IRINST_OP_XOR_I,   ///< 按位异或
     IRINST_OP_LT_I,
     IRINST_OP_GT_I,
     IRINST_OP_LE_I,

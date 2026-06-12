@@ -14,6 +14,7 @@
 #include "Module.h"
 #include "fixedPointFunctionPass/CFGSimplify.h"
 #include "fixedPointFunctionPass/ConstProp.h"
+#include "fixedPointFunctionPass/BitwiseLoopIdiom.h"
 #include "fixedPointFunctionPass/CanonicalizeLoop.h"
 #include "fixedPointFunctionPass/DeadInstElim.h"
 #include "fixedPointFunctionPass/GVN.h"
@@ -285,6 +286,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     });
     registerFixedPointFunctionPass("PhiToSelect", [](Function * func) {
         PhiToSelect pass(func);
+        return pass.run();
+    });
+    // 位模拟循环惯用法识别：依赖 PhiToSelect 把累加分支规范成 select 形态
+    registerFixedPointFunctionPass("BitwiseLoopIdiom", [this](Function * func) {
+        BitwiseLoopIdiom pass(func, module);
         return pass.run();
     });
     registerFixedPointFunctionPass("InstCombine", [this](Function * func) {
