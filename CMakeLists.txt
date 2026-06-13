@@ -186,6 +186,8 @@ set(IR_SRCS
 	ir/Instructions/StoreInst.cpp
 	ir/Instructions/BinaryInst.h
 	ir/Instructions/BinaryInst.cpp
+	ir/Instructions/MulModInst.h
+	ir/Instructions/MulModInst.cpp
 	ir/Instructions/FCmpInst.h
 	ir/Instructions/FCmpInst.cpp
 	ir/Instructions/ICmpInst.h
@@ -301,6 +303,8 @@ set(IR_SRCS
 	ir/passes/modulePass/SmallFunctionInline.cpp
 	ir/passes/functionPass/TailRecursionElim.h
 	ir/passes/functionPass/TailRecursionElim.cpp
+	ir/passes/functionPass/ModMulIdiom.h
+	ir/passes/functionPass/ModMulIdiom.cpp
 	ir/passes/functionPass/LateLoopCFGCleanup.h
 	ir/passes/functionPass/LateLoopCFGCleanup.cpp
 	ir/passes/functionPass/PhiLowering.h
