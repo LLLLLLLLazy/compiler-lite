@@ -36,6 +36,7 @@
 #include "functionPass/LateLoopCFGCleanup.h"
 #include "functionPass/LoopRotate.h"
 #include "functionPass/Mem2Reg.h"
+#include "functionPass/ModMulIdiom.h"
 #include "functionPass/PhiToSelect.h"
 #include "functionPass/PhiLowering.h"
 #include "functionPass/PureCallCSE.h"
@@ -102,6 +103,13 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         Mem2Reg pass(func, module);
         pass.run();
         return false;
+    });
+
+    // 递归倍加模乘惯用法识别：须在 Mem2Reg 后（依赖 SSA 分支形态）、
+    // GVN/InstCombine 前（避免 srem/sdiv 被变形破坏匹配）
+    registerFunctionPass("ModMulIdiom", [this](Function * func) {
+        ModMulIdiom pass(func, module);
+        return pass.run();
     });
 
     registerFunctionPass("GVN", [this](Function * func) {
