@@ -67,6 +67,17 @@ public:
 	/// @return Value* -> call 指令编号集合。集合中的 call 表示该值在 call 返回后仍需保持。
 	const std::unordered_map<Value *, std::unordered_set<int>> & getLiveAcrossCallPositions() const;
 
+	/// @brief 获取精确活跃区间段（保守循环扩展之前的 def-use 精确区间）
+	///
+	/// computeLiveIntervals 末尾会为 split/call-transfer 给跨循环值补足整个循环体
+	/// 的保守段，这会让循环携带累加器等值彼此假干涉。本快照保留扩展前的精确段，
+	/// 供 RegCoalescer 做精确（hole-aware）干涉判断，从而合并循环累加器的 copy
+	/// @return Value* -> 精确 Segment 列表
+	const std::unordered_map<Value *, std::vector<Segment>> & getPreciseSegments() const
+	{
+		return preciseSegments;
+	}
+
 private:
 	/// @brief 计算所有虚拟寄存器的活跃区间
 	/// 按基本块顺序遍历指令，为每条指令编号，
@@ -106,6 +117,9 @@ private:
 
 	/// @brief Value 在哪些 call 返回后仍然存活
 	std::unordered_map<Value *, std::unordered_set<int>> liveAcrossCallPositions;
+
+	/// @brief 保守循环扩展之前的精确活跃区间段快照（供 coalescer 精确判干涉）
+	std::unordered_map<Value *, std::vector<Segment>> preciseSegments;
 
 	/// @brief 下一条指令的编号
 	int nextInstNum = 0;

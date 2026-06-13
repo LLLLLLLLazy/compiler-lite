@@ -373,6 +373,22 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 		}
 	}
 
+	// 在加入任何保守循环扩展之前，快照每个值的精确 def-use 活跃段。
+	// 这些段来自上面基于 live-in/out 数据流的逐块反向扫描，是完整且精确的
+	// 活跃性；后续的保守扩展只是为 split/call-transfer 补的冗余覆盖。
+	// RegCoalescer 用这份精确快照判干涉，才能合并循环累加器那类 copy
+	//（保守扩展会让累加器 header phi 与 merge 值处处假干涉）
+	for (auto * interval : intervals) {
+		Value * value = interval->getVReg();
+		if (value == nullptr) {
+			continue;
+		}
+		auto & snapshot = preciseSegments[value];
+		for (const auto & seg : interval->getSegments()) {
+			snapshot.push_back(seg);
+		}
+	}
+
 	// PhiLowering 会把循环携带值改写成“同一个逻辑 Value 的多次定义”。
 	// 当前 split lane 仍按 Value 的整体区间决定 call-site transfer，因此这类
 	// 循环多定义值先保留一条保守总段，避免在旧值/新值交接尚未完全建模时
