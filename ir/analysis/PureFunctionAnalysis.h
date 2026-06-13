@@ -6,6 +6,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <unordered_set>
 
 class Function;
 class Instruction;
@@ -40,4 +41,5 @@ private:
     Module * mod = nullptr;
     std::unordered_map<Function *, PureFunctionState> states;
     std::unordered_map<Function *, bool> memoryIndependent;
+    std::unordered_set<Function *> memoryIndepVisiting;
 };

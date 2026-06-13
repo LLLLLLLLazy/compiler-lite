@@ -182,6 +182,8 @@ set(IR_SRCS
 	ir/Instructions/StoreInst.cpp
 	ir/Instructions/BinaryInst.h
 	ir/Instructions/BinaryInst.cpp
+	ir/Instructions/MulModInst.h
+	ir/Instructions/MulModInst.cpp
 	ir/Instructions/FCmpInst.h
 	ir/Instructions/FCmpInst.cpp
 	ir/Instructions/ICmpInst.h
@@ -247,6 +249,8 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/InstCombine.cpp
 	ir/passes/fixedPointFunctionPass/GVN.h
 	ir/passes/fixedPointFunctionPass/GVN.cpp
+	ir/passes/fixedPointFunctionPass/BitwiseLoopIdiom.h
+	ir/passes/fixedPointFunctionPass/BitwiseLoopIdiom.cpp
 	ir/passes/fixedPointFunctionPass/LoopTiling.h
 	ir/passes/fixedPointFunctionPass/LoopTiling.cpp
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.h
@@ -257,10 +261,18 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/MatMulInterchange.cpp
 	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.h
 	ir/passes/fixedPointFunctionPass/CanonicalizeLoop.cpp
+	ir/passes/fixedPointFunctionPass/IndVarSimplify.h
+	ir/passes/fixedPointFunctionPass/IndVarSimplify.cpp
+	ir/passes/fixedPointFunctionPass/LoopConstantPromotion.h
+	ir/passes/fixedPointFunctionPass/LoopConstantPromotion.cpp
 	ir/passes/functionPass/LoopRotate.h
 	ir/passes/functionPass/LoopRotate.cpp
 	ir/passes/fixedPointFunctionPass/SimpleLoopUnroll.h
 	ir/passes/fixedPointFunctionPass/SimpleLoopUnroll.cpp
+	ir/passes/fixedPointFunctionPass/LoopExitValueRewrite.h
+	ir/passes/fixedPointFunctionPass/LoopExitValueRewrite.cpp
+	ir/passes/fixedPointFunctionPass/RemoveEmptyLoop.h
+	ir/passes/fixedPointFunctionPass/RemoveEmptyLoop.cpp
 	ir/passes/toolPass/CFGStateCleanup.h
 	ir/passes/toolPass/CFGStateCleanup.cpp
 	ir/passes/fixedPointFunctionPass/CFGSimplify.h
@@ -269,6 +281,8 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/DeadInstElim.cpp
 	ir/passes/modulePass/GlobalToLocal.h
 	ir/passes/modulePass/GlobalToLocal.cpp
+	ir/passes/modulePass/DeadFunctionElim.h
+	ir/passes/modulePass/DeadFunctionElim.cpp
 	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.h
 	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.cpp
 	ir/passes/fixedPointFunctionPass/UnreachableBlockElim.h
@@ -287,6 +301,8 @@ set(IR_SRCS
 	ir/passes/modulePass/SmallFunctionInline.cpp
 	ir/passes/functionPass/TailRecursionElim.h
 	ir/passes/functionPass/TailRecursionElim.cpp
+	ir/passes/functionPass/ModMulIdiom.h
+	ir/passes/functionPass/ModMulIdiom.cpp
 	ir/passes/functionPass/LateLoopCFGCleanup.h
 	ir/passes/functionPass/LateLoopCFGCleanup.cpp
 	ir/passes/functionPass/PhiLowering.h

@@ -18,11 +18,13 @@
 #include <functional>
 #include <limits>
 #include <set>
+#include <unordered_set>
 #include <vector>
 
 #include "AllocaInst.h"
 #include "BasicBlock.h"
 #include "BinaryInst.h"
+#include "MulModInst.h"
 #include "BranchInst.h"
 #include "CallInst.h"
 #include "ConstFloat.h"
@@ -503,6 +505,13 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_MUL_I] = &InstSelectorRiscV64::translate_mul;
 	translatorHandlers[IRInstOperator::IRINST_OP_DIV_I] = &InstSelectorRiscV64::translate_div;
 	translatorHandlers[IRInstOperator::IRINST_OP_MOD_I] = &InstSelectorRiscV64::translate_mod;
+	translatorHandlers[IRInstOperator::IRINST_OP_MULMOD_I] = &InstSelectorRiscV64::translate_mulmod;
+	translatorHandlers[IRInstOperator::IRINST_OP_SHL_I] = &InstSelectorRiscV64::translate_shl;
+	translatorHandlers[IRInstOperator::IRINST_OP_ASHR_I] = &InstSelectorRiscV64::translate_ashr;
+	translatorHandlers[IRInstOperator::IRINST_OP_LSHR_I] = &InstSelectorRiscV64::translate_lshr;
+	translatorHandlers[IRInstOperator::IRINST_OP_AND_I] = &InstSelectorRiscV64::translate_and;
+	translatorHandlers[IRInstOperator::IRINST_OP_OR_I] = &InstSelectorRiscV64::translate_or;
+	translatorHandlers[IRInstOperator::IRINST_OP_XOR_I] = &InstSelectorRiscV64::translate_xor;
 	translatorHandlers[IRInstOperator::IRINST_OP_LT_I] = &InstSelectorRiscV64::translate_icmp;
 	translatorHandlers[IRInstOperator::IRINST_OP_GT_I] = &InstSelectorRiscV64::translate_icmp;
 	translatorHandlers[IRInstOperator::IRINST_OP_LE_I] = &InstSelectorRiscV64::translate_icmp;
@@ -1003,6 +1012,45 @@ void InstSelectorRiscV64::translate_store(Instruction * inst)
 		return;
 	}
 
+	// 检测存储常量0：直接使用zero寄存器，避免li x,0的冗余物化
+	auto * constZero = asConstInteger(storeInst->getValueOperand());
+	if (constZero != nullptr && constZero->getVal() == 0) {
+		Value * ptrOp = storeInst->getPointerOperand();
+		const bool wide = storeInst->getValueOperand()->getType()->isPointerType();
+		const char * storeOp = wide ? "sd" : "sw";
+
+		if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
+			RegAllocInfo ptrInfo = getAllocInfo(ptrOp, inst);
+			if (dynamic_cast<GlobalVariable *>(ptrOp) == nullptr && ptrInfo.hasStackSlot) {
+				if (PlatformRiscV64::isDisp(ptrInfo.offset)) {
+					// 栈槽 + 12位偏移：sw zero, offset(fp)
+					std::string mem = std::to_string(ptrInfo.offset) + "(" +
+					                  PlatformRiscV64::regName[ptrInfo.baseRegId] + ")";
+					iloc.inst(storeOp, "zero", mem);
+				} else {
+					// 栈槽 + 大偏移：先计算地址再存
+					auto tmp = tempMgr.borrowAfterUses(inst);
+					iloc.load_imm(tmp.reg(), ptrInfo.offset);
+					iloc.inst("add", PlatformRiscV64::regName[tmp.reg()],
+					          PlatformRiscV64::regName[ptrInfo.baseRegId],
+					          PlatformRiscV64::regName[tmp.reg()]);
+					iloc.inst(storeOp, "zero", "0(" + PlatformRiscV64::regName[tmp.reg()] + ")");
+				}
+			} else {
+				// 全局变量或无栈槽：通过load_symbol计算地址
+				auto tmp = tempMgr.borrowAfterUses(inst);
+				iloc.load_symbol(tmp.reg(), ptrOp->getName());
+				iloc.inst(storeOp, "zero", "0(" + PlatformRiscV64::regName[tmp.reg()] + ")");
+			}
+		} else {
+			// 计算地址：sw zero, 0(ptr)
+			OperandReg ptr = loadOperand(ptrOp, inst);
+			iloc.inst(storeOp, "zero", "0(" + PlatformRiscV64::regName[ptr.reg] + ")");
+			releaseOperand(ptr);
+		}
+		return;
+	}
+
 	OperandReg value = loadOperand(storeInst->getValueOperand(), inst);
 	Value * ptrOp = storeInst->getPointerOperand();
 	if (dynamic_cast<AllocaInst *>(ptrOp) != nullptr || dynamic_cast<GlobalVariable *>(ptrOp) != nullptr) {
@@ -1362,6 +1410,178 @@ void InstSelectorRiscV64::translate_mod(Instruction * inst)
 		return;
 	}
 	translate_binary(inst, "remw");
+}
+
+/// @brief 翻译宽乘取模指令 (i64)a*b % m
+///
+/// 两个 i32 操作数以有符号扩展形式驻留 64 位寄存器，用 64 位 mul 得到精确的
+/// 64 位积（调用点守卫保证 0<=a<m、b>=0，积非负且 < 2^61 不溢出），再对正常量
+/// 取有符号 64 位余数。余数落在 [0, m) 内，可直接当作已符号扩展的 i32 使用
+void InstSelectorRiscV64::translate_mulmod(Instruction * inst)
+{
+	auto * mulmod = dynamic_cast<MulModInst *>(inst);
+	if (mulmod == nullptr) {
+		return;
+	}
+	const int32_t modulus = mulmod->getModulus();
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg lhs = loadOperand(mulmod->getA(), inst, dstReg);
+	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
+	OperandReg rhs = loadOperand(mulmod->getB(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
+
+	// 64 位无截断乘法
+	iloc.inst("mul",
+	          PlatformRiscV64::regName[dstReg],
+	          PlatformRiscV64::regName[lhs.reg],
+	          PlatformRiscV64::regName[rhs.reg]);
+
+	releaseOperand(rhs);
+	releaseOperand(lhs);
+
+	// 对常量取 64 位有符号余数
+	auto modTmp = tempMgr.borrowExcluding(inst, {dstReg});
+	iloc.load_imm(modTmp.reg(), modulus);
+	iloc.inst("rem",
+	          PlatformRiscV64::regName[dstReg],
+	          PlatformRiscV64::regName[dstReg],
+	          PlatformRiscV64::regName[modTmp.reg()]);
+	modTmp.release();
+
+	storeResult(inst, dstReg, inst);
+}
+
+/// @brief 翻译逻辑左移指令（shl）
+void InstSelectorRiscV64::translate_shl(Instruction * inst)
+{
+	translate_shift(inst, "sllw", "slliw");
+}
+
+/// @brief 翻译算术右移指令（ashr，保留符号位）
+void InstSelectorRiscV64::translate_ashr(Instruction * inst)
+{
+	translate_shift(inst, "sraw", "sraiw");
+}
+
+/// @brief 翻译逻辑右移指令（lshr，高位补 0）
+void InstSelectorRiscV64::translate_lshr(Instruction * inst)
+{
+	translate_shift(inst, "srlw", "srliw");
+}
+
+/// @brief 翻译移位指令的通用实现，根据移位量是否为常量选择立即数/寄存器形式
+///
+/// RISC-V 的 W 后缀移位指令对 32 位结果进行符号扩展，移位量取低 5 位
+void InstSelectorRiscV64::translate_shift(Instruction * inst,
+                                          const std::string & regOp,
+                                          const std::string & immOp)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	if (binary == nullptr) {
+		return;
+	}
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+
+	// 移位量为常量时使用立即数形式，仅保留低 5 位以匹配硬件语义
+	if (auto * shiftConst = asConstInteger(binary->getRHS())) {
+		int shiftAmount = shiftConst->getVal() & 31;
+		iloc.inst(immOp,
+			PlatformRiscV64::regName[dstReg],
+			PlatformRiscV64::regName[lhs.reg],
+			std::to_string(shiftAmount));
+		releaseOperand(lhs);
+		storeResult(inst, dstReg, inst);
+		return;
+	}
+
+	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
+	OperandReg rhs = loadOperand(binary->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
+	iloc.inst(regOp,
+		PlatformRiscV64::regName[dstReg],
+		PlatformRiscV64::regName[lhs.reg],
+		PlatformRiscV64::regName[rhs.reg]);
+	releaseOperand(rhs);
+	releaseOperand(lhs);
+	storeResult(inst, dstReg, inst);
+}
+
+/// @brief 翻译按位与指令（and）
+void InstSelectorRiscV64::translate_and(Instruction * inst)
+{
+	translate_bitwise(inst, "and", "andi");
+}
+
+/// @brief 翻译按位或指令（or）
+void InstSelectorRiscV64::translate_or(Instruction * inst)
+{
+	translate_bitwise(inst, "or", "ori");
+}
+
+/// @brief 翻译按位异或指令（xor）
+void InstSelectorRiscV64::translate_xor(Instruction * inst)
+{
+	translate_bitwise(inst, "xor", "xori");
+}
+
+/// @brief 翻译按位运算指令的通用实现
+///
+/// RV64 的 and/or/xor 无 W 变体，对两个已按 i32 符号扩展的寄存器做按位
+/// 运算结果仍保持符号扩展性质，因此无需额外的 sext.w。
+/// 右操作数为 12 位有符号范围内的常量时使用立即数形式
+void InstSelectorRiscV64::translate_bitwise(Instruction * inst,
+                                            const std::string & regOp,
+                                            const std::string & immOp)
+{
+	auto * binary = dynamic_cast<BinaryInst *>(inst);
+	if (binary == nullptr) {
+		return;
+	}
+
+	int dstReg = getResultReg(inst);
+	LocalTempManager::Lease dstLease;
+	if (dstReg < 0) {
+		dstLease = tempMgr.borrow(inst);
+		dstReg = dstLease.reg();
+	}
+
+	OperandReg lhs = loadOperand(binary->getLHS(), inst, dstReg);
+
+	if (auto * rhsConst = asConstInteger(binary->getRHS())) {
+		const int32_t imm = rhsConst->getVal();
+		if (imm >= -2048 && imm <= 2047) {
+			iloc.inst(immOp,
+				PlatformRiscV64::regName[dstReg],
+				PlatformRiscV64::regName[lhs.reg],
+				std::to_string(imm));
+			releaseOperand(lhs);
+			storeResult(inst, dstReg, inst);
+			return;
+		}
+	}
+
+	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
+	OperandReg rhs = loadOperand(binary->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
+	iloc.inst(regOp,
+		PlatformRiscV64::regName[dstReg],
+		PlatformRiscV64::regName[lhs.reg],
+		PlatformRiscV64::regName[rhs.reg]);
+	releaseOperand(rhs);
+	releaseOperand(lhs);
+	storeResult(inst, dstReg, inst);
 }
 
 /// @brief 翻译浮点二元运算的通用实现
@@ -3012,6 +3232,10 @@ int InstSelectorRiscV64::raSaveOffset() const
 /// @param inst 当前call指令（用于借用临时寄存器）
 void InstSelectorRiscV64::emitCallSiteSaveRA(Instruction * inst)
 {
+	if (!iloc.getShrinkWrapRA()) {
+		return;  // 未启用 shrink-wrapping，ra 已在 prologue 保存
+	}
+
 	if (raSavedAtCallSite) {
 		return;  // 已经保存过，避免重复保存
 	}

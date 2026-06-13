@@ -56,6 +56,11 @@ bool PureFunctionAnalysis::isMemoryIndependent(Function * function)
         return cached->second;
     }
 
+    if (memoryIndepVisiting.count(function) != 0U) {
+        return true;
+    }
+    memoryIndepVisiting.insert(function);
+
     bool independent = true;
     for (auto * bb : function->getBlocks()) {
         for (auto * inst : bb->getInstructions()) {
@@ -80,6 +85,7 @@ bool PureFunctionAnalysis::isMemoryIndependent(Function * function)
         }
     }
 
+    memoryIndepVisiting.erase(function);
     memoryIndependent[function] = independent;
     return independent;
 }
@@ -105,7 +111,7 @@ bool PureFunctionAnalysis::isInstructionAllowed(Instruction * inst)
     if (auto * call = dynamic_cast<CallInst *>(inst)) {
         auto it = states.find(call->getCallee());
         if (it != states.end() && it->second == PureFunctionState::Visiting) {
-            return false;
+            return true;
         }
         return isPure(call->getCallee());
     }

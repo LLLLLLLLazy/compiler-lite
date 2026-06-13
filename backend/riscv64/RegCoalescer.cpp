@@ -129,30 +129,85 @@ bool RegCoalescer::canCoalesce(Value * src, Value * dst,
 	    dstIdx < 0 || dstIdx >= static_cast<int>(intervals.size())) {
 		return false;
 	}
-	if (!isLocalComputedSource(src, copyInst)) {
-		return false;
-	}
-
-	// copy 的 src 使用与 dst 定义若仅在 copy 本身这一拍相接，可共享寄存器；
-	// 这是 coalescing 想消除的那条 move，不应被当作真实干涉。
-	// 若干涉图报告src/dst干涉，进一步检查：若重叠仅限于copy指令位置这一拍，
-	// 则该干涉是copy本身造成的"伪干涉"，仍可合并；否则拒绝合并。
-	if (graph != nullptr && graph->hasInterference(srcIdx, dstIdx)) {
-		auto copyPosIt = instNumbering.find(copyInst);
-		if (copyPosIt == instNumbering.end()) {
-			// 无法定位copy指令位置，保守拒绝合并
-			return false;
-		}
-		const int copyPos = copyPosIt->second;
-
-		if (onlyOverlapsInsideWindow(intervals[srcIdx], intervals[dstIdx], copyPos, copyPos + 1)) {
+	// 原有保守快速路径：同块本地计算源，按保守区间判伪干涉。
+	// 这条路径行为不变，覆盖局部 producer temp 的 destructive-update 合并。
+	if (isLocalComputedSource(src, copyInst)) {
+		if (graph == nullptr || !graph->hasInterference(srcIdx, dstIdx)) {
 			return true;
 		}
-
-		return false;
+		auto copyPosIt = instNumbering.find(copyInst);
+		if (copyPosIt != instNumbering.end() &&
+		    onlyOverlapsInsideWindow(intervals[srcIdx], intervals[dstIdx], copyPosIt->second, copyPosIt->second + 1)) {
+			return true;
+		}
 	}
 
-	return true;
+	// 精确（hole-aware）干涉判断：保守循环扩展会让循环携带累加器（header phi）
+	// 与 merge 值处处假干涉，导致跨块 phi-copy 无法合并。改用扩展前的精确活跃段，
+	// 并排除连接 src/dst 的 copy 那一拍的伪干涉，即可安全合并这类累加器 copy，
+	// 实现原地累加（addw a1,a1,t 而非 mv 对）
+	return !preciseInterferes(src, dst, instNumbering);
+}
+
+/// @brief 基于精确区间判断 src/dst 是否真正干涉（hole-aware）
+bool RegCoalescer::preciseInterferes(Value * src, Value * dst,
+                                     const std::map<Instruction *, int> & instNumbering)
+{
+	auto sIt = preciseSegments_.find(src);
+	auto dIt = preciseSegments_.find(dst);
+	if (sIt == preciseSegments_.end() || dIt == preciseSegments_.end()) {
+		// 缺精确信息，保守认为干涉，不合并
+		return true;
+	}
+
+	// 收集 src/dst 两个合并类的定义点位置。在某条指令定义 X 类时，若另一类 Y 在此
+	// 被读且就此死亡（copy 的 d=s、两地址的 d=s op x 都是这种形态），二者持有可共享
+	// 的值，这一拍的重叠属伪干涉应排除；真正的干涉会体现在定义点之后仍存活的位置上，
+	// 那些位置不是定义点，会被下面如实判为干涉。这样累加器的 phi-cycle（含
+	// merge=phi+add 的 `t136=t113+prod`）也能被识别为可合并
+	std::unordered_set<int> benignPositions;
+	if (func_ != nullptr) {
+		for (auto * bb : func_->getBlocks()) {
+			for (auto * inst : bb->getInstructions()) {
+				Value * def = nullptr;
+				if (auto * copy = dynamic_cast<CopyInst *>(inst)) {
+					def = copy->getDst() != nullptr ? copy->getDst() : static_cast<Value *>(copy);
+				} else if (inst->hasResultValue()) {
+					def = inst;
+				}
+				if (def == nullptr) {
+					continue;
+				}
+				while (representative_.find(def) != representative_.end()) {
+					def = representative_[def];
+				}
+				if (def == src || def == dst) {
+					auto pit = instNumbering.find(inst);
+					if (pit != instNumbering.end()) {
+						benignPositions.insert(pit->second);
+					}
+				}
+			}
+		}
+	}
+
+	// 精确段重叠判定：copy 与两地址 op 的 def 周期重叠恒为单拍 [p,p+1)，
+	// 且 p 是 src/dst 的定义点。任何长度 >1 的重叠都意味着二者多拍共存=真干涉；
+	// 单拍重叠也仅当落在定义点时才属伪干涉。这样既能合并累加器，又不会被
+	// 连续定义点误判放过真正的共存
+	for (const auto & a : sIt->second) {
+		for (const auto & b : dIt->second) {
+			const int os = std::max(a.start, b.start);
+			const int oe = std::min(a.end, b.end);
+			if (os >= oe) {
+				continue;
+			}
+			if (oe - os > 1 || benignPositions.find(os) == benignPositions.end()) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 /// @brief 执行一次合并：将度数大者的 Segment/usePositions 合入度数小者的区间
@@ -203,6 +258,13 @@ void RegCoalescer::mergeIntervals(Value * src, Value * dst,
 	// 在 valueToInterval 中将 fromVal 映射到 toIdx
 	valueToInterval[fromVal] = toIdx;
 
+	// 精确段同步并入代表，供同一轮内后续 copy 的精确干涉判断使用
+	auto fromSegIt = preciseSegments_.find(fromVal);
+	if (fromSegIt != preciseSegments_.end()) {
+		auto & toSegs = preciseSegments_[toVal];
+		toSegs.insert(toSegs.end(), fromSegIt->second.begin(), fromSegIt->second.end());
+	}
+
 	// 将 from 区间标记为无效
 	from->vreg = nullptr;
 
@@ -244,7 +306,8 @@ void RegCoalescer::run(std::vector<LiveInterval *> & intervals,
                        InterferenceGraph *& graph,
                        Function * func,
                        std::unordered_map<Value *, int> & valueToInterval,
-                       const std::map<Instruction *, int> & instNumbering)
+                       const std::map<Instruction *, int> & instNumbering,
+                       const std::unordered_map<Value *, std::vector<Segment>> & preciseSegments)
 {
 	if (!enabled_) {
 		return;
@@ -254,6 +317,8 @@ void RegCoalescer::run(std::vector<LiveInterval *> & intervals,
 	// 当前函数的 copy 图重新开始，避免上一函数的代表映射泄漏进来。
 	eliminatedCopies_.clear();
 	representative_.clear();
+	func_ = func;
+	preciseSegments_ = preciseSegments;
 
 	// 迭代合并直到无新合并发生
 	bool changed = true;

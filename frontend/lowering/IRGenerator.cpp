@@ -85,7 +85,7 @@ Type * getArrayScalarType(Type * type)
     return type;
 }
 
-constexpr std::size_t kFlatZeroInitThreshold = 256;
+constexpr std::size_t kFlatZeroInitThreshold = 4;
 
 std::vector<int32_t> packStringLiteralWords(const std::string & text)
 {
@@ -1157,7 +1157,11 @@ std::size_t IRGenerator::countScalarSlots(Type * type) const
 
 bool IRGenerator::emitFlatLoopZeroInitializer(Value * addr, Type * type)
 {
-    std::size_t scalarCount = countScalarSlots(type);
+    return emitFlatLoopZeroSlots(addr, type, countScalarSlots(type));
+}
+
+bool IRGenerator::emitFlatLoopZeroSlots(Value * addr, Type * type, std::size_t scalarCount)
+{
     if (scalarCount == 0 || scalarCount > static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
         minic_log(LOG_ERROR, "数组零初始化规模超出支持范围");
         return false;
@@ -1276,6 +1280,14 @@ bool IRGenerator::emitArrayInitializer(
         }
 
         if (cursor >= end) {
+            // 部分初始化场景下，剩余元素若总标量数达到阈值则改为发射扁平循环批量清零，
+            // 让后端循环展开/LSR 把基址计算合并为链式 addi，消除每元素独立寻址带来的指令膨胀
+            std::size_t remainingElements =
+                static_cast<std::size_t>(arrayType->getNumElements()) - static_cast<std::size_t>(i);
+            std::size_t remainingSlots = remainingElements * subScalarCount;
+            if (remainingSlots >= kFlatZeroInitThreshold) {
+                return emitFlatLoopZeroSlots(elemAddr, elemType, remainingSlots);
+            }
             if (!emitZeroInitializer(elemAddr, elemType)) {
                 return false;
             }
@@ -1391,6 +1403,11 @@ bool IRGenerator::emitInitializer(Value * addr, Type * type, ast_node * initNode
         }
 
         if (initNode->node_type == ast_operator_type::AST_OP_INIT_LIST) {
+            // 空初始化列表 `{}` 直接走零初始化快路径：避免 emitArrayInitializer
+            // 内部为每个元素生成独立 GEP+store，丧失批量循环展开/LSR 优化机会
+            if (initNode->sons.empty()) {
+                return emitZeroInitializer(addr, type);
+            }
             return emitArrayInitializer(addr, type, initNode->sons, 0, initNode->sons.size());
         }
 

@@ -378,6 +378,9 @@ bool isCommutativeOp(IRInstOperator op)
     switch (op) {
         case IRInstOperator::IRINST_OP_ADD_I:
         case IRInstOperator::IRINST_OP_MUL_I:
+        case IRInstOperator::IRINST_OP_AND_I:
+        case IRInstOperator::IRINST_OP_OR_I:
+        case IRInstOperator::IRINST_OP_XOR_I:
         case IRInstOperator::IRINST_OP_EQ_I:
         case IRInstOperator::IRINST_OP_NE_I:
         case IRInstOperator::IRINST_OP_EQ_F:

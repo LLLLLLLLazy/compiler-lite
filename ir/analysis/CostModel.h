@@ -76,14 +76,6 @@ int usableFPR();
 /// @brief 循环深度对应的热度权重(镜像溢出权重 pow(10, depth)，封顶防溢出)
 double loopDepthWeight(int depth);
 
-// ===================== 内联阈值查询(支持环境变量覆盖) =====================
-
-/// @brief 获取内联默认阈值(可通过 MINIC_INLINE_THRESHOLD 环境变量覆盖)
-int getInlineThreshold();
-
-/// @brief 获取热点调用点内联倍数(可通过 MINIC_INLINE_HOT_MULTIPLIER 环境变量覆盖)
-int getInlineHotMultiplier();
-
 // ===================== 阈值(调参中心) =====================
 
 // —— 向量化(LoopVectorize) ——
@@ -99,19 +91,6 @@ constexpr int kUnrollMaxLiveProduct = 256;  ///< (体内结果指令数 × tripC
 // —— if-conversion(PhiToSelect) ——
 constexpr int kSelectMaxSpeculatedInstCost = 6;   ///< 三角形结构中被提前投机执行的单条指令代价上限
 constexpr int kSelectMaxDiamondTotalCost = 12;    ///< diamond 两臂被无条件执行的非终结指令总代价上限
-
-// —— 函数内联(SmallFunctionInline) ——
-// 参考 GCC: max-inline-insns-single=70, max-inline-insns-auto=15, inline-min-speedup=30
-// 参考 LLVM: default threshold=225, hot multiplier=3x, OptSize=75
-constexpr int kInlineDefaultThreshold = 150;         ///< 默认内联成本阈值(加权成本，非指令数)
-constexpr int kInlineSmallThreshold = 25;            ///< 小函数自动内联阈值(对应 GCC auto=15)
-constexpr int kInlineHotMultiplier = 3;              ///< 热点调用点倍数(对应 LLVM 3x)
-constexpr int kInlineRecursiveThreshold = 400;       ///< 递归函数阈值(对应 GCC 450)
-constexpr int kInlineMaxBlocks = 15;                 ///< 最大基本块数(结构复杂度限制)
-constexpr int kInlineMaxParams = 8;                  ///< 最大参数数量
-constexpr int kInlineMaxAllocaBytes = 128;           ///< 最大 alloca 字节数
-constexpr int kInlineHotMaxAllocaBytes = 256;        ///< 热点最大 alloca 字节数
-constexpr int kInlineUnitGrowthPercent = 50;         ///< 函数体积增长上限百分比(对应 GCC 40)
 
 // —— cache 假设(供 footprint 估算；当前后端无真实 cache 模型) ——
 constexpr long kL1Bytes = 32 * 1024;

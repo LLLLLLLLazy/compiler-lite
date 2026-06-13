@@ -140,7 +140,7 @@ void GreedyRegAllocator::allocate(Function * func)
 		}
 	}
 	if (coalescer_) {
-		coalescer_->run(intervals, ig, func, valueToInterval, instNumbering);
+		coalescer_->run(intervals, ig, func, valueToInterval, instNumbering, analysis.getPreciseSegments());
 		refreshCoalescedLiveAcrossCallPositions();
 	}
 
