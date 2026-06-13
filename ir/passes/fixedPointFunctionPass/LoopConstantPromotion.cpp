@@ -162,12 +162,24 @@ bool LoopConstantPromotion::run()
             continue;
         }
 
-        // 第一遍扫描：统计循环体内每个可提升常量的出现次数
+        // 第一遍扫描：统计循环体内每个可提升常量的出现次数，
+        // 并记录被用作 div/mod 除数的常量——这类常量保持字面量才能让后端
+        // 把除法/取模强度削减为魔数乘法（远比省一次重物化划算），不予提升
         std::unordered_map<Value *, int32_t> useCounts;
+        std::unordered_set<Value *> divisorConstants;
         for (auto * bb : *loopBody) {
             for (auto * inst : bb->getInstructions()) {
                 if (!inst || inst->isDead()) {
                     continue;
+                }
+
+                if (auto * binary = dynamic_cast<BinaryInst *>(inst)) {
+                    const IRInstOperator op = binary->getOp();
+                    if (op == IRInstOperator::IRINST_OP_DIV_I || op == IRInstOperator::IRINST_OP_MOD_I) {
+                        if (dynamic_cast<ConstInteger *>(binary->getRHS()) != nullptr) {
+                            divisorConstants.insert(binary->getRHS());
+                        }
+                    }
                 }
 
                 for (auto * operand : inst->getOperandsValue()) {
@@ -184,6 +196,11 @@ bool LoopConstantPromotion::run()
         for (auto & [constant, count] : useCounts) {
             bool isFloatConst = dynamic_cast<ConstFloat *>(constant) != nullptr;
             if (isFloatConst ? count < 1 : count < 2) {
+                continue;
+            }
+
+            // 作 div/mod 除数的常量保持字面量，交给后端强度削减
+            if (divisorConstants.count(constant) > 0) {
                 continue;
             }
 
