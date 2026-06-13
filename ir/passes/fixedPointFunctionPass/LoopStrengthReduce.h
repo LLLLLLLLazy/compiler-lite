@@ -30,6 +30,12 @@ private:
                               BasicBlock * latch,
                               class ScalarEvolution & scev,
                               const std::unordered_set<BasicBlock *> & loopBody);
+    /// @brief 将 gep(指针IV基址, 0, 循环不变索引) 改写为折入不变列偏移的新指针 recurrence
+    bool reducePointerIVOffsetGEP(BasicBlock * header,
+                                  BasicBlock * preheader,
+                                  BasicBlock * latch,
+                                  class ScalarEvolution & scev,
+                                  const std::unordered_set<BasicBlock *> & loopBody);
     bool sweepDeadInstructions() const;
 
     Function * func = nullptr;

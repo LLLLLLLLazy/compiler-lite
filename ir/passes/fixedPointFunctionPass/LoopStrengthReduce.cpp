@@ -447,7 +447,10 @@ bool LoopStrengthReduce::tryReduceHeader(BasicBlock * header)
         return false;
     }
 
-    return reduceFirstCandidate(header, preheader, latch, scev, loopBody);
+    if (reduceFirstCandidate(header, preheader, latch, scev, loopBody)) {
+        return true;
+    }
+    return reducePointerIVOffsetGEP(header, preheader, latch, scev, loopBody);
 }
 
 bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
@@ -559,6 +562,139 @@ bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
         candidate.gep->replaceAllUseWith(replacement);
         candidate.gep->clearOperands();
         candidate.gep->setDead(true);
+    }
+
+    return true;
+}
+
+bool LoopStrengthReduce::reducePointerIVOffsetGEP(BasicBlock * header,
+                                                  BasicBlock * preheader,
+                                                  BasicBlock * latch,
+                                                  ScalarEvolution & scev,
+                                                  const std::unordered_set<BasicBlock *> & loopBody)
+{
+    auto & domTree = func->getAnalysisCache().getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+
+    // 寻找种子：下标式 gep(P, idx)，P 为本循环的指针型归纳 phi，idx 循环不变，结果为标量指针
+    GetElementPtrInst * seed = nullptr;
+    const ScalarEvolution::AddRecurrenceExpr * baseRec = nullptr;
+    for (auto * bb : func->getBlocks()) {
+        if (loopBody.find(bb) == loopBody.end()) {
+            continue;
+        }
+
+        for (auto * inst : bb->getInstructions()) {
+            auto * gep = dynamic_cast<GetElementPtrInst *>(inst);
+            // 种子必须是下标式 gep（decay=true，渲染为 ", i32 0, i32 idx"），
+            // 即从行数组基址按列索引取标量元素
+            if (!gep || gep->isDead() || !gep->isArrayDecayGEP()) {
+                continue;
+            }
+
+            // 列索引必须循环不变，且其定义支配 preheader（保证可在 preheader 重物化）
+            Value * index = gep->getIndexOperand();
+            if (!isLoopInvariantValue(index, loopBody) || !allUsesStayInLoop(gep, loopBody)) {
+                continue;
+            }
+            if (auto * indexInst = dynamic_cast<Instruction *>(index)) {
+                if (!indexInst->getParentBlock() || !domTree.dominates(indexInst->getParentBlock(), preheader)) {
+                    continue;
+                }
+            }
+
+            // 基址必须是本循环的指针型仿射递推
+            const auto * rec = scev.getAddRecurrence(gep->getBasePointer());
+            if (!rec || !rec->isPointerRecurrence() || rec->getLoopHeader() != header ||
+                rec->getPreheader() != preheader || rec->getLatch() != latch) {
+                continue;
+            }
+
+            // 结果必须是标量指针（int*/float*），避免多维数组步长换算的复杂性
+            auto * resultPtrType = dynamic_cast<PointerType *>(gep->getType());
+            if (!resultPtrType) {
+                continue;
+            }
+            const Type * pointee = resultPtrType->getPointeeType();
+            if (!pointee || !(pointee->isIntegerType() || pointee->isFloatType())) {
+                continue;
+            }
+
+            seed = gep;
+            baseRec = rec;
+            break;
+        }
+
+        if (seed) {
+            break;
+        }
+    }
+
+    if (!seed) {
+        return false;
+    }
+
+    // 取基址所指行数组的长度 N（[N x T]*），新指针 IV 每步前进 step*N 个元素
+    Value * basePtr = seed->getBasePointer();
+    auto * basePtrType = dynamic_cast<PointerType *>(basePtr->getType());
+    if (!basePtrType) {
+        return false;
+    }
+    const auto * rowArrayType = dynamic_cast<const ArrayType *>(basePtrType->getPointeeType());
+    if (!rowArrayType) {
+        return false;
+    }
+    const int64_t newStep = static_cast<int64_t>(baseRec->getStep()) * rowArrayType->getNumElements();
+    if (newStep <= 0 || newStep > std::numeric_limits<int32_t>::max()) {
+        return false;
+    }
+
+    Value * baseInit = baseRec->getStartValue();
+    if (!baseInit) {
+        return false;
+    }
+
+    Type * elemPtrType = seed->getType();
+    Value * invariantIndex = seed->getIndexOperand();
+
+    // 收集所有同基址、同不变索引的下标式 gep，可被同一新指针 IV 覆盖
+    std::vector<GetElementPtrInst *> targets;
+    for (auto * bb : func->getBlocks()) {
+        if (loopBody.find(bb) == loopBody.end()) {
+            continue;
+        }
+
+        for (auto * inst : bb->getInstructions()) {
+            auto * gep = dynamic_cast<GetElementPtrInst *>(inst);
+            if (!gep || gep->isDead() || !gep->isArrayDecayGEP()) {
+                continue;
+            }
+            if (gep->getBasePointer() == basePtr && gep->getIndexOperand() == invariantIndex &&
+                gep->getType() == elemPtrType && allUsesStayInLoop(gep, loopBody)) {
+                targets.push_back(gep);
+            }
+        }
+    }
+    if (targets.empty()) {
+        return false;
+    }
+
+    // 新指针 IV：init = gep(baseInit, 0, idx)（下标式 decay=true，得 T*，把不变列偏移折入起点），
+    //            step = gep(ptrPhi, step*N)（指针式 decay=false，前进一行）
+    auto * initPtr = new GetElementPtrInst(func, baseInit, invariantIndex, elemPtrType, true);
+    auto * ptrPhi = new PhiInst(func, elemPtrType);
+    auto * stepValue = mod->newConstInteger(seed->getIndexOperand()->getType(), static_cast<int32_t>(newStep));
+    auto * nextPtr = new GetElementPtrInst(func, ptrPhi, stepValue, elemPtrType, false);
+
+    insertBeforeTerminator(preheader, initPtr);
+    insertPhiAtHeader(header, ptrPhi);
+    insertBeforeTerminator(latch, nextPtr);
+    ptrPhi->addIncoming(initPtr, preheader);
+    ptrPhi->addIncoming(nextPtr, latch);
+
+    for (auto * gep : targets) {
+        gep->replaceAllUseWith(ptrPhi);
+        gep->clearOperands();
+        gep->setDead(true);
     }
 
     return true;
