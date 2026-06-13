@@ -14,10 +14,11 @@
 #include <utility>
 #include <vector>
 
+#include "LiveInterval.h"
+
 class Function;
 class Instruction;
 class InterferenceGraph;
-class LiveInterval;
 class Value;
 
 /// @brief 寄存器合并器
@@ -34,11 +35,13 @@ public:
 	/// @param func 当前函数（用于遍历 copy 指令）
 	/// @param valueToInterval Value* -> interval 索引映射（输入输出）
 	/// @param instNumbering 指令编号映射，用于判断copy位置的伪干涉是否可忽略
+	/// @param preciseSegments 保守循环扩展前的精确活跃区间段（用于 hole-aware 干涉判断）
 	void run(std::vector<LiveInterval *> & intervals,
 	         InterferenceGraph *& graph,
 	         Function * func,
 	         std::unordered_map<Value *, int> & valueToInterval,
-	         const std::map<Instruction *, int> & instNumbering);
+	         const std::map<Instruction *, int> & instNumbering,
+	         const std::unordered_map<Value *, std::vector<Segment>> & preciseSegments);
 
 	/// @brief 获取被消除的 copy 指令集合
 	const std::unordered_set<Instruction *> & getEliminatedCopies() const
@@ -67,6 +70,15 @@ private:
 	                 Instruction * copyInst,
 	                 const std::map<Instruction *, int> & instNumbering);
 
+	/// @brief 基于精确区间判断 src/dst 是否真正干涉（hole-aware）
+	///
+	/// 用扩展前的精确活跃段判重叠，并把连接 src/dst 两个合并类的所有 copy 指令
+	/// 那一拍的重叠视为伪干涉排除。循环累加器 header phi 与 merge 值仅在这些
+	/// copy 点重叠，故精确判断下不干涉、可安全合并
+	/// @return true 表示真正干涉（不可合并）
+	bool preciseInterferes(Value * src, Value * dst,
+	                       const std::map<Instruction *, int> & instNumbering);
+
 	/// @brief 执行一次合并：将 src 和 dst 的区间合并，消除 copy
 	void mergeIntervals(Value * src, Value * dst,
 	                    std::vector<LiveInterval *> & intervals,
@@ -79,4 +91,6 @@ private:
 	bool enabled_;                                              ///< 是否启用寄存器合并
 	std::unordered_set<Instruction *> eliminatedCopies_;       ///< 被消除的copy指令集合
 	std::unordered_map<Value *, Value *> representative_;      ///< 合并后的代表映射：alias -> representative
+	Function * func_ = nullptr;                                ///< 当前函数（精确干涉需扫描 copy）
+	std::unordered_map<Value *, std::vector<Segment>> preciseSegments_; ///< 精确活跃段（合并时同步并入代表）
 };
