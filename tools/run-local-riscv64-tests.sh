@@ -318,6 +318,10 @@ run_riscv64_check() {
 	if [[ "${is_perf_test}" == "1" ]]; then
 		opt_level="1"
 	fi
+	# 允许通过环境变量覆盖功能测试的优化级别，便于本地验证 -O1 下的正确性
+	if [[ "${is_perf_test}" != "1" && -n "${MINIC_FUNC_OPT_LEVEL:-}" ]]; then
+		opt_level="${MINIC_FUNC_OPT_LEVEL}"
+	fi
 
 	# compile
 	t0=$(date +%s%N)

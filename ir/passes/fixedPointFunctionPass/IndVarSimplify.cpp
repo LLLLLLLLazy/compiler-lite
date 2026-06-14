@@ -239,18 +239,15 @@ bool IndVarSimplify::trySimplifyHeader(BasicBlock * header, ScalarEvolution & sc
     if (loop.hasConstTripCount) {
         endIndex = loop.tripCount * candidateIndexStep;
     } else {
-        // tripCount = (bound - start + step - 1) / step  (向上取整)
-        // 对于 slt: tripCount = max(0, ceil((bound - start) / step))
-        // 这里保守地使用 bound - start，当 step=1 且 start=0 时精确
-        if (loop.recurrence && loop.recurrence->getStep() == 1 && loop.hasConstInitialValue
-            && loop.initialIntValue == 0) {
-            // tripCount = bound (因为 start=0, step=1, slt 比较)
-            // 需要 boundValue 可用
-            if (!loop.boundValue) {
-                return false;
-            }
-        } else {
-            return false; // 复杂情况暂不处理
+        // 非常量上界：仅处理 start=0、step=1 的递增循环，且比较谓词为 < 或 <=
+        // 此时 tripCount = bound（<）或 bound+1（<=），见下方 endPtr 构造
+        if (!loop.recurrence || loop.recurrence->getStep() != 1 || !loop.hasConstInitialValue
+            || loop.initialIntValue != 0 || !loop.boundValue) {
+            return false;
+        }
+        if (loop.compareKind != ScalarEvolution::CompareKind::LessThan
+            && loop.compareKind != ScalarEvolution::CompareKind::LessEqual) {
+            return false; // 其他比较谓词暂不处理
         }
     }
 
@@ -268,15 +265,24 @@ bool IndVarSimplify::trySimplifyHeader(BasicBlock * header, ScalarEvolution & sc
                                         latchGEPType->getType(), false);
     } else {
         // boundValue 是循环上界，start=0, step=1
-        // tripCount = boundValue
-        // endPtr = GEP(start, boundValue * candidateIndexStep)
-        Value * endIdx = loop.boundValue;
+        // tripCount = boundValue（<）或 boundValue+1（<=）
+        // endPtr = GEP(start, tripCount * candidateIndexStep)
+        Value * tripCountVal = loop.boundValue;
+        if (loop.compareKind == ScalarEvolution::CompareKind::LessEqual) {
+            auto * oneConst = mod->newConstInteger(loop.boundValue->getType(), 1);
+            auto * addOne = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I,
+                                           loop.boundValue, oneConst,
+                                           loop.boundValue->getType());
+            insertBeforeTerminator(loop.preheader, addOne);
+            tripCountVal = addOne;
+        }
+        Value * endIdx = tripCountVal;
         if (candidateIndexStep != 1) {
             auto * stepConst = mod->newConstInteger(
-                latchGEPType->getIndexOperand()->getType(), candidateIndexStep);
+                tripCountVal->getType(), candidateIndexStep);
             auto * mul = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I,
-                                        loop.boundValue, stepConst,
-                                        loop.boundValue->getType());
+                                        tripCountVal, stepConst,
+                                        tripCountVal->getType());
             insertBeforeTerminator(loop.preheader, mul);
             endIdx = mul;
         }

@@ -16,6 +16,7 @@
 class BasicBlock;
 class Function;
 class Module;
+class LoopInfo;
 
 class RemoveEmptyLoop {
 
@@ -32,8 +33,9 @@ public:
 private:
     /// @brief 尝试删除以 header 为头的循环
     /// @param header 循环头基本块
+    /// @param loopInfo 当前函数的循环信息（由调用方构建并复用）
     /// @return true 表示成功删除该循环
-    bool tryRemoveLoop(BasicBlock * header);
+    bool tryRemoveLoop(BasicBlock * header, const LoopInfo & loopInfo);
 
     /// @brief 判断循环体是否无副作用且出口无依赖
     /// @param header 循环头
