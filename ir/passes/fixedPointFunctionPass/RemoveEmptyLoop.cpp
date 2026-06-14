@@ -77,7 +77,10 @@ bool hasSideEffect(Instruction * inst, FunctionSideEffectAnalysis & sideEffects)
     if (!inst) {
         return false;
     }
-    if (inst->mayHaveSideEffects() && !dynamic_cast<CallInst *>(inst)) {
+    // mayHaveSideEffects() 把 terminator 也算作副作用（控制流变化），但空循环消除
+    // 本就要连同回边/分支一起删除，循环体里的 terminator 不应阻止删除；这里仅借
+    // 它捕获 VSTORE 等真正写内存的指令，故显式排除 terminator 与 call
+    if (inst->mayHaveSideEffects() && !inst->isTerminator() && !dynamic_cast<CallInst *>(inst)) {
         return true;
     }
     if (dynamic_cast<StoreInst *>(inst) != nullptr) {
