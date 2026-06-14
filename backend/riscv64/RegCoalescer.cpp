@@ -272,6 +272,14 @@ bool RegCoalescer::spansCarriedHole(const std::vector<Value *> & holedMembers,
 		if (precIt == originalPrecise_.end()) {
 			continue;
 		}
+		// 只有被多次定义（回边重定义）的值才可能产生回边携带空洞——旧值经回边
+		// 续命而精确段在前向路径留洞。单定义值（循环不变量、i-1 之类）的空洞只会
+		// 是菱形分支边界或布局间隙（同值或确已死），并非携带，跨越它合并安全。
+		// 据此放行单定义 owner，避免误伤递归/菱形里的合并（如 knapsack 的 i-1）
+		auto defIt = defPositions_.find(owner);
+		if (defIt == defPositions_.end() || defIt->second.size() < 2) {
+			continue;
+		}
 		const std::vector<Segment> ownSegs = normalizeSegments(precIt->second);
 		if (ownSegs.size() < 2) {
 			continue; // 该成员自身无空洞
@@ -279,8 +287,6 @@ bool RegCoalescer::spansCarriedHole(const std::vector<Value *> & holedMembers,
 		auto consIt = conservativeSegments_.find(owner);
 		const std::vector<Segment> & ownCons =
 			consIt != conservativeSegments_.end() ? consIt->second : precIt->second;
-
-		auto defIt = defPositions_.find(owner);
 
 		// 逐个空洞（该成员自身相邻极大段之间的间隙）检查 spanner 段的插入方式
 		for (size_t i = 0; i + 1 < ownSegs.size(); ++i) {
@@ -291,7 +297,7 @@ bool RegCoalescer::spansCarriedHole(const std::vector<Value *> & holedMembers,
 			}
 			// 空洞末端是该值的新定义点：空洞前的旧值确已死亡，寄存器空闲，
 			// 保守扩展只是反向多填了定义点前的循环体，并非回边携带，可放行
-			if (defIt != defPositions_.end() && defIt->second.count(gapEnd) > 0) {
+			if (defIt->second.count(gapEnd) > 0) {
 				continue;
 			}
 			for (const auto & sp : spannerSegs) {
