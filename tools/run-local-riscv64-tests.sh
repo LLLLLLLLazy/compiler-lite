@@ -322,6 +322,10 @@ run_riscv64_check() {
 	if [[ "${is_perf_test}" != "1" && -n "${MINIC_FUNC_OPT_LEVEL:-}" ]]; then
 		opt_level="${MINIC_FUNC_OPT_LEVEL}"
 	fi
+	# MINIC_RISCV64_OPT_LEVEL 可覆盖所有测试的优化级别（功能测试和性能测试均生效），优先级最高
+	if [[ -n "${MINIC_RISCV64_OPT_LEVEL:-}" ]]; then
+		opt_level="${MINIC_RISCV64_OPT_LEVEL}"
+	fi
 
 	# compile
 	t0=$(date +%s%N)

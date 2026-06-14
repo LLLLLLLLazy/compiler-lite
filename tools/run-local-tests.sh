@@ -298,10 +298,11 @@ run_asm_check() {
     local compile_err_file="${TMP_DIR}/${testcase}.compile.err"
     local link_err_file="${TMP_DIR}/${testcase}.link.err"
     local exit_code=0
+    local asm_opt_level="${MINIC_ASM_OPT_LEVEL:-1}"
     source_name=$(basename "${cfile}")
 
     if ! timeout --foreground "${TEST_TIMEOUT}" \
-        "${MINIC_BIN}" -S "${compiler_args[@]}" -O1 -t "${ASM_TARGET}" -o "${asmfile}" "${cfile}" >/dev/null 2>"${compile_err_file}"; then
+        "${MINIC_BIN}" -S "${compiler_args[@]}" -O"${asm_opt_level}" -t "${ASM_TARGET}" -o "${asmfile}" "${cfile}" >/dev/null 2>"${compile_err_file}"; then
         echo "${source_name} compile NG [asm]"
         echo "  [compile stderr]"
         sed 's/^/    /' "${compile_err_file}"
