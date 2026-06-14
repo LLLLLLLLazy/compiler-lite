@@ -79,6 +79,20 @@ private:
 	bool preciseInterferes(Value * src, Value * dst,
 	                       const std::map<Instruction *, int> & instNumbering);
 
+	/// @brief 回边携带空洞守卫：判断 spanner 是否跨越 holed 类某原始成员的回边携带空洞
+	///
+	/// 逐原始成员判定：成员自身的精确段在循环回边处会留下空洞（被携带值实际仍
+	/// 活跃，保守扩展段能覆盖）。若 spanner 以“外来”方式（只贴空洞一端，非接力
+	/// 两侧）插入某成员自身的空洞，且该成员的保守扩展段覆盖被插入区段，则二者
+	/// 真正干涉。逐成员（而非合并类并集）判定可避免把两个不同成员之间的良性间隙
+	/// 误判为携带空洞而过度阻止合并。接力（carrier，跨越空洞两端）属累加器在空洞
+	/// 上传递值的良性形态，已被主重叠循环按定义点单拍伪干涉放行
+	/// @param holedMembers holed 合并类的全部原始成员
+	/// @param spannerSegs spanner 合并类的精确段并集
+	/// @return true 表示存在外来跨越真干涉
+	bool spansCarriedHole(const std::vector<Value *> & holedMembers,
+	                      const std::vector<Segment> & spannerSegs) const;
+
 	/// @brief 执行一次合并：将 src 和 dst 的区间合并，消除 copy
 	void mergeIntervals(Value * src, Value * dst,
 	                    std::vector<LiveInterval *> & intervals,
@@ -93,4 +107,8 @@ private:
 	std::unordered_map<Value *, Value *> representative_;      ///< 合并后的代表映射：alias -> representative
 	Function * func_ = nullptr;                                ///< 当前函数（精确干涉需扫描 copy）
 	std::unordered_map<Value *, std::vector<Segment>> preciseSegments_; ///< 精确活跃段（合并时同步并入代表）
+	std::unordered_map<Value *, std::vector<Segment>> originalPrecise_; ///< 每个原始值自身的精确段（不随合并改变），用于逐来源判回边携带空洞
+	std::unordered_map<Value *, std::vector<Segment>> conservativeSegments_; ///< 每个原始值的保守循环扩展段（不随合并改变），用于回边携带判定
+	std::unordered_map<Value *, std::vector<Value *>> classMembers_; ///< 代表 -> 该合并类的全部原始成员
+	std::unordered_map<Value *, std::unordered_set<int>> defPositions_; ///< 每个原始值的定义点编号集合，用于区分回边携带与新定义
 };

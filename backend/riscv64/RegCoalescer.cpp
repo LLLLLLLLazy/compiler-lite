@@ -58,6 +58,44 @@ bool isLocalComputedSource(Value * src, Instruction * copyInst)
 	       srcInst->getParentBlock() != nullptr && srcInst->getParentBlock() == copyInst->getParentBlock();
 }
 
+/// @brief 将一组可能重叠/乱序的段归并为升序的极大段集合
+/// @param raw 原始段（精确段在合并后可能重复/重叠）
+/// @return 升序、互不相邻重叠的极大段
+std::vector<Segment> normalizeSegments(const std::vector<Segment> & raw)
+{
+	std::vector<Segment> segs = raw;
+	std::sort(segs.begin(), segs.end(), [](const Segment & a, const Segment & b) {
+		return a.start < b.start;
+	});
+	std::vector<Segment> merged;
+	for (const auto & s : segs) {
+		if (s.start >= s.end) {
+			continue;
+		}
+		if (!merged.empty() && s.start <= merged.back().end) {
+			merged.back().end = std::max(merged.back().end, s.end);
+		} else {
+			merged.push_back(s);
+		}
+	}
+	return merged;
+}
+
+/// @brief 判断段集合是否与区间 [lo,hi) 有任何重叠
+/// @param segs 段集合
+/// @param lo 区间下界（含）
+/// @param hi 区间上界（不含）
+/// @return 任一段与 [lo,hi) 相交则返回 true
+bool overlapsRange(const std::vector<Segment> & segs, int lo, int hi)
+{
+	for (const auto & s : segs) {
+		if (std::max(s.start, lo) < std::min(s.end, hi)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 int registerClassOf(Type * type)
 {
 	if (type == nullptr) {
@@ -207,6 +245,75 @@ bool RegCoalescer::preciseInterferes(Value * src, Value * dst,
 			}
 		}
 	}
+
+	// 回边携带空洞守卫：精确段在循环回边处会留下空洞（被携带值实际仍活跃，
+	// 保守扩展段能覆盖）。若另一类外来跨越该空洞，二者真干涉，但被空洞掩盖。
+	// 这是 5e406a0 错误合并不同循环变量（如 calculator 的 c 与 ii）的根因。
+	// 逐原始成员判定（而非合并类并集），避免把两个不同成员之间的良性间隙误判
+	auto srcMemIt = classMembers_.find(src);
+	auto dstMemIt = classMembers_.find(dst);
+	static const std::vector<Value *> kEmptyMembers;
+	const std::vector<Value *> & srcMembers = srcMemIt != classMembers_.end() ? srcMemIt->second : kEmptyMembers;
+	const std::vector<Value *> & dstMembers = dstMemIt != classMembers_.end() ? dstMemIt->second : kEmptyMembers;
+	if (spansCarriedHole(srcMembers, dIt->second) ||
+	    spansCarriedHole(dstMembers, sIt->second)) {
+		return true;
+	}
+
+	return false;
+}
+
+/// @brief 回边携带空洞守卫的实现（逐原始成员）
+bool RegCoalescer::spansCarriedHole(const std::vector<Value *> & holedMembers,
+                                    const std::vector<Segment> & spannerSegs) const
+{
+	for (Value * owner : holedMembers) {
+		auto precIt = originalPrecise_.find(owner);
+		if (precIt == originalPrecise_.end()) {
+			continue;
+		}
+		const std::vector<Segment> ownSegs = normalizeSegments(precIt->second);
+		if (ownSegs.size() < 2) {
+			continue; // 该成员自身无空洞
+		}
+		auto consIt = conservativeSegments_.find(owner);
+		const std::vector<Segment> & ownCons =
+			consIt != conservativeSegments_.end() ? consIt->second : precIt->second;
+
+		auto defIt = defPositions_.find(owner);
+
+		// 逐个空洞（该成员自身相邻极大段之间的间隙）检查 spanner 段的插入方式
+		for (size_t i = 0; i + 1 < ownSegs.size(); ++i) {
+			const int gapStart = ownSegs[i].end;
+			const int gapEnd = ownSegs[i + 1].start;
+			if (gapStart >= gapEnd) {
+				continue;
+			}
+			// 空洞末端是该值的新定义点：空洞前的旧值确已死亡，寄存器空闲，
+			// 保守扩展只是反向多填了定义点前的循环体，并非回边携带，可放行
+			if (defIt != defPositions_.end() && defIt->second.count(gapEnd) > 0) {
+				continue;
+			}
+			for (const auto & sp : spannerSegs) {
+				const int os = std::max(sp.start, gapStart);
+				const int oe = std::min(sp.end, gapEnd);
+				if (os >= oe) {
+					continue; // 不插入此空洞
+				}
+				// 接力（carrier）：spanner 跨越空洞两端，与两侧 holed 段在定义点
+				// 接力传值（累加器形态）。其两侧重叠已被主重叠循环按伪干涉放行
+				if (sp.start < gapStart && sp.end > gapEnd) {
+					continue;
+				}
+				// 外来（foreign）跨越：仅当该成员的保守扩展段覆盖被插入区段（即
+				// 空洞是回边携带、成员实际活跃）时才判真干涉。否则空洞是菱形分支
+				// 死区，寄存器确实空闲，可安全放行
+				if (overlapsRange(ownCons, os, oe)) {
+					return true;
+				}
+			}
+		}
+	}
 	return false;
 }
 
@@ -265,6 +372,14 @@ void RegCoalescer::mergeIntervals(Value * src, Value * dst,
 		toSegs.insert(toSegs.end(), fromSegIt->second.begin(), fromSegIt->second.end());
 	}
 
+	// 合并类成员集合同步并入代表，回边携带判定需逐原始成员检查（用各自的
+	// originalPrecise_/conservativeSegments_），故只并成员列表、不并段数据
+	auto fromMemIt = classMembers_.find(fromVal);
+	if (fromMemIt != classMembers_.end()) {
+		auto & toMem = classMembers_[toVal];
+		toMem.insert(toMem.end(), fromMemIt->second.begin(), fromMemIt->second.end());
+	}
+
 	// 将 from 区间标记为无效
 	from->vreg = nullptr;
 
@@ -319,6 +434,47 @@ void RegCoalescer::run(std::vector<LiveInterval *> & intervals,
 	representative_.clear();
 	func_ = func;
 	preciseSegments_ = preciseSegments;
+	originalPrecise_ = preciseSegments;
+
+	// 快照每个原始值的保守循环扩展段（合并前），用于回边携带判定：
+	// 精确段在循环回边处会留下空洞（被携带值实际仍活跃），保守段能覆盖这类空洞。
+	// 这里按原始值保存、不随合并并入代表，便于逐来源精确判定携带空洞。
+	// 同时初始化每个值的合并类成员集合（初始为自身单元素）。
+	conservativeSegments_.clear();
+	classMembers_.clear();
+	for (const auto & [val, idx] : valueToInterval) {
+		classMembers_[val] = {val};
+		if (idx >= 0 && idx < static_cast<int>(intervals.size()) && intervals[idx] != nullptr) {
+			auto & dst = conservativeSegments_[val];
+			for (const auto & seg : intervals[idx]->getSegments()) {
+				dst.push_back(seg);
+			}
+		}
+	}
+
+	// 记录每个原始值的定义点编号。回边携带空洞守卫据此区分：空洞末端 gapEnd 若是
+	// 该值的新定义，则空洞前的旧值确实已死、寄存器空闲（保守扩展只是反向多填了
+	// 定义点之前的循环体），可安全放行；若 gapEnd 非定义（live-in 续命），才是回边携带
+	defPositions_.clear();
+	if (func != nullptr) {
+		for (auto * bb : func->getBlocks()) {
+			for (auto * inst : bb->getInstructions()) {
+				Value * def = nullptr;
+				if (auto * copy = dynamic_cast<CopyInst *>(inst)) {
+					def = copy->getDst() != nullptr ? copy->getDst() : static_cast<Value *>(copy);
+				} else if (inst->hasResultValue()) {
+					def = inst;
+				}
+				if (def == nullptr) {
+					continue;
+				}
+				auto pit = instNumbering.find(inst);
+				if (pit != instNumbering.end()) {
+					defPositions_[def].insert(pit->second);
+				}
+			}
+		}
+	}
 
 	// 迭代合并直到无新合并发生
 	bool changed = true;
