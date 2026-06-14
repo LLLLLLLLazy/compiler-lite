@@ -36,6 +36,8 @@ struct MarkState {
     std::deque<Instruction *> instWorklist;
     std::deque<BasicBlock *> controlWorklist;
     BlockSet queuedControlBlocks;
+    /// 每个基本块控制依赖的分支块集合，即该块位于这些分支块的后支配边界上
+    std::unordered_map<BasicBlock *, std::vector<BasicBlock *>> controlDeps;
 };
 
 /// @brief 收集一个基本块的去重后继列表
@@ -120,33 +122,43 @@ void markInstructionLive(MarkState & state, Instruction * inst)
     }
 }
 
-/// @brief 判断条件跳转是否控制了指定活块的可达性
-/// @param branchBlock 候选分支所在基本块
-/// @param liveBlock 已知活块
-/// @param postDomTree 后支配树
-/// @return true 表示 liveBlock 对 branchBlock 存在控制依赖
-bool controlsLiveBlock(BasicBlock * branchBlock, BasicBlock * liveBlock, const PostDominatorTree & postDomTree)
+/// @brief 预计算每个基本块的控制依赖来源（后支配边界）
+/// @param state Mark 状态
+///
+/// 采用 Cytron 等人的支配边界算法在逆向 CFG 上的对偶形式：
+/// 逆向 CFG 中的汇合点即原 CFG 中拥有多个后继的分支块；对每个这样的分支块 @c branch，
+/// 从其各后继沿后支配树 idom 链向上回溯，直到 @c branch 的直接后支配者，
+/// 沿途每个块 @c X 都控制依赖于 @c branch（即 @c branch 在 @c X 的后支配边界上）。
+/// 这样把原先 O(B²) 的逐块后支配查询替换为一次 O(B + 边界规模) 的预计算
+void buildControlDependence(MarkState & state)
 {
-    if (!branchBlock || !liveBlock) {
-        return false;
+    if (!state.func || !state.postDomTree) {
+        return;
     }
 
-    auto * condBranch = dynamic_cast<CondBranchInst *>(branchBlock->getTerminator());
-    if (!condBranch) {
-        return false;
-    }
+    for (auto * branch : state.func->getBlocks()) {
+        auto succs = collectUniqueSuccessors(branch);
+        if (succs.size() < 2) {
+            continue; // 不是逆向 CFG 的汇合点（非分支块）
+        }
 
-    if (postDomTree.postDominates(liveBlock, branchBlock)) {
-        return false;
-    }
+        // 只关心条件跳转，与改写死分支阶段保持一致的语义
+        if (!dynamic_cast<CondBranchInst *>(branch->getTerminator())) {
+            continue;
+        }
 
-    for (auto * succ : collectUniqueSuccessors(branchBlock)) {
-        if (postDomTree.postDominates(liveBlock, succ)) {
-            return true;
+        BasicBlock * ipdom = state.postDomTree->getIPDom(branch);
+        for (auto * succ : succs) {
+            for (BasicBlock * runner = succ; runner != nullptr && runner != ipdom;) {
+                state.controlDeps[runner].push_back(branch);
+                BasicBlock * runnerIpdom = state.postDomTree->getIPDom(runner);
+                if (runnerIpdom == runner) {
+                    break; // 保护：idom 指回自身（通常是虚拟出口）时停止
+                }
+                runner = runnerIpdom;
+            }
         }
     }
-
-    return false;
 }
 
 /// @brief 沿 def-use 和控制依赖传播活指令
@@ -168,12 +180,13 @@ void runMark(MarkState & state)
             BasicBlock * liveBlock = state.controlWorklist.front();
             state.controlWorklist.pop_front();
 
-            for (auto * bb : state.func->getBlocks()) {
-                if (!state.postDomTree || !controlsLiveBlock(bb, liveBlock, *state.postDomTree)) {
-                    continue;
-                }
+            auto it = state.controlDeps.find(liveBlock);
+            if (it == state.controlDeps.end()) {
+                continue;
+            }
 
-                markInstructionLive(state, bb->getTerminator());
+            for (auto * branch : it->second) {
+                markInstructionLive(state, branch->getTerminator());
             }
         }
     }
@@ -377,6 +390,8 @@ bool DeadInstElim::run()
     MarkState state;
     state.func = func;
     state.postDomTree = &postDomTree;
+
+    buildControlDependence(state);
 
     for (auto * bb : func->getBlocks()) {
         for (auto * inst : bb->getInstructions()) {

@@ -502,6 +502,19 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
     // 复制一份循环体集合，避免依赖临时分析对象的生命周期
     const std::unordered_set<BasicBlock *> loopBody = *loopBodyPtr;
 
+    // 循环必须单出口：除循环头的计数判定外，循环体内不得存在其他跳出循环的边
+    // （例如 break）。否则真实迭代次数不等于规范计数 trip，闭式替换会得到错误结果
+    for (auto * bb : loopBody) {
+        if (bb == header) {
+            continue;
+        }
+        for (auto * succ : bb->getSuccessors()) {
+            if (loopBody.find(succ) == loopBody.end()) {
+                return false; // 存在额外出口，放弃改写
+            }
+        }
+    }
+
     // 收集头部所有候选 phi（排除归纳变量本身）
     std::vector<std::pair<PhiInst *, RecurrenceShape>> candidates;
     for (auto * inst : header->getInstructions()) {
