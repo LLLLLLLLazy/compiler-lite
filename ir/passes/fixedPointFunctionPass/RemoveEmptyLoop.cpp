@@ -74,6 +74,12 @@ BasicBlock * findUniquePreheader(BasicBlock * header, const std::unordered_set<B
 /// @return true 表示存在副作用
 bool hasSideEffect(Instruction * inst, FunctionSideEffectAnalysis & sideEffects)
 {
+    if (!inst) {
+        return false;
+    }
+    if (inst->mayHaveSideEffects() && !dynamic_cast<CallInst *>(inst)) {
+        return true;
+    }
     if (dynamic_cast<StoreInst *>(inst) != nullptr) {
         return true;
     }
