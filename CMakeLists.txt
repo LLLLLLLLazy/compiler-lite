@@ -285,6 +285,8 @@ set(IR_SRCS
 	ir/passes/modulePass/GlobalToLocal.cpp
 	ir/passes/modulePass/DeadFunctionElim.h
 	ir/passes/modulePass/DeadFunctionElim.cpp
+	ir/passes/modulePass/DeadGlobalStoreElim.h
+	ir/passes/modulePass/DeadGlobalStoreElim.cpp
 	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.h
 	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.cpp
 	ir/passes/fixedPointFunctionPass/UnreachableBlockElim.h
