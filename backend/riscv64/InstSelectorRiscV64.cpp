@@ -24,7 +24,6 @@
 #include "AllocaInst.h"
 #include "BasicBlock.h"
 #include "BinaryInst.h"
-#include "MulModInst.h"
 #include "BranchInst.h"
 #include "CallInst.h"
 #include "ConstFloat.h"
@@ -505,7 +504,6 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_MUL_I] = &InstSelectorRiscV64::translate_mul;
 	translatorHandlers[IRInstOperator::IRINST_OP_DIV_I] = &InstSelectorRiscV64::translate_div;
 	translatorHandlers[IRInstOperator::IRINST_OP_MOD_I] = &InstSelectorRiscV64::translate_mod;
-	translatorHandlers[IRInstOperator::IRINST_OP_MULMOD_I] = &InstSelectorRiscV64::translate_mulmod;
 	translatorHandlers[IRInstOperator::IRINST_OP_SHL_I] = &InstSelectorRiscV64::translate_shl;
 	translatorHandlers[IRInstOperator::IRINST_OP_ASHR_I] = &InstSelectorRiscV64::translate_ashr;
 	translatorHandlers[IRInstOperator::IRINST_OP_LSHR_I] = &InstSelectorRiscV64::translate_lshr;
@@ -1410,51 +1408,6 @@ void InstSelectorRiscV64::translate_mod(Instruction * inst)
 		return;
 	}
 	translate_binary(inst, "remw");
-}
-
-/// @brief 翻译宽乘取模指令 (i64)a*b % m
-///
-/// 两个 i32 操作数以有符号扩展形式驻留 64 位寄存器，用 64 位 mul 得到精确的
-/// 64 位积（调用点守卫保证 0<=a<m、b>=0，积非负且 < 2^61 不溢出），再对正常量
-/// 取有符号 64 位余数。余数落在 [0, m) 内，可直接当作已符号扩展的 i32 使用
-void InstSelectorRiscV64::translate_mulmod(Instruction * inst)
-{
-	auto * mulmod = dynamic_cast<MulModInst *>(inst);
-	if (mulmod == nullptr) {
-		return;
-	}
-	const int32_t modulus = mulmod->getModulus();
-
-	int dstReg = getResultReg(inst);
-	LocalTempManager::Lease dstLease;
-	if (dstReg < 0) {
-		dstLease = tempMgr.borrow(inst);
-		dstReg = dstLease.reg();
-	}
-
-	OperandReg lhs = loadOperand(mulmod->getA(), inst, dstReg);
-	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
-	OperandReg rhs = loadOperand(mulmod->getB(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
-
-	// 64 位无截断乘法
-	iloc.inst("mul",
-	          PlatformRiscV64::regName[dstReg],
-	          PlatformRiscV64::regName[lhs.reg],
-	          PlatformRiscV64::regName[rhs.reg]);
-
-	releaseOperand(rhs);
-	releaseOperand(lhs);
-
-	// 对常量取 64 位有符号余数
-	auto modTmp = tempMgr.borrowExcluding(inst, {dstReg});
-	iloc.load_imm(modTmp.reg(), modulus);
-	iloc.inst("rem",
-	          PlatformRiscV64::regName[dstReg],
-	          PlatformRiscV64::regName[dstReg],
-	          PlatformRiscV64::regName[modTmp.reg()]);
-	modTmp.release();
-
-	storeResult(inst, dstReg, inst);
 }
 
 /// @brief 翻译逻辑左移指令（shl）
