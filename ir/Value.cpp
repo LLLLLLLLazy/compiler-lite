@@ -10,9 +10,16 @@
 #include "Use.h"
 #include "User.h"
 
+namespace {
+/// 全局单调递增的 Value 创建计数器。单线程编译，无需同步。
+/// 按构造顺序分配，使同一份输入每次编译得到完全一致的 Value 序号，
+/// 供寄存器分配等阶段作确定性排序键，消除按指针地址迭代的非确定性
+uint64_t g_nextValueCreationId = 0;
+} // namespace
+
 /// @brief 构造一个 Value 对象
 /// @param _type 当前值的类型
-Value::Value(Type * _type) : type(_type)
+Value::Value(Type * _type) : type(_type), creationId(g_nextValueCreationId++)
 {}
 
 /// @brief 析构函数
