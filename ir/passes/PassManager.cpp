@@ -42,6 +42,7 @@
 #include "functionPass/PureCallCSE.h"
 #include "functionPass/TailRecursionElim.h"
 #include "modulePass/DeadFunctionElim.h"
+#include "modulePass/DeadGlobalStoreElim.h"
 #include "modulePass/GlobalToLocal.h"
 #include "modulePass/InterproceduralConstProp.h"
 #include "modulePass/SmallFunctionInline.h"
@@ -81,6 +82,14 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     // 使 GlobalToLocal 能将初始化型函数访问的全局内化到 main
     registerModulePass("DeadFunctionElim", [](Module * currentModule) {
         DeadFunctionElim pass(currentModule);
+        return pass.run();
+    });
+
+    // 死函数清除后，只写不读且地址不逃逸的全局（典型如仅初始化的全局数组）
+    // 上的 store 已无任何读者，消除之；此时尚未 Mem2Reg，删除 store 后其
+    // 地址 GEP 即成无用户死指令，交由下游 DeadInstElim 清扫
+    registerModulePass("DeadGlobalStoreElim", [](Module * currentModule) {
+        DeadGlobalStoreElim pass(currentModule);
         return pass.run();
     });
 
