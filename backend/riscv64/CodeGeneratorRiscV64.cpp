@@ -716,6 +716,12 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func, bool useFramePointer)
 			stackSlotCandidates.push_back(val);
 		}
 	}
+	// allocMap 是 unordered_map，按指针序迭代会让栈槽偏移每次编译都变（非确定性）。
+	// 改为按 Value 的创建序号这一确定性全序键排序（含已脱离 CFG 的残留指令也有
+	// 稳定序号），保证同一份 IR 每次生成完全相同的栈布局，使上板缓存生效
+	std::sort(stackSlotCandidates.begin(), stackSlotCandidates.end(), [](Value * lhs, Value * rhs) {
+		return lhs->getCreationId() < rhs->getCreationId();
+	});
 	for (auto * val : stackSlotCandidates) {
 		Value * representative = greedyAllocator.getCoalescedRepresentative(val);
 		if (representative != nullptr && representative != val) {

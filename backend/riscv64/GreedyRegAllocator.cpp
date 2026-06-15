@@ -124,6 +124,9 @@ void GreedyRegAllocator::allocate(Function * func)
 			callInstNumbers.push_back(num);
 		}
 	}
+	// instNumbering 是 std::map<Instruction*,int>，按指针序迭代得到的 callInstNumbers
+	// 顺序每次编译都不同，会影响分裂点选择等顺序敏感决策。按调用位置升序排序使其确定
+	std::sort(callInstNumbers.begin(), callInstNumbers.end());
 
 	// 建立活跃区间到索引的映射
 	auto & intervals = analysis.getIntervals();
