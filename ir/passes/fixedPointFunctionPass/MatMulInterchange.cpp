@@ -43,6 +43,7 @@ using CanonicalLoop = ScalarEvolution::CanonicalLoop;
 constexpr int32_t kMinTripCount = 16;   ///< 已知 trip count 低于此值不交换（额外控制流摊不开）
 constexpr int32_t kMinRowBytes = 64;    ///< 行宽不足一条 cache line 时列访问无明显惩罚
 constexpr int32_t kRegisterBlockCols = 8; ///< 原地 A=C*A 的标量回退路径一次累加的列数
+constexpr int32_t kConstantTailBlockCols = 8; ///< 常量后缀列和路径的标量列块，控制寄存器压力
 
 enum class RootKind {
     Unknown,
@@ -319,6 +320,16 @@ struct MatMulPattern {
     bool needGuard = false; // 运行期 j 上界需 guard Nj<=W 的双版本
 };
 
+struct OuterInPlaceContext {
+    PhiInst * zRowPhi = nullptr;
+    PhiInst * xRowPhi = nullptr;
+    BasicBlock * header = nullptr;
+    BasicBlock * preheader = nullptr;
+    BasicBlock * latch = nullptr;
+    Value * zStart = nullptr;
+    Value * xStart = nullptr;
+};
+
 /// @brief 取指针类型的指向类型
 const Type * pointeeOf(const Type * type)
 {
@@ -459,6 +470,152 @@ bool isFlatRowAlignedPointer(Value * value, const Type * elemPtrType, int32_t ro
 {
     std::unordered_set<Value *> visiting;
     return isFlatRowAlignedPointer(value, elemPtrType, rowWidth, visiting);
+}
+
+bool sameValue(Value * lhs, Value * rhs)
+{
+    if (lhs == rhs) {
+        return true;
+    }
+    auto * lhsConst = asConstInt(lhs);
+    auto * rhsConst = asConstInt(rhs);
+    return lhsConst && rhsConst && lhsConst->getVal() == rhsConst->getVal();
+}
+
+bool isZeroArrayDecayFrom(Value * value, Value * base)
+{
+    auto * gep = dynamic_cast<GetElementPtrInst *>(value);
+    auto * index = gep ? asConstInt(gep->getIndexOperand()) : nullptr;
+    return gep && gep->isArrayDecayGEP() && gep->getBasePointer() == base && index && index->getVal() == 0;
+}
+
+bool sameOrZeroDecay(Value * lhs, Value * rhs)
+{
+    return sameValue(lhs, rhs) || isZeroArrayDecayFrom(lhs, rhs) || isZeroArrayDecayFrom(rhs, lhs);
+}
+
+/// @brief 原地常量后缀折叠要求 Y 的外层行游标从矩阵首行开始并按整行步进。
+bool hasCanonicalInPlaceRowTraversal(const MatMulPattern & pat)
+{
+    if (!pat.inPlace || !pat.yUsesColumnCursor || !pat.yColumnPhi || !pat.yColumnAdvance ||
+        !pat.yBaseAtZero || pat.rowWidth <= 0) {
+        return false;
+    }
+
+    auto * step = asConstInt(pat.yColumnAdvance->getIndexOperand());
+    if (!step || step->getVal() != pat.rowWidth) {
+        return false;
+    }
+
+    if (!sameRoot(stripPointerRoot(pat.yBaseAtZero), pat.rootY)) {
+        return false;
+    }
+
+    if (pat.yBaseNeedMaterialize) {
+        return isRowAlignedPointer(pat.yBaseAtZero, pat.yBaseAtZero->getType());
+    }
+    return isFlatRowAlignedPointer(pat.yBaseAtZero, pat.elemPtrType, pat.rowWidth);
+}
+
+bool matchRowStepGEP(Value * value, PhiInst * phi, int32_t rowWidth)
+{
+    auto * gep = dynamic_cast<GetElementPtrInst *>(value);
+    auto * step = gep ? asConstInt(gep->getIndexOperand()) : nullptr;
+    return gep && !gep->isArrayDecayGEP() && gep->getBasePointer() == phi && step && step->getVal() == rowWidth;
+}
+
+bool getPhiIncomingFromBlock(PhiInst * phi, BasicBlock * block, Value *& value)
+{
+    value = nullptr;
+    if (!phi || !block) {
+        return false;
+    }
+    for (int32_t i = 0; i < phi->getIncomingCount(); ++i) {
+        if (phi->getIncomingBlock(i) == block) {
+            value = phi->getIncomingValue(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool matchOuterInPlaceContext(const MatMulPattern & pat, OuterInPlaceContext & ctx)
+{
+    auto * zPhi = dynamic_cast<PhiInst *>(pat.z.baseAtZero);
+    auto * xPhi = dynamic_cast<PhiInst *>(pat.x.baseAtZero);
+    if (!zPhi || !xPhi || zPhi->getParentBlock() != xPhi->getParentBlock() ||
+        zPhi->getIncomingCount() != 2 || xPhi->getIncomingCount() != 2) {
+        return false;
+    }
+
+    BasicBlock * preheader = nullptr;
+    BasicBlock * latch = nullptr;
+    Value * zStart = nullptr;
+    for (int32_t i = 0; i < zPhi->getIncomingCount(); ++i) {
+        Value * incoming = zPhi->getIncomingValue(i);
+        BasicBlock * block = zPhi->getIncomingBlock(i);
+        if (matchRowStepGEP(incoming, zPhi, pat.rowWidth)) {
+            if (latch) {
+                return false;
+            }
+            latch = block;
+        } else {
+            if (preheader) {
+                return false;
+            }
+            preheader = block;
+            zStart = incoming;
+        }
+    }
+
+    if (!preheader || !latch || !sameOrZeroDecay(zStart, pat.yBaseAtZero)) {
+        return false;
+    }
+
+    Value * xStart = nullptr;
+    Value * xLatch = nullptr;
+    if (!getPhiIncomingFromBlock(xPhi, preheader, xStart) ||
+        !getPhiIncomingFromBlock(xPhi, latch, xLatch) ||
+        !matchRowStepGEP(xLatch, xPhi, pat.rowWidth)) {
+        return false;
+    }
+
+    ctx.zRowPhi = zPhi;
+    ctx.xRowPhi = xPhi;
+    ctx.header = zPhi->getParentBlock();
+    ctx.preheader = preheader;
+    ctx.latch = latch;
+    ctx.zStart = zStart;
+    ctx.xStart = xStart;
+    return true;
+}
+
+bool needsRuntimeUpperBoundGuard(const CanonicalLoop & loop, int32_t rowWidth)
+{
+    return !loop.hasConstBoundValue || loop.boundIntValue > rowWidth;
+}
+
+bool staticallyExceedsRowWidth(const CanonicalLoop & loop, int32_t rowWidth)
+{
+    return loop.hasConstBoundValue && loop.boundIntValue > rowWidth;
+}
+
+void addBoundsGuard(Function * func,
+                    Module * mod,
+                    BasicBlock * guard,
+                    Value * bound,
+                    int32_t rowWidth,
+                    BasicBlock * trueTarget,
+                    BasicBlock * falseTarget,
+                    Type * cmpType)
+{
+    auto * limit = mod->newConstInt32(rowWidth);
+    auto * cmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LE_I, bound, limit, cmpType);
+    auto * br = new CondBranchInst(func, cmp, trueTarget, falseTarget);
+    guard->addInstruction(cmp);
+    guard->addInstruction(br);
+    guard->linkSuccessor(trueTarget);
+    guard->linkSuccessor(falseTarget);
 }
 
 /// @brief 值在 j 循环内是否不变（非循环体内定义的指令即视为不变）
@@ -1472,6 +1629,506 @@ void rewriteInPlaceRegisterBlocked(Function * func, Module * mod, MatMulPattern 
     replaceOldNest(func, pat, entryBlock, guard);
 }
 
+/// @brief 原地 A = X * A 的常量后缀折叠版本。
+///
+/// 对每个 X 行运行期识别最长常量后缀 X[k] == c：
+///   sum_k X[k] * A[k][j] = c * colSum[j] + sum_{k<p} (X[k] - c) * A[k][j]
+///
+/// colSum[j] 维护当前原地右矩阵每一列的和。每写完当前输出行后，用
+/// new-old 增量更新对应列和，保证下一行仍读到原程序语义下的矩阵状态。
+bool rewriteInPlaceConstantTailBlocked(Function * func, Module * mod, MatMulPattern & pat)
+{
+    const bool debug = std::getenv("MINIC_DEBUG_MATMUL") != nullptr;
+    auto fail = [debug](const char * reason) {
+        if (debug) {
+            std::cerr << "  -> Constant-tail skipped: " << reason << std::endl;
+        }
+        return false;
+    };
+
+    if (!func || !mod) {
+        return fail("missing func/mod");
+    }
+    if (!pat.elemType->isInt32Type()) {
+        return fail("element type is not i32");
+    }
+    if (!pat.inPlace) {
+        return fail("not in-place");
+    }
+    if (!hasCanonicalInPlaceRowTraversal(pat)) {
+        if (debug) {
+            std::cerr << "     inPlace=" << pat.inPlace
+                      << " yUsesColumnCursor=" << pat.yUsesColumnCursor
+                      << " yColumnPhi=" << pat.yColumnPhi
+                      << " yColumnAdvance=" << pat.yColumnAdvance
+                      << " yBaseAtZero=" << pat.yBaseAtZero
+                      << " yBaseNeedMaterialize=" << pat.yBaseNeedMaterialize
+                      << " rowWidth=" << pat.rowWidth << std::endl;
+            if (pat.yColumnAdvance) {
+                auto * step = asConstInt(pat.yColumnAdvance->getIndexOperand());
+                std::cerr << "     yColumnStep=" << (step ? step->getVal() : -1) << std::endl;
+            }
+        }
+        return fail("non-canonical Y row traversal");
+    }
+
+    OuterInPlaceContext outer;
+    if (!matchOuterInPlaceContext(pat, outer)) {
+        return fail("outer row context not matched");
+    }
+
+    Type * idxType = pat.jLoop.induction->getType();
+    Type * cmpType = pat.jLoop.cmp->getType();
+    Value * ubj = pat.jLoop.boundValue;
+    Value * ubk = pat.kLoop.boundValue;
+    auto * zero = mod->newConstInteger(idxType, 0);
+    auto * one = mod->newConstInteger(idxType, 1);
+    auto * blockLast = mod->newConstInteger(idxType, kConstantTailBlockCols - 1);
+    auto * blockCols = mod->newConstInteger(idxType, kConstantTailBlockCols);
+    auto * rowStep = mod->newConstInteger(idxType, pat.rowWidth);
+    auto * i32Zero = mod->newConstInt32(0);
+    auto * i32One = mod->newConstInt32(1);
+
+    if (!sameValue(pat.kLoop.initialValue, zero) ||
+        (pat.kLoop.hasConstBoundValue && pat.kLoop.boundIntValue <= 0) ||
+        staticallyExceedsRowWidth(pat.jLoop, pat.rowWidth) ||
+        staticallyExceedsRowWidth(pat.kLoop, pat.rowWidth)) {
+        return fail("static bounds not suitable");
+    }
+
+    BasicBlock * jPre = pat.jLoop.preheader;
+    BasicBlock * oldJHeader = pat.jLoop.header;
+    BasicBlock * jExit = pat.jLoop.exit;
+    const bool needsGuard = needsRuntimeUpperBoundGuard(pat.jLoop, pat.rowWidth) ||
+                            needsRuntimeUpperBoundGuard(pat.kLoop, pat.rowWidth);
+
+    Value * zBase = materializeBase(func, mod, pat.z, pat.elemPtrType, jPre);
+    Value * xBase = materializeBase(func, mod, pat.x, pat.elemPtrType, jPre);
+    Value * yBase = materializeYBase(func, mod, pat, jPre);
+
+    auto * colAlloca = new AllocaInst(func, ArrayType::get(pat.elemType, pat.rowWidth));
+    auto * flagAlloca = new AllocaInst(func, pat.elemType);
+    BasicBlock * entry = func->getEntryBlock();
+    auto & entryInsts = entry->getInstructions();
+    entryInsts.insert(entryInsts.begin(), flagAlloca);
+    flagAlloca->setParentBlock(entry);
+    entryInsts.insert(entryInsts.begin(), colAlloca);
+    colAlloca->setParentBlock(entry);
+
+    auto * colBase = new GetElementPtrInst(func, colAlloca, i32Zero, pat.elemPtrType, true);
+    insertBeforeTerminator(outer.preheader, colBase);
+    insertBeforeTerminator(outer.preheader, new StoreInst(func, i32Zero, flagAlloca));
+
+    BasicBlock * guardJ = needsGuard ? func->newBasicBlock() : nullptr;
+    BasicBlock * guardKUpper = needsGuard ? func->newBasicBlock() : nullptr;
+    BasicBlock * guardKPositive = needsGuard ? func->newBasicBlock() : nullptr;
+    BasicBlock * fallback = needsGuard ? func->newBasicBlock() : nullptr;
+    BasicBlock * flagCheck = func->newBasicBlock();
+    BasicBlock * initJHeader = func->newBasicBlock();
+    BasicBlock * initJBody = func->newBasicBlock();
+    BasicBlock * initKHeader = func->newBasicBlock();
+    BasicBlock * initKBody = func->newBasicBlock();
+    BasicBlock * initStore = func->newBasicBlock();
+    BasicBlock * initDone = func->newBasicBlock();
+    BasicBlock * tailSetup = func->newBasicBlock();
+    BasicBlock * tailHeader = func->newBasicBlock();
+    BasicBlock * tailCheck = func->newBasicBlock();
+    BasicBlock * tailAdvance = func->newBasicBlock();
+    BasicBlock * mainJHeader = func->newBasicBlock();
+    BasicBlock * mainInit = func->newBasicBlock();
+    BasicBlock * mainKHeader = func->newBasicBlock();
+    BasicBlock * mainKBody = func->newBasicBlock();
+    BasicBlock * mainStore = func->newBasicBlock();
+    BasicBlock * scalarJHeader = func->newBasicBlock();
+    BasicBlock * scalarInit = func->newBasicBlock();
+    BasicBlock * scalarKHeader = func->newBasicBlock();
+    BasicBlock * scalarKBody = func->newBasicBlock();
+    BasicBlock * scalarStore = func->newBasicBlock();
+
+    std::vector<BasicBlock *> newBlocks;
+    if (needsGuard) {
+        newBlocks.insert(newBlocks.end(), {guardJ, guardKUpper, guardKPositive, fallback});
+    }
+    newBlocks.insert(newBlocks.end(),
+                     {flagCheck,
+                      initJHeader,
+                      initJBody,
+                      initKHeader,
+                      initKBody,
+                      initStore,
+                      initDone,
+                      tailSetup,
+                      tailHeader,
+                      tailCheck,
+                      tailAdvance,
+                      mainJHeader,
+                      mainInit,
+                      mainKHeader,
+                      mainKBody,
+                      mainStore,
+                      scalarJHeader,
+                      scalarInit,
+                      scalarKHeader,
+                      scalarKBody,
+                      scalarStore});
+    for (auto * bb : newBlocks) {
+        insertBlockBefore(func, bb, oldJHeader);
+    }
+
+    BasicBlock * entryBlock = needsGuard ? guardJ : flagCheck;
+    if (needsGuard) {
+        addBoundsGuard(func, mod, guardJ, ubj, pat.rowWidth, guardKUpper, fallback, cmpType);
+        addBoundsGuard(func, mod, guardKUpper, ubk, pat.rowWidth, guardKPositive, fallback, cmpType);
+        auto * positiveCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_GT_I, ubk, zero, cmpType);
+        auto * positiveBr = new CondBranchInst(func, positiveCmp, flagCheck, fallback);
+        guardKPositive->addInstruction(positiveCmp);
+        guardKPositive->addInstruction(positiveBr);
+        guardKPositive->linkSuccessor(flagCheck);
+        guardKPositive->linkSuccessor(fallback);
+        fallback->addInstruction(new BranchInst(func, oldJHeader));
+        fallback->linkSuccessor(oldJHeader);
+    }
+
+    // ---- 一次性初始化 colSum[j] = sum_k A[k][j] ----
+    auto * flagLoad = new LoadInst(func, flagAlloca, pat.elemType);
+    auto * flagIsZero = new ICmpInst(func, IRInstOperator::IRINST_OP_EQ_I, flagLoad, i32Zero, cmpType);
+    auto * flagBr = new CondBranchInst(func, flagIsZero, initJHeader, tailSetup);
+    flagCheck->addInstruction(flagLoad);
+    flagCheck->addInstruction(flagIsZero);
+    flagCheck->addInstruction(flagBr);
+    flagCheck->linkSuccessor(initJHeader);
+    flagCheck->linkSuccessor(tailSetup);
+
+    auto * initJ = new PhiInst(func, idxType);
+    auto * initCol = new PhiInst(func, pat.elemPtrType);
+    auto * initJCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, initJ, ubj, cmpType);
+    auto * initJBr = new CondBranchInst(func, initJCmp, initJBody, initDone);
+    initJ->addIncoming(zero, flagCheck);
+    initCol->addIncoming(colBase, flagCheck);
+    initJHeader->addInstruction(initJ);
+    initJHeader->addInstruction(initCol);
+    initJHeader->addInstruction(initJCmp);
+    initJHeader->addInstruction(initJBr);
+    initJHeader->linkSuccessor(initJBody);
+    initJHeader->linkSuccessor(initDone);
+
+    auto * initYStart = new GetElementPtrInst(func, yBase, initJ, pat.elemPtrType, false);
+    initJBody->addInstruction(initYStart);
+    initJBody->addInstruction(new BranchInst(func, initKHeader));
+    initJBody->linkSuccessor(initKHeader);
+
+    auto * initK = new PhiInst(func, idxType);
+    auto * initY = new PhiInst(func, pat.elemPtrType);
+    auto * initSum = new PhiInst(func, pat.elemType);
+    auto * initKCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, initK, ubk, cmpType);
+    auto * initKBr = new CondBranchInst(func, initKCmp, initKBody, initStore);
+    initK->addIncoming(zero, initJBody);
+    initY->addIncoming(initYStart, initJBody);
+    initSum->addIncoming(i32Zero, initJBody);
+    initKHeader->addInstruction(initK);
+    initKHeader->addInstruction(initY);
+    initKHeader->addInstruction(initSum);
+    initKHeader->addInstruction(initKCmp);
+    initKHeader->addInstruction(initKBr);
+    initKHeader->linkSuccessor(initKBody);
+    initKHeader->linkSuccessor(initStore);
+
+    auto * initLoad = new LoadInst(func, initY, pat.elemType);
+    auto * initSumNext = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, initSum, initLoad, pat.elemType);
+    auto * initKNext = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, initK, one, idxType);
+    auto * initYNext = new GetElementPtrInst(func, initY, rowStep, pat.elemPtrType, false);
+    initKBody->addInstruction(initLoad);
+    initKBody->addInstruction(initSumNext);
+    initKBody->addInstruction(initKNext);
+    initKBody->addInstruction(initYNext);
+    initKBody->addInstruction(new BranchInst(func, initKHeader));
+    initKBody->linkSuccessor(initKHeader);
+    initK->addIncoming(initKNext, initKBody);
+    initY->addIncoming(initYNext, initKBody);
+    initSum->addIncoming(initSumNext, initKBody);
+
+    auto * initColStore = new StoreInst(func, initSum, initCol);
+    auto * initJNext = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, initJ, one, idxType);
+    auto * initColNext = new GetElementPtrInst(func, initCol, one, pat.elemPtrType, false);
+    initStore->addInstruction(initColStore);
+    initStore->addInstruction(initJNext);
+    initStore->addInstruction(initColNext);
+    initStore->addInstruction(new BranchInst(func, initJHeader));
+    initStore->linkSuccessor(initJHeader);
+    initJ->addIncoming(initJNext, initStore);
+    initCol->addIncoming(initColNext, initStore);
+
+    initDone->addInstruction(new StoreInst(func, i32One, flagAlloca));
+    initDone->addInstruction(new BranchInst(func, tailSetup));
+    initDone->linkSuccessor(tailSetup);
+
+    // ---- 扫描当前 X 行的最长常量后缀 ----
+    auto * lastIndex = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, ubk, one, idxType);
+    auto * lastPtr = new GetElementPtrInst(func, xBase, lastIndex, pat.elemPtrType, false);
+    auto * tailValue = new LoadInst(func, lastPtr, pat.elemType);
+    tailSetup->addInstruction(lastIndex);
+    tailSetup->addInstruction(lastPtr);
+    tailSetup->addInstruction(tailValue);
+    tailSetup->addInstruction(new BranchInst(func, tailHeader));
+    tailSetup->linkSuccessor(tailHeader);
+
+    auto * tail = new PhiInst(func, idxType);
+    auto * tailPositive = new ICmpInst(func, IRInstOperator::IRINST_OP_GT_I, tail, zero, cmpType);
+    auto * tailBr = new CondBranchInst(func, tailPositive, tailCheck, mainJHeader);
+    tail->addIncoming(lastIndex, tailSetup);
+    tailHeader->addInstruction(tail);
+    tailHeader->addInstruction(tailPositive);
+    tailHeader->addInstruction(tailBr);
+    tailHeader->linkSuccessor(tailCheck);
+    tailHeader->linkSuccessor(mainJHeader);
+
+    auto * tailPrev = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, tail, one, idxType);
+    auto * tailPrevPtr = new GetElementPtrInst(func, xBase, tailPrev, pat.elemPtrType, false);
+    auto * tailPrevValue = new LoadInst(func, tailPrevPtr, pat.elemType);
+    auto * tailEq = new ICmpInst(func, IRInstOperator::IRINST_OP_EQ_I, tailPrevValue, tailValue, cmpType);
+    auto * tailCheckBr = new CondBranchInst(func, tailEq, tailAdvance, mainJHeader);
+    tailCheck->addInstruction(tailPrev);
+    tailCheck->addInstruction(tailPrevPtr);
+    tailCheck->addInstruction(tailPrevValue);
+    tailCheck->addInstruction(tailEq);
+    tailCheck->addInstruction(tailCheckBr);
+    tailCheck->linkSuccessor(tailAdvance);
+    tailCheck->linkSuccessor(mainJHeader);
+    tailAdvance->addInstruction(new BranchInst(func, tailHeader));
+    tailAdvance->linkSuccessor(tailHeader);
+    tail->addIncoming(tailPrev, tailAdvance);
+
+    // ---- 主列块：一次处理 8 列 ----
+    auto * mainJ = new PhiInst(func, idxType);
+    auto * mainZ = new PhiInst(func, pat.elemPtrType);
+    auto * mainCol = new PhiInst(func, pat.elemPtrType);
+    auto * mainY = new PhiInst(func, pat.elemPtrType);
+    auto * mainJLast = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, mainJ, blockLast, idxType);
+    auto * mainJCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, mainJLast, ubj, cmpType);
+    auto * mainJBr = new CondBranchInst(func, mainJCmp, mainInit, scalarJHeader);
+    for (auto * pred : {tailHeader, tailCheck}) {
+        mainJ->addIncoming(zero, pred);
+        mainZ->addIncoming(zBase, pred);
+        mainCol->addIncoming(colBase, pred);
+        mainY->addIncoming(yBase, pred);
+    }
+    mainJHeader->addInstruction(mainJ);
+    mainJHeader->addInstruction(mainZ);
+    mainJHeader->addInstruction(mainCol);
+    mainJHeader->addInstruction(mainY);
+    mainJHeader->addInstruction(mainJLast);
+    mainJHeader->addInstruction(mainJCmp);
+    mainJHeader->addInstruction(mainJBr);
+    mainJHeader->linkSuccessor(mainInit);
+    mainJHeader->linkSuccessor(scalarJHeader);
+
+    std::vector<Value *> mainColPtrs;
+    std::vector<LoadInst *> mainColLoads;
+    std::vector<BinaryInst *> mainInitialSums;
+    for (int32_t lane = 0; lane < kConstantTailBlockCols; ++lane) {
+        Value * colPtr = mainCol;
+        if (lane != 0) {
+            auto * gep = new GetElementPtrInst(func, mainCol, mod->newConstInt32(lane), pat.elemPtrType, false);
+            mainInit->addInstruction(gep);
+            colPtr = gep;
+        }
+        auto * colLoad = new LoadInst(func, colPtr, pat.elemType);
+        auto * initial = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, tailValue, colLoad, pat.elemType);
+        mainInit->addInstruction(colLoad);
+        mainInit->addInstruction(initial);
+        mainColPtrs.push_back(colPtr);
+        mainColLoads.push_back(colLoad);
+        mainInitialSums.push_back(initial);
+    }
+    mainInit->addInstruction(new BranchInst(func, mainKHeader));
+    mainInit->linkSuccessor(mainKHeader);
+
+    auto * mainK = new PhiInst(func, idxType);
+    auto * mainX = new PhiInst(func, pat.elemPtrType);
+    auto * mainYRow = new PhiInst(func, pat.elemPtrType);
+    std::vector<PhiInst *> mainSums;
+    for (int32_t lane = 0; lane < kConstantTailBlockCols; ++lane) {
+        mainSums.push_back(new PhiInst(func, pat.elemType));
+    }
+    auto * mainKCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, mainK, tail, cmpType);
+    auto * mainKBr = new CondBranchInst(func, mainKCmp, mainKBody, mainStore);
+    mainK->addIncoming(zero, mainInit);
+    mainX->addIncoming(xBase, mainInit);
+    mainYRow->addIncoming(mainY, mainInit);
+    mainKHeader->addInstruction(mainK);
+    mainKHeader->addInstruction(mainX);
+    mainKHeader->addInstruction(mainYRow);
+    for (int32_t lane = 0; lane < kConstantTailBlockCols; ++lane) {
+        mainSums[lane]->addIncoming(mainInitialSums[lane], mainInit);
+        mainKHeader->addInstruction(mainSums[lane]);
+    }
+    mainKHeader->addInstruction(mainKCmp);
+    mainKHeader->addInstruction(mainKBr);
+    mainKHeader->linkSuccessor(mainKBody);
+    mainKHeader->linkSuccessor(mainStore);
+
+    auto * mainXLoad = new LoadInst(func, mainX, pat.elemType);
+    auto * mainDiff = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, mainXLoad, tailValue, pat.elemType);
+    mainKBody->addInstruction(mainXLoad);
+    mainKBody->addInstruction(mainDiff);
+    std::vector<BinaryInst *> mainNextSums;
+    for (int32_t lane = 0; lane < kConstantTailBlockCols; ++lane) {
+        Value * yPtr = mainYRow;
+        if (lane != 0) {
+            auto * gep = new GetElementPtrInst(func, mainYRow, mod->newConstInt32(lane), pat.elemPtrType, false);
+            mainKBody->addInstruction(gep);
+            yPtr = gep;
+        }
+        auto * yLoad = new LoadInst(func, yPtr, pat.elemType);
+        auto * product = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, mainDiff, yLoad, pat.elemType);
+        auto * nextSum = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, mainSums[lane], product, pat.elemType);
+        mainKBody->addInstruction(yLoad);
+        mainKBody->addInstruction(product);
+        mainKBody->addInstruction(nextSum);
+        mainNextSums.push_back(nextSum);
+    }
+    auto * mainKNext = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, mainK, one, idxType);
+    auto * mainXNext = new GetElementPtrInst(func, mainX, one, pat.elemPtrType, false);
+    auto * mainYRowNext = new GetElementPtrInst(func, mainYRow, rowStep, pat.elemPtrType, false);
+    mainKBody->addInstruction(mainKNext);
+    mainKBody->addInstruction(mainXNext);
+    mainKBody->addInstruction(mainYRowNext);
+    mainKBody->addInstruction(new BranchInst(func, mainKHeader));
+    mainKBody->linkSuccessor(mainKHeader);
+    mainK->addIncoming(mainKNext, mainKBody);
+    mainX->addIncoming(mainXNext, mainKBody);
+    mainYRow->addIncoming(mainYRowNext, mainKBody);
+    for (int32_t lane = 0; lane < kConstantTailBlockCols; ++lane) {
+        mainSums[lane]->addIncoming(mainNextSums[lane], mainKBody);
+    }
+
+    for (int32_t lane = 0; lane < kConstantTailBlockCols; ++lane) {
+        Value * zPtr = mainZ;
+        if (lane != 0) {
+            auto * gep = new GetElementPtrInst(func, mainZ, mod->newConstInt32(lane), pat.elemPtrType, false);
+            mainStore->addInstruction(gep);
+            zPtr = gep;
+        }
+        auto * oldValue = new LoadInst(func, zPtr, pat.elemType);
+        auto * delta = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, mainSums[lane], oldValue, pat.elemType);
+        auto * updatedCol = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, mainColLoads[lane], delta, pat.elemType);
+        mainStore->addInstruction(oldValue);
+        mainStore->addInstruction(new StoreInst(func, mainSums[lane], zPtr));
+        mainStore->addInstruction(delta);
+        mainStore->addInstruction(updatedCol);
+        mainStore->addInstruction(new StoreInst(func, updatedCol, mainColPtrs[lane]));
+    }
+    auto * mainJNext = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, mainJ, blockCols, idxType);
+    auto * mainZNext = new GetElementPtrInst(func, mainZ, blockCols, pat.elemPtrType, false);
+    auto * mainColNext = new GetElementPtrInst(func, mainCol, blockCols, pat.elemPtrType, false);
+    auto * mainYNext = new GetElementPtrInst(func, mainY, blockCols, pat.elemPtrType, false);
+    mainStore->addInstruction(mainJNext);
+    mainStore->addInstruction(mainZNext);
+    mainStore->addInstruction(mainColNext);
+    mainStore->addInstruction(mainYNext);
+    mainStore->addInstruction(new BranchInst(func, mainJHeader));
+    mainStore->linkSuccessor(mainJHeader);
+    mainJ->addIncoming(mainJNext, mainStore);
+    mainZ->addIncoming(mainZNext, mainStore);
+    mainCol->addIncoming(mainColNext, mainStore);
+    mainY->addIncoming(mainYNext, mainStore);
+
+    // ---- 剩余列：标量处理 ----
+    auto * scalarJ = new PhiInst(func, idxType);
+    auto * scalarZ = new PhiInst(func, pat.elemPtrType);
+    auto * scalarCol = new PhiInst(func, pat.elemPtrType);
+    auto * scalarY = new PhiInst(func, pat.elemPtrType);
+    auto * scalarJCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, scalarJ, ubj, cmpType);
+    auto * scalarJBr = new CondBranchInst(func, scalarJCmp, scalarInit, jExit);
+    scalarJ->addIncoming(mainJ, mainJHeader);
+    scalarZ->addIncoming(mainZ, mainJHeader);
+    scalarCol->addIncoming(mainCol, mainJHeader);
+    scalarY->addIncoming(mainY, mainJHeader);
+    scalarJHeader->addInstruction(scalarJ);
+    scalarJHeader->addInstruction(scalarZ);
+    scalarJHeader->addInstruction(scalarCol);
+    scalarJHeader->addInstruction(scalarY);
+    scalarJHeader->addInstruction(scalarJCmp);
+    scalarJHeader->addInstruction(scalarJBr);
+    scalarJHeader->linkSuccessor(scalarInit);
+    scalarJHeader->linkSuccessor(jExit);
+
+    auto * scalarColLoad = new LoadInst(func, scalarCol, pat.elemType);
+    auto * scalarInitial = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, tailValue, scalarColLoad, pat.elemType);
+    scalarInit->addInstruction(scalarColLoad);
+    scalarInit->addInstruction(scalarInitial);
+    scalarInit->addInstruction(new BranchInst(func, scalarKHeader));
+    scalarInit->linkSuccessor(scalarKHeader);
+
+    auto * scalarK = new PhiInst(func, idxType);
+    auto * scalarX = new PhiInst(func, pat.elemPtrType);
+    auto * scalarYRow = new PhiInst(func, pat.elemPtrType);
+    auto * scalarSum = new PhiInst(func, pat.elemType);
+    auto * scalarKCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, scalarK, tail, cmpType);
+    auto * scalarKBr = new CondBranchInst(func, scalarKCmp, scalarKBody, scalarStore);
+    scalarK->addIncoming(zero, scalarInit);
+    scalarX->addIncoming(xBase, scalarInit);
+    scalarYRow->addIncoming(scalarY, scalarInit);
+    scalarSum->addIncoming(scalarInitial, scalarInit);
+    scalarKHeader->addInstruction(scalarK);
+    scalarKHeader->addInstruction(scalarX);
+    scalarKHeader->addInstruction(scalarYRow);
+    scalarKHeader->addInstruction(scalarSum);
+    scalarKHeader->addInstruction(scalarKCmp);
+    scalarKHeader->addInstruction(scalarKBr);
+    scalarKHeader->linkSuccessor(scalarKBody);
+    scalarKHeader->linkSuccessor(scalarStore);
+
+    auto * scalarXLoad = new LoadInst(func, scalarX, pat.elemType);
+    auto * scalarDiff = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, scalarXLoad, tailValue, pat.elemType);
+    auto * scalarYLoad = new LoadInst(func, scalarYRow, pat.elemType);
+    auto * scalarProduct = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, scalarDiff, scalarYLoad, pat.elemType);
+    auto * scalarSumNext = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, scalarSum, scalarProduct, pat.elemType);
+    auto * scalarKNext = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, scalarK, one, idxType);
+    auto * scalarXNext = new GetElementPtrInst(func, scalarX, one, pat.elemPtrType, false);
+    auto * scalarYNextRow = new GetElementPtrInst(func, scalarYRow, rowStep, pat.elemPtrType, false);
+    scalarKBody->addInstruction(scalarXLoad);
+    scalarKBody->addInstruction(scalarDiff);
+    scalarKBody->addInstruction(scalarYLoad);
+    scalarKBody->addInstruction(scalarProduct);
+    scalarKBody->addInstruction(scalarSumNext);
+    scalarKBody->addInstruction(scalarKNext);
+    scalarKBody->addInstruction(scalarXNext);
+    scalarKBody->addInstruction(scalarYNextRow);
+    scalarKBody->addInstruction(new BranchInst(func, scalarKHeader));
+    scalarKBody->linkSuccessor(scalarKHeader);
+    scalarK->addIncoming(scalarKNext, scalarKBody);
+    scalarX->addIncoming(scalarXNext, scalarKBody);
+    scalarYRow->addIncoming(scalarYNextRow, scalarKBody);
+    scalarSum->addIncoming(scalarSumNext, scalarKBody);
+
+    auto * scalarOld = new LoadInst(func, scalarZ, pat.elemType);
+    auto * scalarDelta = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, scalarSum, scalarOld, pat.elemType);
+    auto * scalarUpdatedCol = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, scalarColLoad, scalarDelta, pat.elemType);
+    auto * scalarJNext = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, scalarJ, one, idxType);
+    auto * scalarZNext = new GetElementPtrInst(func, scalarZ, one, pat.elemPtrType, false);
+    auto * scalarColNext = new GetElementPtrInst(func, scalarCol, one, pat.elemPtrType, false);
+    auto * scalarYNext = new GetElementPtrInst(func, scalarY, one, pat.elemPtrType, false);
+    scalarStore->addInstruction(scalarOld);
+    scalarStore->addInstruction(new StoreInst(func, scalarSum, scalarZ));
+    scalarStore->addInstruction(scalarDelta);
+    scalarStore->addInstruction(scalarUpdatedCol);
+    scalarStore->addInstruction(new StoreInst(func, scalarUpdatedCol, scalarCol));
+    scalarStore->addInstruction(scalarJNext);
+    scalarStore->addInstruction(scalarZNext);
+    scalarStore->addInstruction(scalarColNext);
+    scalarStore->addInstruction(scalarYNext);
+    scalarStore->addInstruction(new BranchInst(func, scalarJHeader));
+    scalarStore->linkSuccessor(scalarJHeader);
+    scalarJ->addIncoming(scalarJNext, scalarStore);
+    scalarZ->addIncoming(scalarZNext, scalarStore);
+    scalarCol->addIncoming(scalarColNext, scalarStore);
+    scalarY->addIncoming(scalarYNext, scalarStore);
+
+    replaceOldNest(func, pat, entryBlock, needsGuard ? fallback : nullptr);
+    return true;
+}
+
 /// @brief 按匹配结果生成 ikj 形态的新嵌套并接管 CFG
 void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
 {
@@ -1733,12 +2390,16 @@ bool MatMulInterchange::run()
             MatMulPattern pat;
             if (!matchPattern(scev, loopInfo, header, pat)) {
                 continue;
-            }
+        }
 
-            if (pat.inPlace) {
-                rewriteInPlaceRegisterBlocked(func, mod, pat);
-                CostModel::remark("matmul-interchange", true, "in-place register blocked");
-            } else {
+        if (pat.inPlace) {
+            if (rewriteInPlaceConstantTailBlocked(func, mod, pat)) {
+                CostModel::remark("matmul-interchange", true, "in-place constant-tail blocked");
+                return true;
+            }
+            rewriteInPlaceRegisterBlocked(func, mod, pat);
+            CostModel::remark("matmul-interchange", true, "in-place register blocked");
+        } else {
                 rewritePattern(func, mod, pat);
                 CostModel::remark("matmul-interchange", true, "direct accumulate");
             }
