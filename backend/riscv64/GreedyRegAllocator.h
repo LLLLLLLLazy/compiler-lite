@@ -211,6 +211,13 @@ public:
 	/// @brief 获取 Value 在指定 IR 指令处的分配信息
 	RegAllocInfo getAllocationInfo(Value * value, Instruction * inst) const;
 
+	/// @brief 获取 Value 在指定位置“确实活跃在寄存器中”的分配信息，否则返回空。
+	///        与 getAllocationInfoAt 不同：当该位置没有覆盖它的活跃区间时，
+	///        绝不回退到 allocationMap 里可能已被复用的“home 寄存器”。
+	///        重新物化只能从确实仍持有操作数值的寄存器读取，故必须用此严格查询。
+	RegAllocInfo getRegisterHoldingValueAt(Value * value, int instNum) const;
+	RegAllocInfo getRegisterHoldingValueAt(Value * value, Instruction * inst) const;
+
 	/// @brief 获取寄存器分配统计
 	const RegAllocStats & getStats() const
 	{
@@ -267,7 +274,8 @@ private:
 	/// @return 是否驱逐并分配成功
 	bool tryEvictAndAssign(LiveInterval * interval,
 		std::vector<LiveInterval *> & intervals,
-		InterferenceGraph * graph);
+		InterferenceGraph * graph,
+		std::vector<LiveInterval *> * evictedVictims = nullptr);
 
 	/// @brief 将活跃区间标记为溢出
 	/// @param interval 待溢出的活跃区间
@@ -303,8 +311,14 @@ private:
 	/// @brief 获取活跃区间对应类别的可用寄存器池
 	const std::vector<int> & registerPoolFor(LiveInterval * interval) const;
 
-	/// @brief 获取考虑跨调用偏好的寄存器遍历顺序
+	/// @brief 获取考虑跨调用和热度偏好的寄存器遍历顺序
 	std::vector<int> orderedRegisterPoolFor(LiveInterval * interval) const;
+
+	/// @brief 判断GPR是否为callee-saved寄存器
+	static bool isCalleeSavedGpr(int reg);
+
+	/// @brief 热区间是否值得优先使用callee-saved寄存器
+	bool shouldPreferCalleeSaved(LiveInterval * interval) const;
 
 	/// @brief 获取与某节点干涉且同类别的已分配寄存器集合
 	std::set<int> getInterferingRegsForClass(
@@ -392,6 +406,9 @@ private:
 	/// @brief 当前函数中CallInst对应的指令编号列表
 	std::vector<int> callInstNumbers;
 
+	/// @brief 当前函数中适合分裂的非调用点指令编号
+	std::vector<int> splitCandidateNumbers;
+
 	/// @brief Value 在哪些 call 返回后仍然存活
 	std::unordered_map<Value *, std::unordered_set<int>> liveAcrossCallPositions;
 
@@ -409,6 +426,9 @@ private:
 
 	/// @brief 寄存器合并器
 	std::unique_ptr<RegCoalescer> coalescer_;
+
+	/// @brief 当前分配过程中已经启用过的callee-saved GPR，用于估算首次保存成本
+	std::unordered_set<int> usedCalleeSavedGprsDuringAllocation;
 
 	/// @brief 活跃区间分裂器
 	std::unique_ptr<LiveIntervalSplitter> splitter_;

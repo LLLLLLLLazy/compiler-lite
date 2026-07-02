@@ -270,6 +270,10 @@ private:
 	/// @brief 获取 Value 在指定指令编号处的位置敏感分配信息
 	RegAllocInfo getAllocInfoAt(Value * val, int instNum) const;
 
+	/// @brief 获取当前指令处“确实仍持有 Value 的寄存器”信息（不回退到已可能被复用的 home 寄存器）。
+	///        重新物化读取操作数时必须使用它，避免把死操作数的旧寄存器当成有效值。
+	RegAllocInfo getLiveRegInfo(Value * val, Instruction * inst) const;
+
 	/// @brief 按位置敏感分配信息加载/保存 Value
 	void loadValueToReg(int reg, Value * val, Instruction * inst);
 	void loadFloatValueToReg(int reg, Value * val, int tmpReg, Instruction * inst);
@@ -277,6 +281,15 @@ private:
 	void storeValueFromReg(Value * val, int srcReg, int tmpReg, Instruction * inst);
 	void storeFloatValueFromReg(Value * val, int srcReg, int tmpReg, Instruction * inst);
 	void storeVectorValueFromReg(Value * val, int srcReg, Instruction * inst);
+
+	/// @brief 尝试在当前使用点重新物化廉价SSA值，避免从栈槽reload
+	/// @param busy 祖先重物化帧写入、且尚未消费完的物理寄存器集合（如GEP基址、加法左操作数）。
+	///             递归借用临时寄存器时必须排除这些寄存器，否则会覆盖尚在使用中的中间结果。
+	bool isCheapRematerializable(Value * val, Instruction * inst, int depth = 0) const;
+	bool tryRematerializeValue(Value * val, int dstReg, Instruction * inst, int depth = 0,
+		const std::set<int> & busy = {});
+	bool tryRematerializeGEP(class GetElementPtrInst * gep, int dstReg, Instruction * inst, int depth,
+		const std::set<int> & busy);
 
 	/// @brief 获取只读操作数所在寄存器，必要时借用临时寄存器加载
 	/// @param val 操作数

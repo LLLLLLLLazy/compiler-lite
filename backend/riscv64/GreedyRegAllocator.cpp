@@ -11,7 +11,10 @@
 #include "GreedyRegAllocator.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "AllocaInst.h"
 #include "BasicBlock.h"
@@ -80,7 +83,9 @@ void GreedyRegAllocator::allocate(Function * func)
 	spilledValues.clear();
 	stats = RegAllocStats{};
 	intervalToIndex.clear();
+	usedCalleeSavedGprsDuringAllocation.clear();
 	callInstNumbers.clear();
+	splitCandidateNumbers.clear();
 	liveAcrossCallPositions.clear();
 	instNumbering.clear();
 	valueLiveRanges.clear();
@@ -124,6 +129,21 @@ void GreedyRegAllocator::allocate(Function * func)
 			callInstNumbers.push_back(num);
 		}
 	}
+	std::unordered_set<int> splitCandidateSet;
+	for (auto * bb : func->getBlocks()) {
+		if (bb == nullptr || bb->getLoopDepth() <= 0) {
+			continue;
+		}
+		for (auto * inst : bb->getInstructions()) {
+			auto numIt = instNumbering.find(inst);
+			if (numIt != instNumbering.end()) {
+				splitCandidateSet.insert(numIt->second);
+				break;
+			}
+		}
+	}
+	splitCandidateNumbers.assign(splitCandidateSet.begin(), splitCandidateSet.end());
+	std::sort(splitCandidateNumbers.begin(), splitCandidateNumbers.end());
 
 	// 建立活跃区间到索引的映射
 	auto & intervals = analysis.getIntervals();
@@ -166,10 +186,17 @@ void GreedyRegAllocator::allocate(Function * func)
 	// 寄存器间 move（由 copy 指令或指令选择逻辑处理）。
 	// 无需额外插入 spill/reload IR 指令。
 
-	// 保存活跃性快照，供指令选择阶段的动态临时寄存器管理使用
+	// 保存活跃性快照，供指令选择阶段的动态临时寄存器管理使用。
+	// 同一 Value 可能因 split 出现多个子区间，必须取并集，不能让后一个子区间覆盖前一个。
 	for (auto * interval : intervals) {
 		if (interval != nullptr && interval->getVReg() != nullptr) {
-			valueLiveRanges[interval->getVReg()] = {interval->getStart(), interval->getEnd()};
+			auto & range = valueLiveRanges[interval->getVReg()];
+			if (range.first == 0 && range.second == 0) {
+				range = {interval->getStart(), interval->getEnd()};
+			} else {
+				range.first = std::min(range.first, interval->getStart());
+				range.second = std::max(range.second, interval->getEnd());
+			}
 		}
 	}
 	refreshCoalescedAliasAllocations();
@@ -322,62 +349,108 @@ void GreedyRegAllocator::runGreedy(std::vector<LiveInterval *> & intervals, Inte
 			static_cast<int>(intervals.size()) * 4);
 	}
 
-	// 按溢出权重降序排列，权重相同则按起点升序
-	std::vector<LiveInterval *> workList = intervals;
-	std::sort(workList.begin(), workList.end(), [](LiveInterval * lhs, LiveInterval * rhs) {
-		if (lhs->getSpillWeight() == rhs->getSpillWeight()) {
-			return lhs->getStart() < rhs->getStart();
-		}
-		return lhs->getSpillWeight() > rhs->getSpillWeight();
-	});
+	auto sortPending = [](auto begin, auto end) {
+		std::sort(begin, end, [](LiveInterval * lhs, LiveInterval * rhs) {
+			if (lhs == rhs) {
+				return false;
+			}
+			if (lhs == nullptr) {
+				return false;
+			}
+			if (rhs == nullptr) {
+				return true;
+			}
+			if (lhs->getSpillWeight() == rhs->getSpillWeight()) {
+				return lhs->getStart() < rhs->getStart();
+			}
+			return lhs->getSpillWeight() > rhs->getSpillWeight();
+		});
+	};
 
-	// 使用索引遍历，支持分裂后重排序
-	std::vector<bool> processed(workList.size(), false);
+	std::vector<LiveInterval *> workList;
+	workList.reserve(intervals.size());
+	std::unordered_set<LiveInterval *> queued;
+	std::unordered_set<LiveInterval *> finalized;
+	auto enqueue = [&](LiveInterval * item) {
+		if (item == nullptr || item->getVReg() == nullptr) {
+			return;
+		}
+		if (finalized.find(item) != finalized.end()) {
+			return;
+		}
+		if (queued.insert(item).second) {
+			workList.push_back(item);
+		}
+	};
+	for (auto * interval : intervals) {
+		enqueue(interval);
+	}
+	sortPending(workList.begin(), workList.end());
+
+	std::unordered_map<LiveInterval *, int> evictionRetries;
+	constexpr int maxEvictionRetries = 3;
 	bool needReSort = false;
 
 	for (size_t wi = 0; wi < workList.size(); ++wi) {
-		// 分裂后可能需要重排序
+		// 分裂/驱逐后可能需要重排序未处理元素
 		if (needReSort) {
-			// 对未处理的元素重新按 spillWeight 排序
-			std::sort(workList.begin() + wi, workList.end(),
-				[](LiveInterval * lhs, LiveInterval * rhs) {
-					if (lhs->getSpillWeight() == rhs->getSpillWeight()) {
-						return lhs->getStart() < rhs->getStart();
-					}
-					return lhs->getSpillWeight() > rhs->getSpillWeight();
-				});
+			sortPending(workList.begin() + static_cast<std::ptrdiff_t>(wi), workList.end());
 			needReSort = false;
 		}
 
 		auto * interval = workList[wi];
+		queued.erase(interval);
 		if (interval == nullptr || interval->getVReg() == nullptr) {
+			continue;
+		}
+		if (finalized.find(interval) != finalized.end()) {
+			continue;
+		}
+		if (interval->getPhysReg() != -1) {
+			finalized.insert(interval);
 			continue;
 		}
 
 		// 强制栈分配的Value直接溢出
 		if (isForcedStackValue(interval->getVReg())) {
 			markSpilled(interval);
+			finalized.insert(interval);
 			continue;
 		}
 
 		// 尝试分配空闲寄存器
 		if (tryAssignFreeReg(interval, intervals, graph)) {
+			finalized.insert(interval);
 			continue;
 		}
 
-		// 尝试驱逐已有分配
-		if (tryEvictAndAssign(interval, intervals, graph)) {
-			continue;
+		// 尝试驱逐已有分配；被驱逐者重新入队，避免一次失败就直接落栈。
+		if (evictionRetries[interval] <= maxEvictionRetries) {
+			std::vector<LiveInterval *> evictedVictims;
+			if (tryEvictAndAssign(interval, intervals, graph, &evictedVictims)) {
+				finalized.insert(interval);
+				for (auto * victim : evictedVictims) {
+					if (victim == nullptr || victim->getVReg() == nullptr) {
+						continue;
+					}
+					finalized.erase(victim);
+					++evictionRetries[victim];
+					enqueue(victim);
+				}
+				needReSort = !evictedVictims.empty();
+				continue;
+			}
 		}
 
 		// [活跃区间分裂] 尝试分裂
 		if (splitter_) {
 			auto splitResult = splitter_->trySplit(interval, intervals, graph,
-				callInstNumbers, intervalToIndex);
+				callInstNumbers, splitCandidateNumbers, intervalToIndex);
 			if (splitResult.has_value()) {
-				// 分裂成功，将子区间加入工作列表
-				workList.push_back(splitResult->left);
-				workList.push_back(splitResult->right);
+				// 分裂成功，原区间失效，将子区间加入工作列表
+				finalized.insert(interval);
+				enqueue(splitResult->left);
+				enqueue(splitResult->right);
 				needReSort = true;
 				continue;
 			}
@@ -385,6 +458,7 @@ void GreedyRegAllocator::runGreedy(std::vector<LiveInterval *> & intervals, Inte
 
 		// 无法分配，标记为溢出
 		markSpilled(interval);
+		finalized.insert(interval);
 	}
 }
 
@@ -395,6 +469,9 @@ void GreedyRegAllocator::assignPhysicalReg(LiveInterval * interval, int reg)
 {
 	interval->setPhysReg(reg);
 	interval->setSpilled(false);
+	if (reg >= 0 && registerClassFor(interval) == RegisterClass::Gpr && isCalleeSavedGpr(reg)) {
+		usedCalleeSavedGprsDuringAllocation.insert(reg);
+	}
 }
 
 /// @brief 尝试为活跃区间分配空闲寄存器
@@ -445,7 +522,8 @@ bool GreedyRegAllocator::tryAssignFreeReg(LiveInterval * interval,
 /// 若所有占用该寄存器的邻居都可驱逐，则执行驱逐并分配
 bool GreedyRegAllocator::tryEvictAndAssign(LiveInterval * interval,
 	std::vector<LiveInterval *> & intervals,
-	InterferenceGraph * graph)
+	InterferenceGraph * graph,
+	std::vector<LiveInterval *> * evictedVictims)
 {
 	if (graph == nullptr || registerPoolFor(interval).empty()) {
 		return false;
@@ -489,11 +567,24 @@ bool GreedyRegAllocator::tryEvictAndAssign(LiveInterval * interval,
 			continue;
 		}
 
-		// 驱逐所有占用该寄存器的低权重邻居
+		// 先腾出该寄存器：把所有 victim 的物理寄存器清空，
+		// 然后再把当前区间放到 reg 上。这样后续重试 victim 时，
+		// 干涉图会正确反映 victim 对当前区间（持有 reg）干涉，
+		// 从而避免 victim 又挑回 reg。
 		for (auto * victim: evictionCandidates) {
-			markSpilled(victim);
+			assignPhysicalReg(victim, -1);
 		}
 		assignPhysicalReg(interval, reg);
+
+		if (evictedVictims != nullptr) {
+			evictedVictims->insert(evictedVictims->end(), evictionCandidates.begin(), evictionCandidates.end());
+		} else {
+			for (auto * victim: evictionCandidates) {
+				if (!tryAssignFreeReg(victim, intervals, graph)) {
+					markSpilled(victim);
+				}
+			}
+		}
 		return true;
 	}
 
@@ -647,27 +738,58 @@ std::vector<int> GreedyRegAllocator::orderedRegisterPoolFor(LiveInterval * inter
 		return pool;
 	}
 
-	std::vector<int> ordered;
-	ordered.reserve(pool.size());
+	std::vector<int> ordered = pool;
 	const bool crossesCall = intervalCrossesCall(interval);
-
-	auto appendMatching = [&](bool wantCallerSaved) {
-		for (int reg : pool) {
-			if (isCallerSavedReg(reg) == wantCallerSaved) {
-				ordered.push_back(reg);
-			}
-		}
+	const bool hotPrefersCalleeSaved = shouldPreferCalleeSaved(interval);
+	auto originalOrder = [&](int reg) {
+		auto it = std::find(pool.begin(), pool.end(), reg);
+		return it == pool.end() ? static_cast<int>(pool.size()) : static_cast<int>(it - pool.begin());
 	};
+	auto score = [&](int reg) {
+		int cost = originalOrder(reg);
+		const bool calleeSaved = isCalleeSavedGpr(reg);
+		if (crossesCall) {
+			// canAssignReg 会拒绝 caller-saved；这里仍把它们排到最后，方便驱逐评估更快命中合法寄存器。
+			return calleeSaved ? (usedCalleeSavedGprsDuringAllocation.count(reg) ? cost : cost + 8) : cost + 10000;
+		}
+		if (!calleeSaved) {
+			return cost;
+		}
+		// 打开一个新的 s-reg 需要 prologue/epilogue 一次性保存恢复；已打开的 s-reg 成本接近普通寄存器。
+		const int openCost = usedCalleeSavedGprsDuringAllocation.count(reg) ? 2 : 32;
+		const int hotBonus = hotPrefersCalleeSaved ? 28 : 0;
+		return cost + openCost - hotBonus;
+	};
+	std::stable_sort(ordered.begin(), ordered.end(), [&](int lhs, int rhs) {
+		return score(lhs) < score(rhs);
+	});
+	return ordered;
+}
 
-	if (crossesCall) {
-		appendMatching(false);
-		appendMatching(true);
-	} else {
-		appendMatching(true);
-		appendMatching(false);
+bool GreedyRegAllocator::isCalleeSavedGpr(int reg)
+{
+	return reg == 9 || (reg >= 18 && reg <= 27);
+}
+
+bool GreedyRegAllocator::shouldPreferCalleeSaved(LiveInterval * interval) const
+{
+	if (interval == nullptr || isForcedStackValue(interval->getVReg())) {
+		return false;
+	}
+	if (intervalCrossesCall(interval)) {
+		return true;
+	}
+	if (interval->maxLoopDepth <= 0) {
+		return false;
 	}
 
-	return ordered;
+	const int useCount = static_cast<int>(interval->getUsePositions().size());
+	const int length = std::max(1, interval->getEnd() - interval->getStart());
+	if (interval->maxLoopDepth >= 2 && useCount >= 2) {
+		return true;
+	}
+	// 一次callee-saved保存/恢复约两条指令；只有使用密度较高的热区间才优先占用s寄存器。
+	return interval->maxLoopDepth >= 1 && useCount >= 4 && length <= 96;
 }
 
 /// @brief 收集同寄存器文件内的干涉寄存器。
@@ -855,6 +977,38 @@ RegAllocInfo GreedyRegAllocator::getAllocationInfo(Value * value, Instruction * 
 	return getAllocationInfoAt(value, it->second);
 }
 
+RegAllocInfo GreedyRegAllocator::getRegisterHoldingValueAt(Value * value, int instNum) const
+{
+	if (value == nullptr || instNum < 0) {
+		return RegAllocInfo{};
+	}
+	// 仅当存在覆盖 instNum 且分配了寄存器的活跃区间时，才认为该寄存器此刻仍持有 value。
+	// 绝不回退到 allocationMap（可能是已被其它值复用的 home 寄存器），否则重新物化
+	// 会从错误寄存器读到别的值。
+	auto segIt = allocationSegments.find(value);
+	if (segIt == allocationSegments.end()) {
+		return RegAllocInfo{};
+	}
+	for (const auto & segment : segIt->second) {
+		if (segment.start <= instNum && instNum < segment.end && segment.info.hasAnyReg()) {
+			return segment.info;
+		}
+	}
+	return RegAllocInfo{};
+}
+
+RegAllocInfo GreedyRegAllocator::getRegisterHoldingValueAt(Value * value, Instruction * inst) const
+{
+	if (inst == nullptr) {
+		return RegAllocInfo{};
+	}
+	auto it = instNumbering.find(inst);
+	if (it == instNumbering.end()) {
+		return RegAllocInfo{};
+	}
+	return getRegisterHoldingValueAt(value, it->second);
+}
+
 /// @brief 从活跃区间列表重建分配映射表
 /// @param intervals 活跃区间列表
 ///
@@ -909,6 +1063,28 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 		std::sort(ranges.begin(), ranges.end());
 	}
 
+	auto eraseAllocatedRange = [](auto & rangesByReg, int reg, std::pair<int, int> range) {
+		auto regIt = rangesByReg.find(reg);
+		if (regIt == rangesByReg.end()) {
+			return;
+		}
+		auto & ranges = regIt->second;
+		ranges.erase(std::remove(ranges.begin(), ranges.end(), range), ranges.end());
+		if (ranges.empty()) {
+			rangesByReg.erase(regIt);
+		}
+	};
+	auto dropPublishedRange = [&](const RegAllocSegment & segment) {
+		std::pair<int, int> range{segment.start, segment.end};
+		if (segment.info.hasReg()) {
+			eraseAllocatedRange(allocatedGprLiveRanges, segment.info.regId, range);
+		} else if (segment.info.hasFloatReg()) {
+			eraseAllocatedRange(allocatedFprLiveRanges, segment.info.regId, range);
+		} else if (segment.info.hasVectorReg()) {
+			eraseAllocatedRange(allocatedVectorLiveRanges, segment.info.regId, range);
+		}
+	};
+
 	for (auto & [value, segments] : allocationSegments) {
 		std::sort(segments.begin(), segments.end(), [](const RegAllocSegment & lhs, const RegAllocSegment & rhs) {
 			if (lhs.start == rhs.start) {
@@ -940,24 +1116,34 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 			allocationMap[value] = segments.front().info;
 		}
 
-		bool needsTransferStackSlot = false;
+		bool hasBoundaryTransfer = false;
 		for (std::size_t i = 1; i < segments.size(); ++i) {
 			const auto & prev = segments[i - 1];
 			const auto & curr = segments[i];
 			if (prev.end == curr.start && !sameRegAllocInfo(prev.info, curr.info)) {
 				// 分裂点两侧位置不同，指令选择阶段需要在该编号处补搬运。
 				splitTransfers.push_back({value, curr.start});
-				needsTransferStackSlot = true;
+				hasBoundaryTransfer = true;
 			}
 		}
-		if (needsTransferStackSlot || hasLocationChange) {
+		if (hasBoundaryTransfer || hasLocationChange) {
 			// Split copies are only inserted at linear adjacent boundaries. If the
 			// same Value has different locations across CFG-separated segments
 			// (including partial spill), use one canonical stack slot so every
-			// definition and use sees the same storage.
+			// definition and use sees the same storage. Once canonical stack is chosen,
+			// do not publish unused split physical ranges to scratch liveness or
+			// callee-saved save decisions.
 			allocationMap[value] = RegAllocInfo{};
 			splitStackValues.insert(value);
 			spilledValues.insert(value);
+			for (auto & segment : segments) {
+				dropPublishedRange(segment);
+				segment.info = RegAllocInfo{};
+			}
+			Value * stackValue = value;
+			splitTransfers.erase(std::remove_if(splitTransfers.begin(), splitTransfers.end(),
+				[stackValue](const RegAllocSplitTransfer & transfer) { return transfer.value == stackValue; }),
+				splitTransfers.end());
 		}
 	}
 
