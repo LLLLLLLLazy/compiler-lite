@@ -22,6 +22,7 @@
 #include "fixedPointFunctionPass/LICM.h"
 #include "fixedPointFunctionPass/LoopConstantPromotion.h"
 #include "fixedPointFunctionPass/LoopExitValueRewrite.h"
+#include "fixedPointFunctionPass/LoopFusion.h"
 #include "fixedPointFunctionPass/LoopStrengthReduce.h"
 #include "fixedPointFunctionPass/IndVarSimplify.h"
 #include "fixedPointFunctionPass/LoopTiling.h"
@@ -222,6 +223,13 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
     });
 
     // ---- 子组2：循环变换 ----
+    // 先做相邻同界计数循环融合：此时循环仍是规范非旋转形态（比较位于循环头），
+    // 且尚未被 LSR 改写为指针游标，matchCanonicalLoop 可识别；融合后再交给
+    // LoopExitValueRewrite / LoopTiling / LSR 等下游 pass
+    registerFixedPointFunctionPass("LoopFusion", [this](Function * func) {
+        LoopFusion pass(func, module);
+        return pass.run();
+    });
     // 基于 SCEV 把规范计数循环头部递推 phi 的出口取值替换为闭式表达式，
     // 随后消除因此变为无副作用且出口无依赖的空循环
     registerFixedPointFunctionPass("LoopExitValueRewrite", [this](Function * func) {

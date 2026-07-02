@@ -255,6 +255,8 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/BoundedBitLoopSolver.cpp
 	ir/passes/fixedPointFunctionPass/LoopTiling.h
 	ir/passes/fixedPointFunctionPass/LoopTiling.cpp
+	ir/passes/fixedPointFunctionPass/LoopFusion.h
+	ir/passes/fixedPointFunctionPass/LoopFusion.cpp
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.h
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.cpp
 	ir/passes/fixedPointFunctionPass/LoopVectorize.h
