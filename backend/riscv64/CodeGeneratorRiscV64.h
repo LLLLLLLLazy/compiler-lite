@@ -66,6 +66,13 @@ protected:
 	/// @param str 输出的字符串
 	void getIRValueStr(Value * val, std::string & str);
 
+	/// @brief 判断当前模块是否使用了内置循环并行运行时函数
+	/// @return 若模块中存在对 __mtstart/__mtend/__mtstart4 等函数的调用则返回true
+	bool moduleUsesMtRuntime() const;
+
+	/// @brief 输出内置循环并行运行时汇编（__mtstart/__mtend/__mtstart4 等）
+	void emitMtRuntime();
+
 private:
 	/// @brief 将本模块的寄存器分配评测指标写为JSON
 	/// @return 写入是否成功；若未配置输出路径则直接返回true

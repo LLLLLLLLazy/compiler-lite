@@ -34,6 +34,7 @@
 #include "fixedPointFunctionPass/PureCallLoopCache.h"
 #include "functionPass/ArrayScalarize.h"
 #include "functionPass/LateLoopCFGCleanup.h"
+#include "functionPass/LoopParallelize.h"
 #include "functionPass/LoopRotate.h"
 #include "functionPass/Mem2Reg.h"
 #include "functionPass/PhiToSelect.h"
@@ -60,7 +61,9 @@ PassManager::PassManager(Module * _module) : module(_module)
 /// @brief 注册默认优化流水线
 /// @param optLevel 优化级别
 /// @param enableRVVLoopVectorize 是否启用 RVV 循环向量化
-void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool enableRVVLoopVectorize)
+void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
+                                                      bool enableRVVLoopVectorize,
+                                                      bool enableParallel)
 {
     clear();
     if (module == nullptr || optLevel <= 0) {
@@ -122,6 +125,15 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         TailRecursionElim pass(func);
         return pass.run();
     });
+
+    // 循环并行（多线程）优化：默认关闭，仅在 --parallel=on 时插入
+    // 须在 LSR/LoopTiling 等循环变换之前运行，否则规范循环形态被破坏后匹配器无法识别
+    if (enableParallel) {
+        registerFunctionPass("LoopParallelize", [this](Function * func) {
+            LoopParallelize pass(func, module);
+            return pass.run();
+        });
+    }
 
     registerLateModulePass("PostInlineCleanup", [](Module * currentModule) {
         SmallFunctionInline pass(currentModule);
