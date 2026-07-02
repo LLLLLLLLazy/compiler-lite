@@ -450,7 +450,8 @@ bool LoopStrengthReduce::tryReduceHeader(BasicBlock * header)
     if (reduceFirstCandidate(header, preheader, latch, scev, loopBody)) {
         return true;
     }
-    return reducePointerIVOffsetGEP(header, preheader, latch, scev, loopBody);
+
+    return false;
 }
 
 bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,

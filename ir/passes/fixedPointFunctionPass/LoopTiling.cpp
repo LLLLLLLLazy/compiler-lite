@@ -28,7 +28,9 @@
 #include "Module.h"
 #include "PhiInst.h"
 #include "ScalarEvolution.h"
+#include "SelectInst.h"
 #include "StoreInst.h"
+#include "Use.h"
 #include "Value.h"
 #include "AnalysisCache.h"
 #include "CostModel.h"
@@ -62,6 +64,7 @@ bool sameRoot(const PointerRoot & lhs, const PointerRoot & rhs);
 bool isKnownRoot(const PointerRoot & root);
 PointerRoot stripPointerRoot(Value * value);
 bool isAddConstStep(Value * value, PhiInst * induction, int32_t expectedStep);
+void insertBeforeTerminator(BasicBlock * bb, Instruction * inst);
 
 /// @brief 判断值是否定义在循环体内部
 /// @param value 待判断的值
@@ -106,6 +109,60 @@ bool valueDependsOn(Value * value, Value * needle)
 {
     std::unordered_set<Value *> visiting;
     return valueDependsOn(value, needle, visiting);
+}
+
+bool getPhiIncomingSplit(PhiInst * phi,
+                         const std::unordered_set<BasicBlock *> & loopBody,
+                         Value *& entryValue,
+                         BasicBlock *& entryBlock,
+                         Value *& backedgeValue,
+                         BasicBlock *& backedgeBlock)
+{
+    entryValue = nullptr;
+    entryBlock = nullptr;
+    backedgeValue = nullptr;
+    backedgeBlock = nullptr;
+    if (!phi || phi->getIncomingCount() != 2) {
+        return false;
+    }
+
+    for (int32_t index = 0; index < phi->getIncomingCount(); ++index) {
+        BasicBlock * block = phi->getIncomingBlock(index);
+        Value * value = phi->getIncomingValue(index);
+        if (loopBody.find(block) == loopBody.end()) {
+            if (entryValue) {
+                return false;
+            }
+            entryValue = value;
+            entryBlock = block;
+        } else {
+            if (backedgeValue) {
+                return false;
+            }
+            backedgeValue = value;
+            backedgeBlock = block;
+        }
+    }
+
+    return entryValue && entryBlock && backedgeValue && backedgeBlock;
+}
+
+void insertAfterPhis(BasicBlock * bb, const std::vector<Instruction *> & newInsts)
+{
+    if (!bb || newInsts.empty()) {
+        return;
+    }
+
+    auto & insts = bb->getInstructions();
+    auto insertPos = insts.begin();
+    while (insertPos != insts.end() && dynamic_cast<PhiInst *>(*insertPos)) {
+        ++insertPos;
+    }
+
+    for (auto * inst : newInsts) {
+        inst->setParentBlock(bb);
+        insts.insert(insertPos, inst);
+    }
 }
 
 /// @brief 获取值在函数形参列表中的索引
@@ -384,6 +441,326 @@ bool collapseRepeatedInvariantCallLoop(Function * func,
 
         // 折叠循环：将上界设为init+1，使循环只执行一次
         cmp->setOperand(1, mod->newConstInt32(loop.initialIntValue + 1));
+        return true;
+    }
+
+    return false;
+}
+
+struct RepeatedReductionMatch {
+    CanonicalLoop loop;
+    PhiInst * reductionPhi = nullptr;
+    Value * entryValue = nullptr;
+    Value * backedgeValue = nullptr;
+};
+
+bool instructionEscapesLoop(Instruction * inst, const std::unordered_set<BasicBlock *> & loopBody)
+{
+    if (!inst || !inst->hasResultValue()) {
+        return false;
+    }
+
+    for (auto * use : inst->getUseList()) {
+        auto * userInst = use ? dynamic_cast<Instruction *>(use->getUser()) : nullptr;
+        if (!userInst || !userInst->getParentBlock()) {
+            continue;
+        }
+        if (loopBody.find(userInst->getParentBlock()) == loopBody.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool hasPhiUseOutsideLoop(Value * value, const std::unordered_set<BasicBlock *> & loopBody)
+{
+    if (!value) {
+        return false;
+    }
+    for (auto * use : value->getUseList()) {
+        auto * userInst = use ? dynamic_cast<Instruction *>(use->getUser()) : nullptr;
+        if (!userInst || !userInst->getParentBlock() ||
+            loopBody.find(userInst->getParentBlock()) != loopBody.end()) {
+            continue;
+        }
+        if (dynamic_cast<PhiInst *>(userInst)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void replaceUsesOutsideLoopExcept(Value * oldValue,
+                                  Value * newValue,
+                                  const std::unordered_set<BasicBlock *> & loopBody,
+                                  const std::unordered_set<Instruction *> & skip)
+{
+    if (!oldValue || !newValue || oldValue == newValue) {
+        return;
+    }
+
+    std::vector<Use *> uses(oldValue->getUseList().begin(), oldValue->getUseList().end());
+    for (auto * use : uses) {
+        auto * userInst = use ? dynamic_cast<Instruction *>(use->getUser()) : nullptr;
+        if (!userInst || !userInst->getParentBlock() ||
+            loopBody.find(userInst->getParentBlock()) != loopBody.end() || skip.count(userInst)) {
+            continue;
+        }
+        userInst->replaceOperand(oldValue, newValue);
+    }
+}
+
+bool isIndependentOfRepeatedReduction(Value * value,
+                                      Value * accumulator,
+                                      PhiInst * outerInduction,
+                                      const std::unordered_set<BasicBlock *> & loopBody)
+{
+    // 累加项必须是循环不变量：把 N 次 `acc += term` 折叠成 `entry + N*delta`
+    // 的前提是每次迭代加上的 term 完全相同。若 term 定义在循环体内，它会随迭代
+    // 变化（内层归约结果、随下标变化的内存 load、LSR 生成的指针 IV 派生值等），
+    // 此时折叠不成立——这正是把 `sum += c[i][j]` 误折叠成 `sum*N` 的根因。
+    // 与兄弟变换 collapseRepeatedInvariantCallLoop 用 isDefinedInLoop 校验调用
+    // 实参循环不变的做法保持一致。
+    return value && !isDefinedInLoop(value, loopBody) && !valueDependsOn(value, accumulator) &&
+           !valueDependsOn(value, outerInduction);
+}
+
+bool isAdditiveReductionValue(Value * value,
+                              Value * accumulator,
+                              PhiInst * outerInduction,
+                              const std::unordered_set<BasicBlock *> & loopBody,
+                              std::unordered_set<Value *> & visiting);
+
+bool isAdditiveReductionPhi(PhiInst * phi,
+                            Value * accumulator,
+                            PhiInst * outerInduction,
+                            const std::unordered_set<BasicBlock *> & loopBody,
+                            std::unordered_set<Value *> & visiting)
+{
+    if (!phi || phi->getIncomingCount() != 2 || !phi->getType()->isInt32Type() ||
+        loopBody.find(phi->getParentBlock()) == loopBody.end()) {
+        return false;
+    }
+
+    for (int32_t seedIndex = 0; seedIndex < phi->getIncomingCount(); ++seedIndex) {
+        const int32_t updateIndex = 1 - seedIndex;
+        if (isAdditiveReductionValue(phi->getIncomingValue(seedIndex),
+                                     accumulator,
+                                     outerInduction,
+                                     loopBody,
+                                     visiting) &&
+            isAdditiveReductionValue(phi->getIncomingValue(updateIndex),
+                                     phi,
+                                     outerInduction,
+                                     loopBody,
+                                     visiting)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool isAdditiveReductionValue(Value * value,
+                              Value * accumulator,
+                              PhiInst * outerInduction,
+                              const std::unordered_set<BasicBlock *> & loopBody,
+                              std::unordered_set<Value *> & visiting)
+{
+    if (value == accumulator) {
+        return true;
+    }
+    if (!value || !visiting.insert(value).second) {
+        return false;
+    }
+
+    if (auto * phi = dynamic_cast<PhiInst *>(value)) {
+        return isAdditiveReductionPhi(phi, accumulator, outerInduction, loopBody, visiting);
+    }
+
+    auto * binary = dynamic_cast<BinaryInst *>(value);
+    if (!binary) {
+        return false;
+    }
+
+    if (binary->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
+        const bool lhsAdditive =
+            isAdditiveReductionValue(binary->getLHS(), accumulator, outerInduction, loopBody, visiting);
+        const bool rhsAdditive =
+            isAdditiveReductionValue(binary->getRHS(), accumulator, outerInduction, loopBody, visiting);
+        if (lhsAdditive == rhsAdditive) {
+            return false;
+        }
+        Value * term = lhsAdditive ? binary->getRHS() : binary->getLHS();
+        return isIndependentOfRepeatedReduction(term, accumulator, outerInduction, loopBody);
+    }
+
+    if (binary->getOp() == IRInstOperator::IRINST_OP_SUB_I) {
+        return isAdditiveReductionValue(binary->getLHS(), accumulator, outerInduction, loopBody, visiting) &&
+               isIndependentOfRepeatedReduction(binary->getRHS(), accumulator, outerInduction, loopBody);
+    }
+
+    return false;
+}
+
+bool isAdditiveReductionValue(Value * value,
+                              Value * accumulator,
+                              PhiInst * outerInduction,
+                              const std::unordered_set<BasicBlock *> & loopBody)
+{
+    std::unordered_set<Value *> visiting;
+    return isAdditiveReductionValue(value, accumulator, outerInduction, loopBody, visiting);
+}
+
+bool isAllowedRepeatedReductionInstruction(Instruction * inst,
+                                           const RepeatedReductionMatch & match,
+                                           Instruction * inductionNext)
+{
+    return inst == match.loop.cmp || inst == match.loop.branch || inst == inductionNext ||
+           inst == match.reductionPhi || dynamic_cast<PhiInst *>(inst) != nullptr ||
+           dynamic_cast<BranchInst *>(inst) != nullptr || dynamic_cast<CondBranchInst *>(inst) != nullptr ||
+           dynamic_cast<ICmpInst *>(inst) != nullptr || dynamic_cast<LoadInst *>(inst) != nullptr ||
+           dynamic_cast<GetElementPtrInst *>(inst) != nullptr || dynamic_cast<BinaryInst *>(inst) != nullptr;
+}
+
+bool loopBodyIsReadOnlyReduction(const std::unordered_set<BasicBlock *> & loopBody,
+                                 const RepeatedReductionMatch & match,
+                                 Instruction * inductionNext)
+{
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            if (!isAllowedRepeatedReductionInstruction(inst, match, inductionNext)) {
+                return false;
+            }
+            if (dynamic_cast<StoreInst *>(inst) || dynamic_cast<CallInst *>(inst) || inst->mayWriteMemory()) {
+                return false;
+            }
+            if (inst != match.reductionPhi && inst != match.loop.induction && instructionEscapesLoop(inst, loopBody)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool matchRepeatedInvariantReductionLoop(ScalarEvolution & scev,
+                                         LoopInfo & loopInfo,
+                                         BasicBlock * header,
+                                         RepeatedReductionMatch & match)
+{
+    match = {};
+    if (!scev.matchCanonicalLoop(header, match.loop) || !match.loop.recurrence ||
+        match.loop.recurrence->getStep() != 1 || !match.loop.hasConstInitialValue ||
+        match.loop.initialIntValue != 0 || !match.loop.boundValue ||
+        match.loop.compareKind != ScalarEvolution::CompareKind::LessThan) {
+        return false;
+    }
+
+    const auto * loopBody = loopInfo.getLoopBody(header);
+    if (!loopBody || loopBody->empty()) {
+        return false;
+    }
+
+    Instruction * inductionNext = dynamic_cast<Instruction *>(match.loop.recurrence->getBackEdgeValue());
+    if (!inductionNext) {
+        return false;
+    }
+
+    for (auto * inst : header->getInstructions()) {
+        auto * phi = dynamic_cast<PhiInst *>(inst);
+        if (!phi) {
+            break;
+        }
+        if (phi == match.loop.induction || !phi->getType()->isInt32Type()) {
+            continue;
+        }
+        if (match.reductionPhi) {
+            return false;
+        }
+
+        Value * entryValue = nullptr;
+        BasicBlock * entryBlock = nullptr;
+        Value * backedgeValue = nullptr;
+        BasicBlock * backedgeBlock = nullptr;
+        if (!getPhiIncomingSplit(phi, *loopBody, entryValue, entryBlock, backedgeValue, backedgeBlock)) {
+            return false;
+        }
+        if (!isAdditiveReductionValue(backedgeValue, phi, match.loop.induction, *loopBody) ||
+            valueDependsOn(backedgeValue, match.loop.induction)) {
+            return false;
+        }
+
+        match.reductionPhi = phi;
+        match.entryValue = entryValue;
+        match.backedgeValue = backedgeValue;
+    }
+
+    if (!match.reductionPhi || !match.entryValue || !match.backedgeValue) {
+        return false;
+    }
+
+    if (!loopBodyIsReadOnlyReduction(*loopBody, match, inductionNext)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool collapseRepeatedInvariantReductionLoop(Function * func,
+                                            Module * mod,
+                                            LoopInfo & loopInfo,
+                                            ScalarEvolution & scev)
+{
+    if (!func || !mod || func->getBlocks().empty()) {
+        return false;
+    }
+
+    for (auto * header : func->getBlocks()) {
+        if (!loopInfo.isLoopHeader(header)) {
+            continue;
+        }
+
+        RepeatedReductionMatch match;
+        if (!matchRepeatedInvariantReductionLoop(scev, loopInfo, header, match)) {
+            continue;
+        }
+        const auto * loopBody = loopInfo.getLoopBody(header);
+        if (!loopBody || hasPhiUseOutsideLoop(match.reductionPhi, *loopBody)) {
+            continue;
+        }
+
+        auto * zero = mod->newConstInt32(0);
+        auto * one = mod->newConstInt32(1);
+        auto * positiveCmp = new ICmpInst(func,
+                                          IRInstOperator::IRINST_OP_GT_I,
+                                          match.loop.boundValue,
+                                          zero,
+                                          match.loop.cmp->getType());
+        auto * singleTripBound = new SelectInst(func, positiveCmp, one, zero, match.loop.boundValue->getType());
+        insertBeforeTerminator(match.loop.preheader, positiveCmp);
+        insertBeforeTerminator(match.loop.preheader, singleTripBound);
+        match.loop.cmp->setOperand(1, singleTripBound);
+
+        auto * oneLoopDelta = new BinaryInst(func,
+                                             IRInstOperator::IRINST_OP_SUB_I,
+                                             match.reductionPhi,
+                                             match.entryValue,
+                                             match.reductionPhi->getType());
+        auto * totalDelta = new BinaryInst(func,
+                                           IRInstOperator::IRINST_OP_MUL_I,
+                                           oneLoopDelta,
+                                           match.loop.boundValue,
+                                           match.reductionPhi->getType());
+        auto * collapsed = new BinaryInst(func,
+                                          IRInstOperator::IRINST_OP_ADD_I,
+                                          match.entryValue,
+                                          totalDelta,
+                                          match.reductionPhi->getType());
+        insertAfterPhis(match.loop.exit, {oneLoopDelta, totalDelta, collapsed});
+        replaceUsesOutsideLoopExcept(match.reductionPhi,
+                                     collapsed,
+                                     *loopBody,
+                                     {oneLoopDelta, totalDelta, collapsed});
         return true;
     }
 
@@ -923,7 +1300,8 @@ bool LoopTiling::run()
             cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
         auto & scev = cache.getOrCompute<ScalarEvolution>(
             [this, &domTree, &loopInfo] { return ScalarEvolution(func, &domTree, &loopInfo); });
-        if (collapseRepeatedInvariantCallLoop(func, mod, loopInfo, scev)) {
+        if (collapseRepeatedInvariantCallLoop(func, mod, loopInfo, scev) ||
+            collapseRepeatedInvariantReductionLoop(func, mod, loopInfo, scev)) {
             cache.invalidateCFGAnalyses();
             return true;
         }
