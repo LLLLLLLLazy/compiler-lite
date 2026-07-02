@@ -26,7 +26,10 @@ public:
     /// @brief 注册默认优化流水线
     /// @param optLevel 优化级别
     /// @param enableRVVLoopVectorize 是否启用 RVV 循环向量化
-    void registerDefaultOptimizationPipeline(int32_t optLevel, bool enableRVVLoopVectorize = false);
+    /// @param enableParallel 是否启用循环并行（多线程）优化
+    void registerDefaultOptimizationPipeline(int32_t optLevel,
+                                             bool enableRVVLoopVectorize = false,
+                                             bool enableParallel = false);
 
     /// @brief 注册后端前置的 phi 降级流水线
     void registerPhiLoweringPipeline();

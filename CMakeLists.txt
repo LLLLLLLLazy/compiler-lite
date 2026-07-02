@@ -239,6 +239,8 @@ set(IR_SRCS
 	ir/analysis/ScalarEvolution.cpp
 	ir/passes/functionPass/ArrayScalarize.h
 	ir/passes/functionPass/ArrayScalarize.cpp
+	ir/passes/functionPass/LoopParallelize.h
+	ir/passes/functionPass/LoopParallelize.cpp
 	ir/passes/fixedPointFunctionPass/ConstProp.h
 	ir/passes/fixedPointFunctionPass/ConstProp.cpp
 	ir/passes/modulePass/InterproceduralConstProp.h

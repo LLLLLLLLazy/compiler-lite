@@ -112,6 +112,15 @@ static std::string gRAStatsJsonFile;
 static bool gRiscV64RVV = false;
 
 ///
+/// @brief 循环并行（多线程）优化开关
+///
+/// 默认关闭：初赛 RISC-V 板不支持多线程，关闭时不插入 LoopParallelize pass，
+/// 后端也不会输出任何 __mt* 运行时，行为与无多线程实现完全一致。
+/// 决赛若板上开放多线程支持，用 --parallel=on 启用。
+///
+static bool gEnableParallel = false;
+
+///
 /// @brief 启用竞赛扩展文法
 ///
 static bool gExtendedGrammar = false;
@@ -148,6 +157,7 @@ static struct option long_options[] = {
 	{"ra-no-split", no_argument, nullptr, 1002},
 	{"ra-stats-json", required_argument, nullptr, 1003},
 	{"riscv64-rvv", required_argument, nullptr, 1004},
+	{"parallel", required_argument, nullptr, 1005},
 	{nullptr, 0, nullptr, 0}};
 
 /// @brief 显示帮助
@@ -177,6 +187,7 @@ static void showHelp(const std::string & exeName)
 	std::cout << "  --ra-no-split              Disable live interval splitting\n";
 	std::cout << "  --ra-stats-json=FILE       Write machine-readable register allocation metrics\n";
 	std::cout << "  --riscv64-rvv=on|off       Enable or disable RVV codegen\n";
+	std::cout << "  --parallel=on|off          Enable or disable loop parallelization (multithreading)\n";
 }
 
 /// @brief 参数解析与有效性检查
@@ -286,6 +297,20 @@ lb_check:
 					gRiscV64RVV = false;
 				} else {
 					minic_log(LOG_ERROR, "--riscv64-rvv 仅支持 on 或 off");
+					return -1;
+				}
+				break;
+			}
+			case 1005: {
+				std::string value = optarg;
+				// 多线程开关只影响优化流水线是否插入 LoopParallelize pass；
+				// 后端运行时由 moduleUsesMtRuntime() 自动门控，关闭时不输出 __mt*。
+				if (value == "on") {
+					gEnableParallel = true;
+				} else if (value == "off") {
+					gEnableParallel = false;
+				} else {
+					minic_log(LOG_ERROR, "--parallel 仅支持 on 或 off");
 					return -1;
 				}
 				break;
@@ -449,7 +474,8 @@ static int compile(std::string inputFile, std::string outputFile)
 		if (gOptLevel > 0) {
 			PassManager passManager(module);
 			// 输出 LLVM IR 时不插入自定义 RVV IR，避免 .ll 路径出现后端专用指令。
-			passManager.registerDefaultOptimizationPipeline(gOptLevel, gRiscV64RVV && !gShowLLVMIR);
+			passManager.registerDefaultOptimizationPipeline(
+				gOptLevel, gRiscV64RVV && !gShowLLVMIR, gEnableParallel);
 			passManager.run();
 		}
 
