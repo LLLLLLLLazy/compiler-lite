@@ -26,35 +26,75 @@ bool LiveIntervalSplitter::isSplitDescendant(LiveInterval * interval) const
 
 /// @brief 选择最佳分裂点
 int LiveIntervalSplitter::chooseSplitPos(LiveInterval * interval,
-                                         const std::vector<int> & callInstNumbers)
+                                         const std::vector<int> & callInstNumbers,
+                                         const std::vector<int> & extraSplitCandidates)
 {
-	// 收集区间内的调用点作为候选分裂点
-	std::vector<int> candidates;
-	for (int callNum : callInstNumbers) {
-		if (callNum > interval->getStart() && callNum < interval->getEnd()) {
-			candidates.push_back(callNum);
-		}
+	if (interval == nullptr) {
+		return -1;
 	}
 
-	if (!candidates.empty()) {
-		// 选择使左右子区间长度差异最小的调用点
-		int bestPos = candidates[0];
-		int bestDiff = std::abs((candidates[0] - interval->getStart()) -
-		                        (interval->getEnd() - candidates[0]));
-		for (int pos : candidates) {
-			int diff = std::abs((pos - interval->getStart()) -
-			                    (interval->getEnd() - pos));
-			if (diff < bestDiff) {
-				bestDiff = diff;
+	auto hasUsesOnBothSides = [&](int pos) {
+		bool left = false;
+		bool right = false;
+		for (int usePos : interval->getUsePositions()) {
+			if (usePos < pos) {
+				left = true;
+			} else if (usePos >= pos) {
+				right = true;
+			}
+			if (left && right) {
+				return true;
+			}
+		}
+		return left && right;
+	};
+
+	auto chooseBalanced = [&](const std::vector<int> & source) {
+		int bestPos = -1;
+		int bestDiff = 0;
+		for (int pos : source) {
+			if (pos <= interval->getStart() || pos >= interval->getEnd() || !hasUsesOnBothSides(pos)) {
+				continue;
+			}
+			int diff = std::abs((pos - interval->getStart()) - (interval->getEnd() - pos));
+			if (bestPos < 0 || diff < bestDiff) {
 				bestPos = pos;
+				bestDiff = diff;
 			}
 		}
 		return bestPos;
+	};
+
+	// 调用点优先：跨call压力通常最需要拆分。
+	int best = chooseBalanced(callInstNumbers);
+	if (best >= 0) {
+		return best;
 	}
 
-	// 当前后端的分配结果仍是 Value* -> RegAllocInfo，不能表达同一值在普通
-	// 指令中点两侧使用不同寄存器，也没有插入 split copy。没有调用点时
-	// 中点分裂既不可表示，也会在超多形参场景中造成大量无收益的图重建。
+	// 其次考虑循环/基本块边界候选。
+	best = chooseBalanced(extraSplitCandidates);
+	if (best >= 0) {
+		return best;
+	}
+
+	// 最后在最大use gap附近切一次，避免长无call热区间整体落栈。
+	const auto & uses = interval->getUsePositions();
+	if (uses.size() >= 4) {
+		int bestGap = 0;
+		int gapPos = -1;
+		for (std::size_t i = 1; i < uses.size(); ++i) {
+			int gap = uses[i] - uses[i - 1];
+			int pos = uses[i];
+			if (gap > bestGap && pos > interval->getStart() && pos < interval->getEnd()) {
+				bestGap = gap;
+				gapPos = pos;
+			}
+		}
+		if (gapPos > 0 && hasUsesOnBothSides(gapPos)) {
+			return gapPos;
+		}
+	}
+
 	return -1;
 }
 
@@ -150,6 +190,7 @@ std::optional<SplitInfo> LiveIntervalSplitter::trySplit(
 	std::vector<LiveInterval *> & intervals,
 	InterferenceGraph *& graph,
 	const std::vector<int> & callInstNumbers,
+	const std::vector<int> & extraSplitCandidates,
 	std::unordered_map<LiveInterval *, int> & intervalToIndex)
 {
 	// 前置检查
@@ -174,7 +215,7 @@ std::optional<SplitInfo> LiveIntervalSplitter::trySplit(
 	}
 
 	// 选择分裂点
-	int splitPos = chooseSplitPos(interval, callInstNumbers);
+	int splitPos = chooseSplitPos(interval, callInstNumbers, extraSplitCandidates);
 
 	// 确保分裂点在区间内部
 	if (splitPos <= interval->getStart() || splitPos >= interval->getEnd()) {

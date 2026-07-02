@@ -48,6 +48,7 @@ public:
 		std::vector<LiveInterval *> & intervals,
 		InterferenceGraph *& graph,
 		const std::vector<int> & callInstNumbers,
+		const std::vector<int> & extraSplitCandidates,
 		std::unordered_map<LiveInterval *, int> & intervalToIndex);
 
 	/// @brief 获取所有分裂记录
@@ -63,7 +64,8 @@ private:
 	/// @brief 选择最佳分裂点
 	/// 策略：选择区间内的调用点；无调用点则不分裂
 	int chooseSplitPos(LiveInterval * interval,
-	                   const std::vector<int> & callInstNumbers);
+	                   const std::vector<int> & callInstNumbers,
+	                   const std::vector<int> & extraSplitCandidates);
 
 	/// @brief 执行分裂：将 interval 拆分为 [start, splitPos) 和 [splitPos, end)
 	SplitInfo doSplit(LiveInterval * interval, int splitPos,

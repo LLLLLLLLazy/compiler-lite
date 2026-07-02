@@ -3295,14 +3295,254 @@ RegAllocInfo InstSelectorRiscV64::getAllocInfo(Value * val, Instruction * inst) 
 	return allocator.getAllocationInfo(val, inst);
 }
 
+RegAllocInfo InstSelectorRiscV64::getLiveRegInfo(Value * val, Instruction * inst) const
+{
+	return allocator.getRegisterHoldingValueAt(val, inst);
+}
+
 RegAllocInfo InstSelectorRiscV64::getAllocInfoAt(Value * val, int instNum) const
 {
 	return allocator.getAllocationInfoAt(val, instNum);
 }
 
+bool hasMaterializablePointerRoot(Value * val)
+{
+	if (!val || val->getType() == nullptr || !val->getType()->isPointerType()) {
+		return false;
+	}
+	if (dynamic_cast<AllocaInst *>(val) != nullptr || dynamic_cast<GlobalVariable *>(val) != nullptr) {
+		return true;
+	}
+	if (auto * gep = dynamic_cast<GetElementPtrInst *>(val)) {
+		return hasMaterializablePointerRoot(gep->getBasePointer());
+	}
+	return false;
+}
+
+bool InstSelectorRiscV64::isCheapRematerializable(Value * val, Instruction * inst, int depth) const
+{
+	if (val == nullptr || depth > 2) {
+		return false;
+	}
+	if (dynamic_cast<ConstInteger *>(val) != nullptr || dynamic_cast<ConstFloat *>(val) != nullptr) {
+		return true;
+	}
+	if (dynamic_cast<AllocaInst *>(val) != nullptr || dynamic_cast<GlobalVariable *>(val) != nullptr) {
+		return val->getType() != nullptr && val->getType()->isPointerType();
+	}
+	auto operandAvailable = [&](Value * operand) {
+		// 必须用严格查询：操作数只有在此处仍活跃于寄存器中才可直接读取，
+		// 否则其物理寄存器可能已被别的值复用（重新物化会读到错误数据）。
+		return getLiveRegInfo(operand, inst).hasReg() || isCheapRematerializable(operand, inst, depth + 1);
+	};
+	auto * gep = dynamic_cast<GetElementPtrInst *>(val);
+	if (gep != nullptr) {
+		// 仅重物化根基址可直接 materialize 的地址链（global/alloca）。
+		// 对函数参数/普通SSA指针为根的 GEP，后续位置可能只剩某个 LSR 指针IV 的寄存器，
+		// 不能安全还原原始基址，保守走栈 reload。
+		if (depth >= 2 || !hasMaterializablePointerRoot(gep) || !operandAvailable(gep->getBasePointer())) {
+			return false;
+		}
+		Value * index = gep->getIndexOperand();
+		return dynamic_cast<ConstInteger *>(index) != nullptr || operandAvailable(index);
+	}
+	auto * binary = dynamic_cast<BinaryInst *>(val);
+	if (binary == nullptr || depth >= 2) {
+		return false;
+	}
+	if (binary->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
+		return operandAvailable(binary->getLHS()) && operandAvailable(binary->getRHS());
+	}
+	if (binary->getOp() == IRInstOperator::IRINST_OP_SHL_I) {
+		return dynamic_cast<ConstInteger *>(binary->getRHS()) != nullptr && operandAvailable(binary->getLHS());
+	}
+	return false;
+}
+
+bool InstSelectorRiscV64::tryRematerializeGEP(GetElementPtrInst * gep, int dstReg, Instruction * inst, int depth,
+                                              const std::set<int> & busy)
+{
+	if (gep == nullptr || depth > 2) {
+		return false;
+	}
+	// dstReg 从这里开始承载基址，后续所有临时寄存器借用都必须避开它以及祖先帧的活跃寄存器。
+	std::set<int> childBusy = busy;
+	childBusy.insert(dstReg);
+	Value * basePtr = gep->getBasePointer();
+	if (dynamic_cast<AllocaInst *>(basePtr) != nullptr || dynamic_cast<GlobalVariable *>(basePtr) != nullptr) {
+		iloc.lea_var(dstReg, basePtr);
+	} else {
+		RegAllocInfo baseInfo = getLiveRegInfo(basePtr, inst);
+		if (baseInfo.hasReg()) {
+			iloc.mov_reg(dstReg, baseInfo.regId);
+		} else if (isCheapRematerializable(basePtr, inst, depth + 1)) {
+			if (!tryRematerializeValue(basePtr, dstReg, inst, depth + 1, busy)) {
+				return false;
+			}
+		} else {
+			return false;
+		}
+	}
+
+	auto * basePtrType = dynamic_cast<const PointerType *>(basePtr->getType());
+	if (basePtrType == nullptr) {
+		return false;
+	}
+	Type * stepType = const_cast<Type *>(basePtrType->getPointeeType());
+	if (gep->isArrayDecayGEP()) {
+		auto * arrayType = dynamic_cast<ArrayType *>(stepType);
+		if (arrayType != nullptr) {
+			stepType = arrayType->getElementType();
+		}
+	}
+	const int elemSize = stepType->getSize();
+	if (auto * constIndex = asConstInteger(gep->getIndexOperand())) {
+		const int64_t offset = static_cast<int64_t>(constIndex->getVal()) * elemSize;
+		if (offset == 0) {
+			return true;
+		}
+		if (!fitsInt(offset)) {
+			return false;
+		}
+		if (PlatformRiscV64::constExpr(static_cast<int>(offset))) {
+			iloc.inst("addi", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+			          std::to_string(offset));
+		} else {
+			auto offsetTmp = tempMgr.borrowExcluding(inst, childBusy);
+			iloc.load_imm(offsetTmp.reg(), static_cast<int>(offset));
+			iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+			          PlatformRiscV64::regName[offsetTmp.reg()]);
+		}
+		return true;
+	}
+
+	Value * index = gep->getIndexOperand();
+	RegAllocInfo indexInfo = getLiveRegInfo(index, inst);
+	auto idxTmp = tempMgr.borrowExcluding(inst, childBusy);
+	if (indexInfo.hasReg()) {
+		iloc.mov_reg(idxTmp.reg(), indexInfo.regId);
+	} else if (!tryRematerializeValue(index, idxTmp.reg(), inst, depth + 1, childBusy)) {
+		return false;
+	}
+	if (elemSize != 1) {
+		if (isPowerOfTwo(static_cast<uint64_t>(elemSize))) {
+			iloc.inst("slli", PlatformRiscV64::regName[idxTmp.reg()], PlatformRiscV64::regName[idxTmp.reg()],
+			          std::to_string(log2PowerOfTwo(static_cast<uint64_t>(elemSize))));
+		} else {
+			auto mulTmp = tempMgr.borrowExcluding(inst, childBusy);
+			iloc.load_imm(mulTmp.reg(), elemSize);
+			iloc.inst("mul", PlatformRiscV64::regName[idxTmp.reg()], PlatformRiscV64::regName[idxTmp.reg()],
+			          PlatformRiscV64::regName[mulTmp.reg()]);
+		}
+	}
+	iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+	          PlatformRiscV64::regName[idxTmp.reg()]);
+	return true;
+}
+
+bool InstSelectorRiscV64::tryRematerializeValue(Value * val, int dstReg, Instruction * inst, int depth,
+                                                const std::set<int> & busy)
+{
+	if (val == nullptr || dstReg < 0 || depth > 2) {
+		return false;
+	}
+	// dstReg 一旦写入左操作数/基址等中间结果，计算右操作数时必须保住它，
+	// 同时也要保住祖先帧仍在使用的寄存器（busy）。
+	std::set<int> childBusy = busy;
+	childBusy.insert(dstReg);
+	if (auto * intConst = dynamic_cast<ConstInteger *>(val)) {
+		iloc.load_imm(dstReg, intConst->getVal());
+		return true;
+	}
+	if (auto * floatConst = dynamic_cast<ConstFloat *>(val)) {
+		iloc.load_imm(dstReg, static_cast<int32_t>(floatConst->getBitPattern()));
+		return true;
+	}
+	if (dynamic_cast<AllocaInst *>(val) != nullptr || dynamic_cast<GlobalVariable *>(val) != nullptr) {
+		if (val->getType() != nullptr && val->getType()->isPointerType()) {
+			iloc.lea_var(dstReg, val);
+			return true;
+		}
+		return false;
+	}
+	if (auto * gep = dynamic_cast<GetElementPtrInst *>(val)) {
+		if (!hasMaterializablePointerRoot(gep)) {
+			return false;
+		}
+		return tryRematerializeGEP(gep, dstReg, inst, depth + 1, busy);
+	}
+	auto * binary = dynamic_cast<BinaryInst *>(val);
+	if (binary == nullptr || depth >= 2) {
+		return false;
+	}
+	const bool isAddressValue = val->getType() != nullptr && val->getType()->isPointerType();
+	if (binary->getOp() == IRInstOperator::IRINST_OP_SHL_I) {
+		auto * shiftConst = asConstInteger(binary->getRHS());
+		if (shiftConst == nullptr) {
+			return false;
+		}
+		RegAllocInfo lhsInfo = getLiveRegInfo(binary->getLHS(), inst);
+		if (lhsInfo.hasReg()) {
+			iloc.mov_reg(dstReg, lhsInfo.regId);
+		} else if (!tryRematerializeValue(binary->getLHS(), dstReg, inst, depth + 1, busy)) {
+			return false;
+		}
+		iloc.inst(isAddressValue ? "slli" : "slliw", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+		          std::to_string(shiftConst->getVal() & (isAddressValue ? 63 : 31)));
+		return true;
+	}
+	if (binary->getOp() != IRInstOperator::IRINST_OP_ADD_I) {
+		return false;
+	}
+
+	Value * lhsValue = binary->getLHS();
+	Value * rhsValue = binary->getRHS();
+	RegAllocInfo lhsInfo = getLiveRegInfo(lhsValue, inst);
+	if (lhsInfo.hasReg()) {
+		iloc.mov_reg(dstReg, lhsInfo.regId);
+	} else if (!tryRematerializeValue(lhsValue, dstReg, inst, depth + 1, busy)) {
+		return false;
+	}
+	if (auto * rhsConst = asConstInteger(rhsValue)) {
+		const int32_t imm = rhsConst->getVal();
+		if (isAddressValue) {
+			if (PlatformRiscV64::constExpr(imm)) {
+				iloc.inst("addi", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg], std::to_string(imm));
+			} else {
+				auto rhsTmp = tempMgr.borrowExcluding(inst, childBusy);
+				iloc.load_imm(rhsTmp.reg(), imm);
+				iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+				          PlatformRiscV64::regName[rhsTmp.reg()]);
+			}
+		} else if (PlatformRiscV64::constExpr(imm)) {
+			iloc.inst("addiw", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg], std::to_string(imm));
+		} else {
+			auto rhsTmp = tempMgr.borrowExcluding(inst, childBusy);
+			iloc.load_imm(rhsTmp.reg(), imm);
+			iloc.inst("addw", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+			          PlatformRiscV64::regName[rhsTmp.reg()]);
+		}
+		return true;
+	}
+	RegAllocInfo rhsInfo = getLiveRegInfo(rhsValue, inst);
+	auto rhsTmp = tempMgr.borrowExcluding(inst, childBusy);
+	if (rhsInfo.hasReg()) {
+		iloc.mov_reg(rhsTmp.reg(), rhsInfo.regId);
+	} else if (!tryRematerializeValue(rhsValue, rhsTmp.reg(), inst, depth + 1, childBusy)) {
+		return false;
+	}
+	iloc.inst(isAddressValue ? "add" : "addw", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+	          PlatformRiscV64::regName[rhsTmp.reg()]);
+	return true;
+}
+
 void InstSelectorRiscV64::loadValueToReg(int reg, Value * val, Instruction * inst)
 {
-	iloc.load_var(reg, val, getAllocInfo(val, inst));
+	RegAllocInfo info = getAllocInfo(val, inst);
+	if (info.hasStackSlot && isCheapRematerializable(val, inst) && tryRematerializeValue(val, reg, inst)) {
+		return;
+	}
+	iloc.load_var(reg, val, info);
 }
 
 void InstSelectorRiscV64::loadFloatValueToReg(int reg, Value * val, int tmpReg, Instruction * inst)
@@ -3371,12 +3611,12 @@ InstSelectorRiscV64::loadOperand(Value * val, Instruction * inst, int excludeReg
 	}
 
 	if (preferredReg >= 0 && preferredReg != excludeReg) {
-		iloc.load_var(preferredReg, val, info);
+		loadValueToReg(preferredReg, val, inst);
 		return OperandReg(preferredReg);
 	}
 
 	auto reg = tempMgr.borrow(inst, excludeReg);
-	iloc.load_var(reg.reg(), val, info);
+	loadValueToReg(reg.reg(), val, inst);
 	return OperandReg(std::move(reg));
 }
 

@@ -306,6 +306,31 @@ bool isMemoryOpcode(const std::string & opcode)
 	return isLoadOpcode(opcode) || isStoreOpcode(opcode);
 }
 
+bool parseMemoryOperand(const std::string & operand, int & offset, std::string & base)
+{
+	const auto open = operand.find('(');
+	const auto close = operand.find(')', open == std::string::npos ? 0 : open);
+	if (open == std::string::npos || close == std::string::npos || close <= open + 1 || close + 1 != operand.size()) {
+		return false;
+	}
+	if (!parseIntImmediate(operand.substr(0, open), offset)) {
+		return false;
+	}
+
+	base = operand.substr(open + 1, close - open - 1);
+	return !base.empty();
+}
+
+bool isSigned12BitImmediate(int value)
+{
+	return value >= -2048 && value <= 2047;
+}
+
+std::string formatMemoryOperand(int offset, const std::string & base)
+{
+	return std::to_string(offset) + "(" + base + ")";
+}
+
 bool isBranchOpcode(const std::string & opcode)
 {
 	return !opcode.empty() && opcode[0] == 'b';
@@ -1001,13 +1026,28 @@ struct StackSlotAccess {
 	bool valid = false;          ///< 是否成功解析为栈槽访问
 	bool isLoad = false;         ///< 是否为加载指令
 	bool isStore = false;        ///< 是否为存储指令
+	int width = 0;               ///< 访问宽度（字节）
 	std::string opcode;          ///< 原始操作码
 	std::string base;            ///< 栈基址寄存器
-	std::string slotKey;         ///< 栈槽键，包含基址和偏移
+	std::string locationKey;      ///< 栈槽地址键，包含基址和偏移
+	std::string slotKey;         ///< 栈槽键，包含访问宽度、基址和偏移
 	std::string valueReg;        ///< load 的目标寄存器或 store 的源寄存器
 };
 
-/// @brief 判断基址寄存器是否为当前函数栈帧基址
+int stackAccessWidth(const std::string & opcode)
+{
+	if (opcode == "lb" || opcode == "lbu" || opcode == "sb") return 1;
+	if (opcode == "lh" || opcode == "lhu" || opcode == "sh") return 2;
+	if (opcode == "lw" || opcode == "lwu" || opcode == "sw" || opcode == "flw" || opcode == "fsw") return 4;
+	if (opcode == "ld" || opcode == "sd" || opcode == "fld" || opcode == "fsd") return 8;
+	return 0;
+}
+
+bool isMatchingGprStackLoadStore(const StackSlotAccess & store, const StackSlotAccess & load)
+{
+	return store.valid && load.valid && store.isStore && load.isLoad && store.slotKey == load.slotKey &&
+	       ((store.opcode == "sd" && load.opcode == "ld") || (store.opcode == "sw" && load.opcode == "lw"));
+}
 bool isStackBaseRegister(const std::string & reg)
 {
 	return reg == "sp" || reg == "s0" || reg == "fp";
@@ -1054,8 +1094,13 @@ StackSlotAccess decodeStackSlotAccess(RiscV64Inst * inst)
 	access.isLoad = isLoadOpcode(inst->opcode);
 	access.isStore = isStoreOpcode(inst->opcode);
 	access.opcode = inst->opcode;
+	access.width = stackAccessWidth(inst->opcode);
+	if (access.width <= 0) {
+		return StackSlotAccess{};
+	}
 	access.base = base;
-	access.slotKey = base + ":" + std::to_string(offset);
+	access.locationKey = base + ":" + std::to_string(offset);
+	access.slotKey = std::to_string(access.width) + ":" + access.locationKey;
 	access.valueReg = inst->result;
 	return access;
 }
@@ -1087,7 +1132,7 @@ StackSlotBlockLiveness buildStackSlotLiveness(InstList & code)
 			if (access.isLoad && block.def.find(access.slotKey) == block.def.end()) {
 				block.use.insert(access.slotKey);
 			}
-			if (access.isStore && access.opcode == "sd") {
+			if (access.isStore && (access.opcode == "sd" || access.opcode == "sw")) {
 				block.def.insert(access.slotKey);
 			}
 		}
@@ -1133,7 +1178,7 @@ bool stackSlotUsedLaterInBlock(InstList & code, InstIt start, const std::string 
 			if (access.isLoad) {
 				return true;
 			}
-			if (access.isStore && access.opcode == "sd") {
+			if (access.isStore && (access.opcode == "sd" || access.opcode == "sw")) {
 				return false;
 			}
 			return true;
@@ -1169,12 +1214,12 @@ bool stackSlotLiveOutOfBlock(const StackSlotBlockLiveness & liveness, RiscV64Ins
 bool forwardStackStoreLoads(InstList & code)
 {
 	bool changed = false;
-	const StackSlotBlockLiveness liveness = buildStackSlotLiveness(code);
 
 	for (auto it = code.begin(); it != code.end(); ++it) {
 		auto * store = *it;
 		StackSlotAccess storeAccess = decodeStackSlotAccess(store);
-		if (!storeAccess.valid || !storeAccess.isStore || storeAccess.opcode != "sd" || storeAccess.valueReg.empty()) {
+		if (!storeAccess.valid || !storeAccess.isStore || storeAccess.valueReg.empty() ||
+		    (storeAccess.opcode != "sd" && storeAccess.opcode != "sw")) {
 			continue;
 		}
 
@@ -1190,11 +1235,15 @@ bool forwardStackStoreLoads(InstList & code)
 			}
 
 			StackSlotAccess access = decodeStackSlotAccess(inst);
+			if (access.valid && access.isStore && access.locationKey == storeAccess.locationKey &&
+			    access.slotKey != storeAccess.slotKey) {
+				break;
+			}
 			if (access.valid && access.slotKey == storeAccess.slotKey) {
 				if (access.isStore) {
 					break;
 				}
-				if (!access.isLoad || access.opcode != "ld" || access.valueReg.empty()) {
+				if (!isMatchingGprStackLoadStore(storeAccess, access) || access.valueReg.empty()) {
 					break;
 				}
 
@@ -1209,10 +1258,8 @@ bool forwardStackStoreLoads(InstList & code)
 					inst->setDead();
 				}
 
-				if (!stackSlotLiveOutOfBlock(liveness, store, storeAccess.slotKey) &&
-				    !stackSlotUsedLaterInBlock(code, scan, storeAccess.slotKey)) {
-					store->setDead();
-				}
+				// 只做寄存器转发；保留原 store，避免在宽度别名、跨块或 ABI 栈槽
+				// 情况下误删仍可能被读取的栈写。
 				changed = true;
 				break;
 			}
@@ -1223,6 +1270,102 @@ bool forwardStackStoreLoads(InstList & code)
 
 			if (definesResultOperand(inst) && inst->result == storeAccess.valueReg) {
 				sourceAvailable = false;
+			}
+		}
+	}
+
+	return changed;
+}
+
+void invalidateCachedStackRegister(std::unordered_map<std::string, std::string> & cachedRegs,
+                                   const std::string & reg)
+{
+	if (reg.empty()) {
+		return;
+	}
+	for (auto it = cachedRegs.begin(); it != cachedRegs.end();) {
+		if (it->second == reg) {
+			it = cachedRegs.erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
+void invalidateCachedStackLocation(std::unordered_map<std::string, std::string> & cachedRegs,
+                                    const std::string & locationKey)
+{
+	if (locationKey.empty()) {
+		return;
+	}
+	const std::string suffix = ":" + locationKey;
+	for (auto it = cachedRegs.begin(); it != cachedRegs.end();) {
+		if (it->first.size() >= suffix.size() &&
+		    it->first.compare(it->first.size() - suffix.size(), suffix.size(), suffix) == 0) {
+			it = cachedRegs.erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
+///
+/// 在无控制流边界、无未知store、缓存寄存器未被重定义的直线区间内，
+/// 将第二次及后续 `lw/ld dst, slot` 改写为 `mv dst, cachedReg`。
+bool eliminateRedundantStackReloads(InstList & code)
+{
+	bool changed = false;
+	std::unordered_map<std::string, std::string> cachedRegs;
+
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * inst = *it;
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+		if (isControlBoundary(inst)) {
+			cachedRegs.clear();
+			continue;
+		}
+
+		StackSlotAccess access = decodeStackSlotAccess(inst);
+		if (access.valid && access.isStore) {
+			invalidateCachedStackLocation(cachedRegs, access.locationKey);
+			if ((access.opcode == "sd" || access.opcode == "sw") && !access.valueReg.empty()) {
+				cachedRegs[access.slotKey] = access.valueReg;
+			}
+			continue;
+		}
+
+		if (access.valid && access.isLoad && (access.opcode == "ld" || access.opcode == "lw") &&
+		    !access.valueReg.empty()) {
+			const std::string dst = access.valueReg;
+			auto cachedIt = cachedRegs.find(access.slotKey);
+			if (cachedIt != cachedRegs.end() && !cachedIt->second.empty()) {
+				const std::string src = cachedIt->second;
+				invalidateCachedStackRegister(cachedRegs, dst);
+				if (dst == src) {
+					inst->setDead();
+				} else {
+					inst->replace("mv", dst, src);
+				}
+				cachedRegs[access.slotKey] = dst;
+				changed = true;
+				continue;
+			}
+
+			invalidateCachedStackRegister(cachedRegs, dst);
+			cachedRegs[access.slotKey] = dst;
+			continue;
+		}
+
+		if (!access.valid && isStoreOpcode(inst->opcode)) {
+			cachedRegs.clear();
+			continue;
+		}
+		if (definesResultOperand(inst)) {
+			invalidateCachedStackRegister(cachedRegs, inst->result);
+			if (inst->result == "sp" || inst->result == "s0" || inst->result == "fp") {
+				cachedRegs.clear();
 			}
 		}
 	}
@@ -1410,6 +1553,72 @@ bool foldUnitStepIncrements(InstList & code)
 		li->setDead();
 		add->replace("addiw", indexReg, indexReg, "1");
 		mv->setDead();
+		changed = true;
+	}
+	return changed;
+}
+
+/// @brief 将紧邻访存的地址临时寄存器折叠进12位访存偏移。
+///
+///   addi tmp, base, imm
+///   lw   dst, 0(tmp)      ->   lw dst, imm(base)
+///
+/// store 同理，但当 tmp 同时作为待写入值时跳过，避免改变 store 的数据值。
+bool foldAddiAddressIntoMemoryOffset(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * addi = *it;
+		if (!isLiveInst(addi) || addi->opcode != "addi" || addi->result.empty() || addi->arg1.empty()) {
+			continue;
+		}
+
+		const std::string tmpReg = addi->result;
+		const std::string baseReg = addi->arg1;
+		if (tmpReg == baseReg) {
+			continue;
+		}
+
+		int addOffset = 0;
+		if (!parseIntImmediate(addi->arg2, addOffset)) {
+			continue;
+		}
+
+		auto memIt = nextMachineInst(code, it);
+		if (memIt == code.end()) {
+			continue;
+		}
+		auto * mem = *memIt;
+		if (!isLiveInst(mem) || !isMemoryOpcode(mem->opcode)) {
+			continue;
+		}
+
+		int memOffset = 0;
+		std::string memBase;
+		if (!parseMemoryOperand(mem->arg1, memOffset, memBase) || memBase != tmpReg) {
+			continue;
+		}
+
+		const int foldedOffset = addOffset + memOffset;
+		if (!isSigned12BitImmediate(foldedOffset)) {
+			continue;
+		}
+
+		if (isStoreOpcode(mem->opcode) && mem->result == tmpReg) {
+			continue;
+		}
+
+		const bool memRedefinesTmp = isLoadOpcode(mem->opcode) && mem->result == tmpReg;
+		// 若 tmp 不是被这条 load 覆盖，删除 addi 前必须证明 tmp 在当前基本块内会被重新定义。
+		// 只检查“后面是否直接使用”不够：tmp 可能跨控制流边界在后继块使用，例如：
+		//   addi a2,a1,4; lw t0,0(a2); ...; blt ..., .L; .L: mv a1,a2
+		// 遇到边界时无法做局部证明，保守跳过。
+		if (!memRedefinesTmp && !registerRedefinedBeforeUseOrBoundary(code, memIt, tmpReg)) {
+			continue;
+		}
+
+		mem->arg1 = formatMemoryOperand(foldedOffset, baseReg);
+		addi->setDead();
 		changed = true;
 	}
 	return changed;
@@ -3245,6 +3454,7 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		localChanged = foldInvariantAddressOffsetsIntoRecurrences(code) || localChanged;
 		localChanged = reduceMulByConst(code) || localChanged;
 		localChanged = foldUnitStepIncrements(code) || localChanged;
+		localChanged = foldAddiAddressIntoMemoryOffset(code) || localChanged;
 		// 2的幂取模零值分支优化：将 x % ±2^k ==/!= 0 的余数计算链替换为位掩码测试
 		localChanged = foldPowerOfTwoRemainderZeroBranch(code) || localChanged;
 		localChanged = foldZeroSubCompare(code) || localChanged;
@@ -3254,8 +3464,10 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		localChanged = foldMaterializationMoves(code) || localChanged;
 		// 折叠零值 store，减少局部数组清零中的 li 0 序列
 		localChanged = foldZeroStores(code) || localChanged;
-		// 转发同块内 64 位栈槽 store-load，消除地址临时值绕栈往返
+		// 转发同块内 32/64 位GPR栈槽 store-load，消除地址临时值绕栈往返
 		localChanged = forwardStackStoreLoads(code) || localChanged;
+		// 消除同一直线区间内对同一栈槽的重复 GPR reload
+		localChanged = eliminateRedundantStackReloads(code) || localChanged;
 		// coalesce专属优化：将局部唯一消费的producer直接改写到copy目标寄存器
 		if (enableCoalesceRetargeting) {
 			localChanged = retargetSingleUseDefinitions(code) || localChanged;
