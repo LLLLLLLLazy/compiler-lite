@@ -40,6 +40,7 @@
 #include "PhiInst.h"
 #include "PlatformRiscV64.h"
 #include "PointerType.h"
+#include "Rematerialization.h"
 #include "ReturnInst.h"
 #include "SelectInst.h"
 #include "SIToFPInst.h"
@@ -3324,12 +3325,10 @@ bool InstSelectorRiscV64::isCheapRematerializable(Value * val, Instruction * ins
 	if (val == nullptr || depth > 2) {
 		return false;
 	}
-	if (dynamic_cast<ConstInteger *>(val) != nullptr || dynamic_cast<ConstFloat *>(val) != nullptr) {
-		return true;
+	if (!RiscV64Rematerialization::isCheapRematerializable(val, depth)) {
+		return false;
 	}
-	if (dynamic_cast<AllocaInst *>(val) != nullptr || dynamic_cast<GlobalVariable *>(val) != nullptr) {
-		return val->getType() != nullptr && val->getType()->isPointerType();
-	}
+
 	auto operandAvailable = [&](Value * operand) {
 		// 必须用严格查询：操作数只有在此处仍活跃于寄存器中才可直接读取，
 		// 否则其物理寄存器可能已被别的值复用（重新物化会读到错误数据）。
@@ -3337,18 +3336,15 @@ bool InstSelectorRiscV64::isCheapRematerializable(Value * val, Instruction * ins
 	};
 	auto * gep = dynamic_cast<GetElementPtrInst *>(val);
 	if (gep != nullptr) {
-		// 仅重物化根基址可直接 materialize 的地址链（global/alloca）。
-		// 对函数参数/普通SSA指针为根的 GEP，后续位置可能只剩某个 LSR 指针IV 的寄存器，
-		// 不能安全还原原始基址，保守走栈 reload。
-		if (depth >= 2 || !hasMaterializablePointerRoot(gep) || !operandAvailable(gep->getBasePointer())) {
+		if (!operandAvailable(gep->getBasePointer())) {
 			return false;
 		}
 		Value * index = gep->getIndexOperand();
 		return dynamic_cast<ConstInteger *>(index) != nullptr || operandAvailable(index);
 	}
 	auto * binary = dynamic_cast<BinaryInst *>(val);
-	if (binary == nullptr || depth >= 2) {
-		return false;
+	if (binary == nullptr) {
+		return true;
 	}
 	if (binary->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
 		return operandAvailable(binary->getLHS()) && operandAvailable(binary->getRHS());
@@ -3469,7 +3465,10 @@ bool InstSelectorRiscV64::tryRematerializeValue(Value * val, int dstReg, Instruc
 		if (!hasMaterializablePointerRoot(gep)) {
 			return false;
 		}
-		return tryRematerializeGEP(gep, dstReg, inst, depth + 1, busy);
+		// GEP 本身仍处在当前 depth；只有它的 base/index 操作数进入下一层。
+		// 若这里提前 +1，两层 GEP（如 main 中 arr[i] -> arr[i][0]）会被误判为
+		// 超过重物化深度，进而回退读取一个从未写入的 remat-only 栈槽。
+		return tryRematerializeGEP(gep, dstReg, inst, depth, busy);
 	}
 	auto * binary = dynamic_cast<BinaryInst *>(val);
 	if (binary == nullptr || depth >= 2) {
@@ -3539,7 +3538,8 @@ bool InstSelectorRiscV64::tryRematerializeValue(Value * val, int dstReg, Instruc
 void InstSelectorRiscV64::loadValueToReg(int reg, Value * val, Instruction * inst)
 {
 	RegAllocInfo info = getAllocInfo(val, inst);
-	if (info.hasStackSlot && isCheapRematerializable(val, inst) && tryRematerializeValue(val, reg, inst)) {
+	if ((info.hasStackSlot || allocator.isRematOnlySpill(val)) && isCheapRematerializable(val, inst) &&
+	    tryRematerializeValue(val, reg, inst)) {
 		return;
 	}
 	iloc.load_var(reg, val, info);
@@ -3547,7 +3547,13 @@ void InstSelectorRiscV64::loadValueToReg(int reg, Value * val, Instruction * ins
 
 void InstSelectorRiscV64::loadFloatValueToReg(int reg, Value * val, int tmpReg, Instruction * inst)
 {
-	iloc.load_float_var(reg, val, tmpReg, getAllocInfo(val, inst));
+	RegAllocInfo info = getAllocInfo(val, inst);
+	if ((info.hasStackSlot || allocator.isRematOnlySpill(val)) && isCheapRematerializable(val, inst) &&
+	    tryRematerializeValue(val, tmpReg, inst)) {
+		iloc.inst("fmv.w.x", PlatformRiscV64::fpRegName[reg], PlatformRiscV64::regName[tmpReg]);
+		return;
+	}
+	iloc.load_float_var(reg, val, tmpReg, info);
 }
 
 void InstSelectorRiscV64::loadVectorValueToReg(int reg, Value * val, Instruction * inst)
@@ -3638,7 +3644,7 @@ InstSelectorRiscV64::loadFloatOperand(Value * val,
 	bool temp = false;
 	if (preferredReg >= 0 && preferredReg != excludeReg &&
 	    (allowLivePreferredReg || !isFloatRegLiveAt(preferredReg, inst)) &&
-	    borrowedFloatTemps.find(preferredReg) == borrowedFloatTemps.end()) {
+	    (allowLivePreferredReg || borrowedFloatTemps.find(preferredReg) == borrowedFloatTemps.end())) {
 		reg = preferredReg;
 	} else {
 		reg = borrowFloatTemp(inst, {excludeReg});
@@ -3675,6 +3681,9 @@ void InstSelectorRiscV64::storeResult(Value * val, int srcReg, Instruction * ins
 		return;
 	}
 	RegAllocInfo info = getAllocInfo(val, inst);
+	if (allocator.isRematOnlySpill(val)) {
+		return;
+	}
 	if (info.hasReg()) {
 		if (srcReg != info.regId) {
 			iloc.mov_reg(info.regId, srcReg);
@@ -3697,6 +3706,9 @@ void InstSelectorRiscV64::storeFloatResult(Value * val, int srcReg, Instruction 
 	}
 
 	RegAllocInfo info = getAllocInfo(val, inst);
+	if (allocator.isRematOnlySpill(val)) {
+		return;
+	}
 	if (info.hasFloatReg()) {
 		if (srcReg != info.regId) {
 			iloc.fmov_reg(info.regId, srcReg);
@@ -3719,6 +3731,9 @@ void InstSelectorRiscV64::storeVectorResult(Value * val, int srcReg, Instruction
 	}
 
 	RegAllocInfo info = getAllocInfo(val, inst);
+	if (allocator.isRematOnlySpill(val)) {
+		return;
+	}
 	if (info.hasVectorReg()) {
 		if (srcReg != info.regId) {
 			iloc.inst("vmv.v.v", PlatformRiscV64::vectorRegName[info.regId], PlatformRiscV64::vectorRegName[srcReg]);
