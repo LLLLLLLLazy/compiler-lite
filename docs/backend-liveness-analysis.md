@@ -6,26 +6,29 @@
 
 ## 整体流程
 
-**源码位置**: `backend/riscv64/LiveIntervalAnalysis.cpp:217-531` (`computeLiveIntervals`)
+**源码位置**: `backend/riscv64/LiveIntervalAnalysis.cpp:217-552` (`computeLiveIntervals`)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Phase 1: 指令编号 & 局部 def/use 收集 (line 257-280)      │
+│  Phase 1: 指令编号 & 局部 def/use 收集 (line 257-283)      │
 │  按 func->getBlocks() 正序遍历，为每条指令编号              │
 ├─────────────────────────────────────────────────────────────┤
 │  Phase 2: CFG 级活跃性传播 (line 285-311)                  │
 │  反向数据流固定点迭代，计算 liveIn/liveOut                  │
 ├─────────────────────────────────────────────────────────────┤
-│  Phase 3: 逐块反向扫描生成区间 (line 317-374)              │
+│  Phase 3: 逐块反向扫描生成区间 (line 313-374)              │
 │  按基本块正序，块内指令逆序，构造 LiveInterval              │
 ├─────────────────────────────────────────────────────────────┤
-│  Phase 4: 循环多定义值保守扩展 (line 382-426)              │
+│  精确段快照 (line 376-390)                                 │
+│  保守扩展前快照每个值的精确 def-use 段，供 RegCoalescer 判干涉│
+├─────────────────────────────────────────────────────────────┤
+│  Phase 4: 循环多定义值保守扩展 (line 392-442)              │
 │  PhiLowering 后同一 Value 多次定义的保守处理                │
 ├─────────────────────────────────────────────────────────────┤
-│  Phase 5: 跨循环活跃性补足 (line 432-502)                  │
+│  Phase 5: 跨循环活跃性补足 (line 444-518)                  │
 │  对跨越自然循环的值补足整个循环体区间                       │
 ├─────────────────────────────────────────────────────────────┤
-│  Phase 6: 溢出权重计算 (line 504-530)                      │
+│  Phase 6: 溢出权重计算 (line 520-545)                      │
 │  基于循环深度加权                                          │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -34,7 +37,7 @@
 
 ## Phase 1: 指令编号 & 局部 def/use 收集
 
-**源码位置**: `LiveIntervalAnalysis.cpp:257-280`
+**源码位置**: `LiveIntervalAnalysis.cpp:257-283`
 
 按 `func->getBlocks()` 的存储顺序（即基本块在函数中的排列顺序）正序遍历，为每条指令分配递增编号：
 
@@ -165,7 +168,7 @@ while (changed) {
 
 ## Phase 3: 逐块反向扫描生成区间
 
-**源码位置**: `LiveIntervalAnalysis.cpp:317-374`
+**源码位置**: `LiveIntervalAnalysis.cpp:313-374`
 
 在 Phase 2 计算出 liveIn/liveOut 后，逐块构造 LiveInterval。
 
@@ -231,7 +234,9 @@ for (auto * bb : blocks) {
 
 ## Phase 4: 循环多定义值保守扩展
 
-**源码位置**: `LiveIntervalAnalysis.cpp:382-426`
+**源码位置**: `LiveIntervalAnalysis.cpp:392-442`
+
+> 注：在本阶段之前（`line 376-390`）会先把每个值的精确 def-use 段快照到 `preciseSegments`，供 `RegCoalescer` 用精确干涉判断合并循环累加器一类 copy；保守扩展只是在此之上为 split/call-transfer 补的冗余覆盖。
 
 PhiLowering 会把循环携带值改写成"同一个逻辑 Value 的多次定义"。当前 split lane 仍按 Value 的整体区间决定 call-site transfer，因此对这类值做保守扩展。
 
@@ -249,7 +254,7 @@ if (firstPos != INT_MAX && lastPos != INT_MIN) {
 
 ## Phase 5: 跨循环活跃性补足
 
-**源码位置**: `LiveIntervalAnalysis.cpp:432-502`
+**源码位置**: `LiveIntervalAnalysis.cpp:444-518`
 
 对跨越自然循环的值，补足整个循环体区间，避免回边值在 split lane 被误判为可中途改位。
 
@@ -270,7 +275,7 @@ if ((hasDefBeforeLoop && (usedInLoop || usedAtOrAfterLoop)) ||
 
 ## Phase 6: 溢出权重计算
 
-**源码位置**: `LiveIntervalAnalysis.cpp:504-530`
+**源码位置**: `LiveIntervalAnalysis.cpp:520-545`
 
 基于循环深度加权，循环越深溢出代价越高：
 
@@ -292,7 +297,7 @@ for (auto * interval : intervals) {
 
 ## 干涉图构建
 
-**源码位置**: `LiveIntervalAnalysis.cpp:538-565` (`buildInterferenceGraph`)
+**源码位置**: `LiveIntervalAnalysis.cpp:554-581` (`buildInterferenceGraph`)
 
 在活跃区间计算完成后，根据区间重叠关系构建干涉图：
 

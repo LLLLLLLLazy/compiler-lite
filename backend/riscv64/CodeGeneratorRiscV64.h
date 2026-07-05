@@ -67,10 +67,11 @@ protected:
 	void getIRValueStr(Value * val, std::string & str);
 
 private:
-	/// @brief 当前模块是否使用内置循环并行运行时
+	/// @brief 判断当前模块是否使用了内置循环并行运行时函数
+	/// @return 若模块中存在对 __mtstart/__mtend/__mtstart4 等函数的调用则返回true
 	bool moduleUsesMtRuntime() const;
 
-	/// @brief 输出内置循环并行运行时汇编
+	/// @brief 输出内置循环并行运行时汇编（__mtstart/__mtend/__mtstart4 等）
 	void emitMtRuntime();
 
 

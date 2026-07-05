@@ -14,7 +14,7 @@
 #include "Module.h"
 #include "fixedPointFunctionPass/CFGSimplify.h"
 #include "fixedPointFunctionPass/ConstProp.h"
-#include "fixedPointFunctionPass/BitwiseLoopIdiom.h"
+#include "fixedPointFunctionPass/BoundedBitLoopSolver.h"
 #include "fixedPointFunctionPass/CanonicalizeLoop.h"
 #include "fixedPointFunctionPass/DeadInstElim.h"
 #include "fixedPointFunctionPass/GVN.h"
@@ -22,6 +22,7 @@
 #include "fixedPointFunctionPass/LICM.h"
 #include "fixedPointFunctionPass/LoopConstantPromotion.h"
 #include "fixedPointFunctionPass/LoopExitValueRewrite.h"
+#include "fixedPointFunctionPass/LoopFusion.h"
 #include "fixedPointFunctionPass/LoopStrengthReduce.h"
 #include "fixedPointFunctionPass/IndVarSimplify.h"
 #include "fixedPointFunctionPass/LoopTiling.h"
@@ -34,14 +35,15 @@
 #include "fixedPointFunctionPass/PureCallLoopCache.h"
 #include "functionPass/ArrayScalarize.h"
 #include "functionPass/LateLoopCFGCleanup.h"
+#include "functionPass/LoopParallelize.h"
 #include "functionPass/LoopRotate.h"
 #include "functionPass/Mem2Reg.h"
-#include "functionPass/ModMulIdiom.h"
 #include "functionPass/PhiToSelect.h"
 #include "functionPass/PhiLowering.h"
 #include "functionPass/PureCallCSE.h"
 #include "functionPass/TailRecursionElim.h"
 #include "modulePass/DeadFunctionElim.h"
+#include "modulePass/DeadGlobalStoreElim.h"
 #include "modulePass/GlobalToLocal.h"
 #include "modulePass/InterproceduralConstProp.h"
 #include "modulePass/SmallFunctionInline.h"
@@ -60,7 +62,9 @@ PassManager::PassManager(Module * _module) : module(_module)
 /// @brief 注册默认优化流水线
 /// @param optLevel 优化级别
 /// @param enableRVVLoopVectorize 是否启用 RVV 循环向量化
-void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool enableRVVLoopVectorize)
+void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
+                                                      bool enableRVVLoopVectorize,
+                                                      bool enableParallel)
 {
     clear();
     if (module == nullptr || optLevel <= 0) {
@@ -81,6 +85,14 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     // 使 GlobalToLocal 能将初始化型函数访问的全局内化到 main
     registerModulePass("DeadFunctionElim", [](Module * currentModule) {
         DeadFunctionElim pass(currentModule);
+        return pass.run();
+    });
+
+    // 死函数清除后，只写不读且地址不逃逸的全局（典型如仅初始化的全局数组）
+    // 上的 store 已无任何读者，消除之；此时尚未 Mem2Reg，删除 store 后其
+    // 地址 GEP 即成无用户死指令，交由下游 DeadInstElim 清扫
+    registerModulePass("DeadGlobalStoreElim", [](Module * currentModule) {
+        DeadGlobalStoreElim pass(currentModule);
         return pass.run();
     });
 
@@ -105,13 +117,6 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         return false;
     });
 
-    // 递归倍加模乘惯用法识别：须在 Mem2Reg 后（依赖 SSA 分支形态）、
-    // GVN/InstCombine 前（避免 srem/sdiv 被变形破坏匹配）
-    registerFunctionPass("ModMulIdiom", [this](Function * func) {
-        ModMulIdiom pass(func, module);
-        return pass.run();
-    });
-
     registerFunctionPass("GVN", [this](Function * func) {
         GVN pass(func, module);
         return pass.run();
@@ -121,6 +126,15 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         TailRecursionElim pass(func);
         return pass.run();
     });
+
+    // 循环并行（多线程）优化：默认关闭，仅在 --parallel=on 时插入
+    // 须在 LSR/LoopTiling 等循环变换之前运行，否则规范循环形态被破坏后匹配器无法识别
+    if (enableParallel) {
+        registerFunctionPass("LoopParallelize", [this](Function * func) {
+            LoopParallelize pass(func, module);
+            return pass.run();
+        });
+    }
 
     registerLateModulePass("PostInlineCleanup", [](Module * currentModule) {
         SmallFunctionInline pass(currentModule);
@@ -209,6 +223,13 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
     });
 
     // ---- 子组2：循环变换 ----
+    // 先做相邻同界计数循环融合：此时循环仍是规范非旋转形态（比较位于循环头），
+    // 且尚未被 LSR 改写为指针游标，matchCanonicalLoop 可识别；融合后再交给
+    // LoopExitValueRewrite / LoopTiling / LSR 等下游 pass
+    registerFixedPointFunctionPass("LoopFusion", [this](Function * func) {
+        LoopFusion pass(func, module);
+        return pass.run();
+    });
     // 基于 SCEV 把规范计数循环头部递推 phi 的出口取值替换为闭式表达式，
     // 随后消除因此变为无副作用且出口无依赖的空循环
     registerFixedPointFunctionPass("LoopExitValueRewrite", [this](Function * func) {
@@ -296,9 +317,9 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel, bool ena
         PhiToSelect pass(func);
         return pass.run();
     });
-    // 位模拟循环惯用法识别：依赖 PhiToSelect 把累加分支规范成 select 形态
-    registerFixedPointFunctionPass("BitwiseLoopIdiom", [this](Function * func) {
-        BitwiseLoopIdiom pass(func, module);
+    // 有界位迭代循环求解：依赖 PhiToSelect 把累加分支规范成 select 形态
+    registerFixedPointFunctionPass("BoundedBitLoopSolver", [this](Function * func) {
+        BoundedBitLoopSolver pass(func, module);
         return pass.run();
     });
     registerFixedPointFunctionPass("InstCombine", [this](Function * func) {

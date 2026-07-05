@@ -24,7 +24,6 @@
 #include "AllocaInst.h"
 #include "BasicBlock.h"
 #include "BinaryInst.h"
-#include "MulModInst.h"
 #include "BranchInst.h"
 #include "CallInst.h"
 #include "ConstFloat.h"
@@ -505,7 +504,6 @@ InstSelectorRiscV64::InstSelectorRiscV64(
 	translatorHandlers[IRInstOperator::IRINST_OP_MUL_I] = &InstSelectorRiscV64::translate_mul;
 	translatorHandlers[IRInstOperator::IRINST_OP_DIV_I] = &InstSelectorRiscV64::translate_div;
 	translatorHandlers[IRInstOperator::IRINST_OP_MOD_I] = &InstSelectorRiscV64::translate_mod;
-	translatorHandlers[IRInstOperator::IRINST_OP_MULMOD_I] = &InstSelectorRiscV64::translate_mulmod;
 	translatorHandlers[IRInstOperator::IRINST_OP_SHL_I] = &InstSelectorRiscV64::translate_shl;
 	translatorHandlers[IRInstOperator::IRINST_OP_ASHR_I] = &InstSelectorRiscV64::translate_ashr;
 	translatorHandlers[IRInstOperator::IRINST_OP_LSHR_I] = &InstSelectorRiscV64::translate_lshr;
@@ -1410,51 +1408,6 @@ void InstSelectorRiscV64::translate_mod(Instruction * inst)
 		return;
 	}
 	translate_binary(inst, "remw");
-}
-
-/// @brief 翻译宽乘取模指令 (i64)a*b % m
-///
-/// 两个 i32 操作数以有符号扩展形式驻留 64 位寄存器，用 64 位 mul 得到精确的
-/// 64 位积（调用点守卫保证 0<=a<m、b>=0，积非负且 < 2^61 不溢出），再对正常量
-/// 取有符号 64 位余数。余数落在 [0, m) 内，可直接当作已符号扩展的 i32 使用
-void InstSelectorRiscV64::translate_mulmod(Instruction * inst)
-{
-	auto * mulmod = dynamic_cast<MulModInst *>(inst);
-	if (mulmod == nullptr) {
-		return;
-	}
-	const int32_t modulus = mulmod->getModulus();
-
-	int dstReg = getResultReg(inst);
-	LocalTempManager::Lease dstLease;
-	if (dstReg < 0) {
-		dstLease = tempMgr.borrow(inst);
-		dstReg = dstLease.reg();
-	}
-
-	OperandReg lhs = loadOperand(mulmod->getA(), inst, dstReg);
-	const int rhsPreferredReg = lhs.reg != dstReg ? dstReg : -1;
-	OperandReg rhs = loadOperand(mulmod->getB(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
-
-	// 64 位无截断乘法
-	iloc.inst("mul",
-	          PlatformRiscV64::regName[dstReg],
-	          PlatformRiscV64::regName[lhs.reg],
-	          PlatformRiscV64::regName[rhs.reg]);
-
-	releaseOperand(rhs);
-	releaseOperand(lhs);
-
-	// 对常量取 64 位有符号余数
-	auto modTmp = tempMgr.borrowExcluding(inst, {dstReg});
-	iloc.load_imm(modTmp.reg(), modulus);
-	iloc.inst("rem",
-	          PlatformRiscV64::regName[dstReg],
-	          PlatformRiscV64::regName[dstReg],
-	          PlatformRiscV64::regName[modTmp.reg()]);
-	modTmp.release();
-
-	storeResult(inst, dstReg, inst);
 }
 
 /// @brief 翻译逻辑左移指令（shl）
@@ -2767,6 +2720,24 @@ void InstSelectorRiscV64::translate_select(Instruction * inst)
 
 		OperandReg cond = loadOperand(select->getCondition(), inst);
 
+		// 与整数路径同理：trueValue 已合并到 dstReg 时改用反向模式，避免写 false 覆盖仍存活的 true
+		RegAllocInfo trueInfoF = getAllocInfo(select->getTrueValue(), inst);
+		if (trueInfoF.hasFloatReg() && trueInfoF.regId == dstReg) {
+			iloc.inst("bne", PlatformRiscV64::regName[cond.reg], "zero", doneLabel);
+			releaseOperand(cond);
+			FloatOperandReg falseOperand = loadFloatOperand(select->getFalseValue(), inst, -1, dstReg);
+			if (falseOperand.reg != dstReg) {
+				iloc.fmov_reg(dstReg, falseOperand.reg);
+			}
+			releaseFloatOperand(falseOperand);
+			iloc.label(doneLabel);
+			storeFloatResult(inst, dstReg, inst);
+			if (dstTemp) {
+				releaseFloatTemp(dstReg);
+			}
+			return;
+		}
+
 		FloatOperandReg falseOperand = loadFloatOperand(select->getFalseValue(), inst, cond.reg, dstReg);
 		if (falseOperand.reg != dstReg) {
 			iloc.fmov_reg(dstReg, falseOperand.reg);
@@ -2798,6 +2769,23 @@ void InstSelectorRiscV64::translate_select(Instruction * inst)
 	}
 
 	OperandReg cond = loadOperand(select->getCondition(), inst);
+
+	// 若 trueValue 已被寄存器合并到 dstReg（累加器场景），先把 falseValue 写进 dst
+	// 会覆盖仍存活于 dst 的 trueValue，且其后"按 cond 覆写 true"因 true 已在 dst 被跳过，
+	// 使 select 恒取 falseValue。此时改用反向模式：dst 已持有 true，cond 为假时再用 false 覆写
+	RegAllocInfo trueInfo = getAllocInfo(select->getTrueValue(), inst);
+	if (trueInfo.hasReg() && trueInfo.regId == dstReg) {
+		iloc.inst("bne", PlatformRiscV64::regName[cond.reg], "zero", doneLabel);
+		releaseOperand(cond);
+		OperandReg falseOperand = loadOperand(select->getFalseValue(), inst, -1, dstReg);
+		if (falseOperand.reg != dstReg) {
+			iloc.mov_reg(dstReg, falseOperand.reg);
+		}
+		releaseOperand(falseOperand);
+		iloc.label(doneLabel);
+		storeResult(inst, dstReg, inst);
+		return;
+	}
 
 	OperandReg falseOperand = loadOperand(select->getFalseValue(), inst, cond.reg, dstReg);
 	if (falseOperand.reg != dstReg) {

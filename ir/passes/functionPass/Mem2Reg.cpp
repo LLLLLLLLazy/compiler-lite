@@ -30,6 +30,7 @@
 #include "PhiInst.h"
 #include "StoreInst.h"
 #include "Types/IntegerType.h"
+#include "fixedPointFunctionPass/UnreachableBlockElim.h"
 #include "Value.h"
 
 namespace {
@@ -73,6 +74,11 @@ void Mem2Reg::run()
     if (!func || func->isBuiltin() || func->getBlocks().empty()) {
         return;
     }
+
+    // 第 0 步：先删除从入口不可达的基本块。否则不可达块作为某个汇合点的前驱，
+    // 会让 DominanceFrontier 把该汇合点误判为多前驱 join 而错放/漏放 phi，
+    // 破坏 SSA 构造（典型触发：循环条件中带副作用调用的短路 && / ||）
+    UnreachableBlockElim(func).run();
 
     // 第 1 步：收集可提升的 alloca
     std::vector<AllocaInst *> allocas = findPromotableAllocas();

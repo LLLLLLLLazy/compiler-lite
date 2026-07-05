@@ -36,7 +36,7 @@ for (auto * param : params) {
 
 ### 1.2 Greedy 分配器处理形参
 
-可用 GPR 池包含 a0-a7、t0-t2/t5-t6、s1-s11（`GreedyRegAllocator.cpp:521-554`；t3-t4 保留作 scratch），形参和普通指令结果一样被分配到物理寄存器或栈槽。
+可用 GPR 池包含 a0-a7、t0-t2/t5-t6、s1-s11（`GreedyRegAllocator.cpp:524-556`；t3-t4 保留作 scratch），形参和普通指令结果一样被分配到物理寄存器或栈槽。
 
 形参可能被分到：
 
@@ -51,7 +51,7 @@ for (auto * param : params) {
 
 跨调用还活着的形参**不能**分到 a0-a7/t*，因为这些是 caller-saved，call 会 clobber。
 
-**源码位置**: `backend/riscv64/GreedyRegAllocator.cpp:782-800`
+**源码位置**: `backend/riscv64/GreedyRegAllocator.cpp:785-803`
 
 ```cpp
 bool GreedyRegAllocator::canAssignReg(LiveInterval * interval, int reg) const
@@ -64,7 +64,7 @@ bool GreedyRegAllocator::canAssignReg(LiveInterval * interval, int reg) const
 
 ### 1.4 栈分配阶段
 
-**源码位置**: `backend/riscv64/CodeGeneratorRiscV64.cpp:974-1007`
+**源码位置**: `backend/riscv64/CodeGeneratorRiscV64.cpp:657-690`
 
 ```cpp
 // 为所有形参创建分配信息
@@ -104,7 +104,7 @@ for (auto * param : func->getParams()) {
 
 ### 2.1 ABI 参数分类
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:51-81`
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:54-83`
 
 ```cpp
 enum class AbiArgLocKind { IntReg, FloatReg, Stack };
@@ -130,7 +130,7 @@ RISC-V ABI 规则：整数和浮点参数使用**独立的寄存器计数器**�
 
 ### 2.2 入口搬运的调用位置
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:547-571`
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:677-690`
 
 ```cpp
 void InstSelectorRiscV64::run()
@@ -143,7 +143,7 @@ void InstSelectorRiscV64::run()
 
 ### 2.3 emitFormalParamMoves 核心逻辑
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2524-2663`
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2969-3108`
 
 #### 整数形参：从 a0-a7 搬到分配位置
 
@@ -173,7 +173,7 @@ if (loc.kind == AbiArgLocKind::IntReg) {
 
 当出现 `a0→a1, a1→a0` 这种循环时，借用 scratch 寄存器打破：
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2480-2517` (`emitGprRegMoves`)
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2925-2962` (`emitGprRegMoves`)
 
 ```cpp
 while (!regMoves.empty()) {
@@ -201,9 +201,9 @@ mv  a0, t0       # 搬 原a0 → a0（从 scratch 恢复）
 
 #### 栈传整数参数
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2589-2607`
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:3033-3052`
 
-超过 8 个的整数参数由 caller 放在栈上；当前无帧指针，按 `frameSize + 槽偏移(sp)` 读取（基址/偏移由 `incomingStackBaseReg()`/`incomingStackOffset()` 给出）：
+超过 8 个的整数参数由 caller 放在栈上；当前无帧指针，按 `frameSize + 槽偏移(sp)` 读取（基址/偏移由 `incomingStackBaseReg()`/`incomingStackOffset()` 给出，`InstSelectorRiscV64.cpp:3110-3118`）：
 
 ```cpp
 const int base   = incomingStackBaseReg();            // 当前 = sp
@@ -219,7 +219,7 @@ if (info.hasReg()) {
 
 #### 浮点形参
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2609-2663`
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:3054-3108`
 
 | RA 分配结果 | 入口处理 | 生成的指令 |
 |------------|---------|-----------|
@@ -240,16 +240,16 @@ if (info.hasReg()) {
                     │                             │
                     │  1. 形参在指令 0 处隐式定义  │
                     │     LiveIntervalAnalysis     │
-                    │     (line 244)              │
+                    │     (line 249)              │
                     │                             │
                     │  2. Greedy 分配器分配        │
                     │     形参 → a0 / s1 / t0 / 栈│
                     │     GreedyRegAllocator      │
-                    │     (line 518)              │
+                    │     (line 524)              │
                     │                             │
                     │  3. 栈分配：栈传形参设 FP+偏移│
                     │     stackAlloc              │
-                    │     (line 996)              │
+                    │     (line 686)              │
                     └──────────────┬──────────────┘
                                    │
                                    │  分配结果写入 allocMap
@@ -259,12 +259,12 @@ if (info.hasReg()) {
                     │                             │
                     │  1. prologue 生成栈帧        │
                     │     allocStack              │
-                    │     (ILocRiscV64.cpp:727)   │
+                    │     (ILocRiscV64.cpp:767)   │
                     │                             │
                     │  2. emitFormalParamMoves    │
                     │     将形参从 ABI 位置        │
                     │     搬到 RA 决定的最终位置   │
-                    │     (line 2446)             │
+                    │     (line 2969)             │
                     │                             │
                     │  3. 翻译函数体指令           │
                     │     形参已在最终位置可用     │
@@ -362,7 +362,7 @@ lw    s2, 0(s0)        # a9: 从 caller 栈帧加载到 s2
 
 ## 5. 调用点实参传递（对称过程）
 
-**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:1949-2149` (`translate_call`)
+**源码位置**: `backend/riscv64/InstSelectorRiscV64.cpp:2336-2559` (`translate_call`)
 
 调用点做的是**反向操作**：将实参从 RA 分配的位置搬到 ABI 约定的 a0-a7/fa0-fa7/栈。
 

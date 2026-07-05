@@ -182,8 +182,6 @@ set(IR_SRCS
 	ir/Instructions/StoreInst.cpp
 	ir/Instructions/BinaryInst.h
 	ir/Instructions/BinaryInst.cpp
-	ir/Instructions/MulModInst.h
-	ir/Instructions/MulModInst.cpp
 	ir/Instructions/FCmpInst.h
 	ir/Instructions/FCmpInst.cpp
 	ir/Instructions/ICmpInst.h
@@ -249,10 +247,12 @@ set(IR_SRCS
 	ir/passes/fixedPointFunctionPass/InstCombine.cpp
 	ir/passes/fixedPointFunctionPass/GVN.h
 	ir/passes/fixedPointFunctionPass/GVN.cpp
-	ir/passes/fixedPointFunctionPass/BitwiseLoopIdiom.h
-	ir/passes/fixedPointFunctionPass/BitwiseLoopIdiom.cpp
+	ir/passes/fixedPointFunctionPass/BoundedBitLoopSolver.h
+	ir/passes/fixedPointFunctionPass/BoundedBitLoopSolver.cpp
 	ir/passes/fixedPointFunctionPass/LoopTiling.h
 	ir/passes/fixedPointFunctionPass/LoopTiling.cpp
+	ir/passes/fixedPointFunctionPass/LoopFusion.h
+	ir/passes/fixedPointFunctionPass/LoopFusion.cpp
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.h
 	ir/passes/fixedPointFunctionPass/LoopStrengthReduce.cpp
 	ir/passes/fixedPointFunctionPass/LoopVectorize.h
@@ -283,6 +283,8 @@ set(IR_SRCS
 	ir/passes/modulePass/GlobalToLocal.cpp
 	ir/passes/modulePass/DeadFunctionElim.h
 	ir/passes/modulePass/DeadFunctionElim.cpp
+	ir/passes/modulePass/DeadGlobalStoreElim.h
+	ir/passes/modulePass/DeadGlobalStoreElim.cpp
 	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.h
 	ir/passes/fixedPointFunctionPass/LocalMemoryOpt.cpp
 	ir/passes/fixedPointFunctionPass/UnreachableBlockElim.h
@@ -301,8 +303,6 @@ set(IR_SRCS
 	ir/passes/modulePass/SmallFunctionInline.cpp
 	ir/passes/functionPass/TailRecursionElim.h
 	ir/passes/functionPass/TailRecursionElim.cpp
-	ir/passes/functionPass/ModMulIdiom.h
-	ir/passes/functionPass/ModMulIdiom.cpp
 	ir/passes/functionPass/LateLoopCFGCleanup.h
 	ir/passes/functionPass/LateLoopCFGCleanup.cpp
 	ir/passes/functionPass/PhiLowering.h

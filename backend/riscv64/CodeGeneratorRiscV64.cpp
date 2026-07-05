@@ -321,7 +321,8 @@ bool CodeGeneratorRiscV64::run()
 	genHeader();
 	genDataSection();
 	CodeGeneratorAsm::genCodeSection();
-	// 若模块中调用了循环并行运行时函数，则输出对应的汇编实现
+	// 若模块中调用了循环并行运行时函数（由 LoopParallelize pass 注入），
+	// 则输出对应的汇编实现；--parallel=off 时 pass 不运行，此处自然不输出
 	if (moduleUsesMtRuntime()) {
 		emitMtRuntime();
 	}
@@ -330,8 +331,6 @@ bool CodeGeneratorRiscV64::run()
 	}
 	return true;
 }
-
-
 /// @brief 生成汇编文件头部，输出RISC-V64架构属性
 void CodeGeneratorRiscV64::genHeader()
 {
@@ -1067,6 +1066,12 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func, bool useFramePointer)
 			stackSlotCandidates.push_back(val);
 		}
 	}
+	// allocMap 是 unordered_map，按指针序迭代会让栈槽偏移每次编译都变（非确定性）。
+	// 改为按 Value 的创建序号这一确定性全序键排序（含已脱离 CFG 的残留指令也有
+	// 稳定序号），保证同一份 IR 每次生成完全相同的栈布局，使上板缓存生效
+	std::sort(stackSlotCandidates.begin(), stackSlotCandidates.end(), [](Value * lhs, Value * rhs) {
+		return lhs->getCreationId() < rhs->getCreationId();
+	});
 	for (auto * val : stackSlotCandidates) {
 		Value * representative = greedyAllocator.getCoalescedRepresentative(val);
 		if (representative != nullptr && representative != val) {

@@ -77,7 +77,10 @@ bool hasSideEffect(Instruction * inst, FunctionSideEffectAnalysis & sideEffects)
     if (!inst) {
         return false;
     }
-    if (inst->mayHaveSideEffects() && !dynamic_cast<CallInst *>(inst)) {
+    // mayHaveSideEffects() 把 terminator 也算作副作用（控制流变化），但空循环消除
+    // 本就要连同回边/分支一起删除，循环体里的 terminator 不应阻止删除；这里仅借
+    // 它捕获 VSTORE 等真正写内存的指令，故显式排除 terminator 与 call
+    if (inst->mayHaveSideEffects() && !inst->isTerminator() && !dynamic_cast<CallInst *>(inst)) {
         return true;
     }
     if (dynamic_cast<StoreInst *>(inst) != nullptr) {
@@ -148,11 +151,10 @@ bool RemoveEmptyLoop::isRemovableLoop(BasicBlock * header,
 
 /// @brief 尝试删除以 header 为头的循环
 /// @param header 循环头基本块
+/// @param loopInfo 当前函数的循环信息（由调用方构建并复用）
 /// @return true 表示成功删除该循环
-bool RemoveEmptyLoop::tryRemoveLoop(BasicBlock * header)
+bool RemoveEmptyLoop::tryRemoveLoop(BasicBlock * header, const LoopInfo & loopInfo)
 {
-    DominatorTree domTree(func);
-    LoopInfo loopInfo(func, &domTree);
     if (!loopInfo.isLoopHeader(header)) {
         return false;
     }
@@ -232,10 +234,15 @@ bool RemoveEmptyLoop::run()
 
     bool changed = false;
     while (true) {
+        // 每轮仅构建一次支配树与循环信息，循环体内只读地复用，
+        // 避免对每个基本块都重建分析导致 O(B²) 的开销
+        DominatorTree domTree(func);
+        LoopInfo loopInfo(func, &domTree);
+
         bool localChanged = false;
         std::vector<BasicBlock *> blocks = func->getBlocks();
         for (auto * bb : blocks) {
-            if (tryRemoveLoop(bb)) {
+            if (tryRemoveLoop(bb, loopInfo)) {
                 localChanged = true;
                 changed = true;
                 func->getAnalysisCache().invalidateCFGAnalyses();

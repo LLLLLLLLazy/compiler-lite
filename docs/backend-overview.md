@@ -114,7 +114,7 @@ flowchart TD
 
     Greedy --> AdjustCall["adjustFuncCallInsts(func)<br>调整函数调用指令"]
     AdjustCall --> AdjustParam["adjustFormalParamInsts(func)<br>调整形参指令"]
-    AdjustParam --> SavedRegs["computeSavedRegs(...)<br>计算callee-saved寄存器列表<br>(ra若有调用 / s1-s11按需; s0/fp 不保存)"]
+    AdjustParam --> SavedRegs["computeSavedRegs(...)<br>计算callee-saved寄存器列表<br>(ra若有调用 / s1-s11按需; s0/fp 不保存)<br>条件性叶子默认对ra做shrink-wrapping(调用点保存)"]
     SavedRegs --> StackAlloc["stackAlloc(func)<br>栈空间分配"]
 
     StackAlloc --> ParamLoop["遍历形参<br>按RISC-V ABI分配寄存器(a0-a7/fa0-fa7)<br>超出部分分配栈槽"]

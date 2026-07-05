@@ -130,8 +130,6 @@ private:
 	void translate_div(Instruction * inst);
 	/// @brief 翻译mod指令（取模）
 	void translate_mod(Instruction * inst);
-	/// @brief 翻译宽乘取模指令（(i64)a*b % m，64 位无截断乘后对常量取模）
-	void translate_mulmod(Instruction * inst);
 	/// @brief 翻译逻辑左移指令（shl）
 	void translate_shl(Instruction * inst);
 	/// @brief 翻译算术右移指令（ashr，保留符号位）

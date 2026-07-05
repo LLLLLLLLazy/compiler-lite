@@ -21,9 +21,20 @@ protected:
     Type * type;
     std::vector<Use *> uses;
 
+private:
+    /// 单调递增的创建序号，按构造顺序分配，跨整个编译唯一且确定。
+    /// 用作寄存器分配等阶段的稳定排序键，替代按指针地址排序带来的非确定性
+    uint64_t creationId;
+
 public:
     /// @brief 构造一个 Value 对象
     explicit Value(Type * _type);
+
+    /// @brief 获取该值的创建序号（确定性稳定排序键）
+    [[nodiscard]] uint64_t getCreationId() const
+    {
+        return creationId;
+    }
 
     /// @brief 析构函数
     virtual ~Value();

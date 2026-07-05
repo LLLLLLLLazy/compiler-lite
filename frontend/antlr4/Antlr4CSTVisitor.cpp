@@ -309,9 +309,6 @@ std::any MiniCCSTVisitor::visitConstDeclNoSemi(MiniCParser::ConstDeclNoSemiConte
 {
 	auto * stmtNode = ast_node::New(ast_operator_type::AST_OP_DECL_STMT);
 	stmtNode->isConst = true;
-	if (!extendedGrammar && ctx->T_STATIC() != nullptr) {
-		throw std::runtime_error("默认文法下不支持static声明；如需使用扩展语法，请指定-e");
-	}
 	stmtNode->isStatic = ctx->T_STATIC() != nullptr;
 
 	type_attr typeAttr = std::any_cast<type_attr>(visitBasicType(ctx->basicType()));
@@ -420,9 +417,6 @@ std::any MiniCCSTVisitor::visitWhileUnmatchedStatement(MiniCParser::WhileUnmatch
 
 std::any MiniCCSTVisitor::visitForMatchedStatement(MiniCParser::ForMatchedStatementContext * ctx)
 {
-	if (!extendedGrammar) {
-		throw std::runtime_error("默认文法下不支持for语句；如需使用扩展语法，请指定-e");
-	}
 
 	ast_node * initNode = nullptr;
 	if (ctx->forInit()) {
@@ -451,9 +445,6 @@ std::any MiniCCSTVisitor::visitForMatchedStatement(MiniCParser::ForMatchedStatem
 
 std::any MiniCCSTVisitor::visitForUnmatchedStatement(MiniCParser::ForUnmatchedStatementContext * ctx)
 {
-	if (!extendedGrammar) {
-		throw std::runtime_error("默认文法下不支持for语句；如需使用扩展语法，请指定-e");
-	}
 
 	ast_node * initNode = nullptr;
 	if (ctx->forInit()) {
@@ -800,9 +791,6 @@ std::any MiniCCSTVisitor::visitUnaryExp(MiniCParser::UnaryExpContext * ctx)
 
 		return ast_node::New(op, operand);
 	} else if (auto * lvalCtx = ctx->getRuleContext<MiniCParser::LValContext>(0)) {
-		if (!extendedGrammar) {
-			throw std::runtime_error("默认文法下不支持自增自减表达式；如需使用扩展语法，请指定-e");
-		}
 		ast_node * operand = std::any_cast<ast_node *>(visitLVal(lvalCtx));
 		const bool prefix = !ctx->children.empty() && (ctx->children.front()->getText() == "++" ||
 		                                               ctx->children.front()->getText() == "--");
@@ -887,9 +875,6 @@ std::any MiniCCSTVisitor::visitVarDecl(MiniCParser::VarDeclContext * ctx)
 std::any MiniCCSTVisitor::visitVarDeclNoSemi(MiniCParser::VarDeclNoSemiContext * ctx)
 {
 	// varDeclNoSemi: T_STATIC? basicType varDef (T_COMMA varDef)*
-	if (!extendedGrammar && ctx->T_STATIC() != nullptr) {
-		throw std::runtime_error("默认文法下不支持static声明；如需使用扩展语法，请指定-e");
-	}
 
 	// 声明语句节点
 	ast_node * stmt_node = ast_node::New(ast_operator_type::AST_OP_DECL_STMT);
