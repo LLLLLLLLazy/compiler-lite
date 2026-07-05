@@ -228,13 +228,19 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 	std::unordered_map<Value *, std::vector<ValueLocation>> valueDefs;
 	std::unordered_map<Value *, std::vector<ValueLocation>> valueUses;
 
+	auto loopDepthOf = [&](BasicBlock * bb) {
+		return (loopInfo != nullptr && bb != nullptr) ? loopInfo->getLoopDepth(bb) : 0;
+	};
+
 	auto recordDef = [&](Value * value, BasicBlock * bb, int instNum) {
 		if (!needsInterval(value)) {
 			return;
 		}
 
 		valueDefs[value].push_back({instNum, bb});
-		getOrCreateInterval(value)->addSegment(instNum, instNum + 1);
+		LiveInterval * interval = getOrCreateInterval(value);
+		interval->addSegment(instNum, instNum + 1);
+		interval->noteDefLoopDepth(loopDepthOf(bb));
 	};
 
 	auto recordUse = [&](Value * value, BasicBlock * bb, int instNum) {
@@ -243,7 +249,7 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 		}
 
 		valueUses[value].push_back({instNum, bb});
-		getOrCreateInterval(value)->addUsePosition(instNum);
+		getOrCreateInterval(value)->addUsePosition(instNum, loopDepthOf(bb));
 	};
 
 	// 处理函数形参：形参在CFG入口前隐式定义，活跃区间起点为0
@@ -529,7 +535,7 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 		}
 
 		for (auto * interval : intervals) {
-			int maxDepth = 0;
+			int maxDepth = interval->maxLoopDepth;
 			for (int pos : interval->getUsePositions()) {
 				auto it = instNumToLoopDepth.find(pos);
 				if (it != instNumToLoopDepth.end()) {

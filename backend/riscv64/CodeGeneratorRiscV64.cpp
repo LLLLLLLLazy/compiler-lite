@@ -1062,6 +1062,10 @@ void CodeGeneratorRiscV64::stackAlloc(Function * func, bool useFramePointer)
 			continue;
 		}
 
+		if (greedyAllocator.isRematOnlySpill(val)) {
+			continue;
+		}
+
 		if (GreedyRegAllocator::isForcedStackValue(val) || info.regId == -1 || greedyAllocator.isSpilled(val)) {
 			stackSlotCandidates.push_back(val);
 		}
