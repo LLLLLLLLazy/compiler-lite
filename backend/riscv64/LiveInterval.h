@@ -48,6 +48,12 @@ public:
 	/// @param pos 指令编号
 	void addUsePosition(int pos);
 
+	/// @brief 添加一个带循环深度的使用点
+	void addUsePosition(int pos, int loopDepth);
+
+	/// @brief 记录一次定义所在循环深度
+	void noteDefLoopDepth(int loopDepth);
+
 	/// @brief 判断两个活跃区间是否干涉（任意子段重叠）
 	/// @param other 另一个活跃区间
 	/// @return 是否干涉
@@ -107,6 +113,9 @@ public:
 	/// @return 使用点列表引用
 	const std::vector<int> & getUsePositions() const { return usePositions; }
 
+	/// @brief 获取使用点循环深度列表
+	const std::vector<int> & getUseLoopDepths() const { return useLoopDepths; }
+
 	/// 关联的虚拟寄存器（SSA IR中的Value*）
 	Value * vreg;
 
@@ -120,6 +129,15 @@ public:
 	/// 使用点列表（指令编号）
 	std::vector<int> usePositions;
 
+	/// @brief 使用点所在循环深度，与usePositions一一对应
+	std::vector<int> useLoopDepths;
+
+	/// @brief 区间定义所在最大循环深度
+	int defLoopDepth = 0;
+
+	/// @brief 该变量所在的最大循环深度（由LiveIntervalAnalysis根据LoopInfo填入）
+	int maxLoopDepth = 0;
+
 	/// 分配的物理寄存器编号，-1表示未分配
 	int physReg;
 
@@ -131,7 +149,4 @@ public:
 
 	/// 溢出栈偏移
 	int64_t spillSlot;
-
-	/// 该变量所在的最大循环深度（由LiveIntervalAnalysis根据LoopInfo填入）
-	int maxLoopDepth = 0;
 };

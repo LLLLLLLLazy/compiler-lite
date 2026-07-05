@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 
 #include "InterferenceGraph.h"
 #include "LiveInterval.h"
@@ -106,10 +107,12 @@ SplitInfo LiveIntervalSplitter::doSplit(LiveInterval * interval, int splitPos,
 	// 创建左子区间 [start, splitPos)
 	auto * left = new LiveInterval(interval->getVReg());
 	left->maxLoopDepth = interval->maxLoopDepth;
+	left->defLoopDepth = interval->defLoopDepth;
 
 	// 创建右子区间 [splitPos, end)
 	auto * right = new LiveInterval(interval->getVReg());
 	right->maxLoopDepth = interval->maxLoopDepth;
+	right->defLoopDepth = interval->defLoopDepth;
 
 	// 分配 Segment
 	for (const auto & seg : interval->getSegments()) {
@@ -127,11 +130,15 @@ SplitInfo LiveIntervalSplitter::doSplit(LiveInterval * interval, int splitPos,
 	}
 
 	// 分配 usePositions
-	for (int pos : interval->getUsePositions()) {
+	const auto & usePositions = interval->getUsePositions();
+	const auto & useLoopDepths = interval->getUseLoopDepths();
+	for (std::size_t i = 0; i < usePositions.size(); ++i) {
+		int pos = usePositions[i];
+		int depth = i < useLoopDepths.size() ? useLoopDepths[i] : interval->maxLoopDepth;
 		if (pos < splitPos) {
-			left->addUsePosition(pos);
+			left->addUsePosition(pos, depth);
 		} else {
-			right->addUsePosition(pos);
+			right->addUsePosition(pos, depth);
 		}
 	}
 

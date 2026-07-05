@@ -18,18 +18,21 @@
 
 #include "AllocaInst.h"
 #include "BasicBlock.h"
+#include "BinaryInst.h"
 #include "CallInst.h"
 #include "CalleeSavedFPREnabler.h"
 #include "DominatorTree.h"
 #include "Function.h"
+#include "GetElementPtrInst.h"
 #include "HeuristicSpillStrategy.h"
 #include "InterferenceGraph.h"
 #include "LiveInterval.h"
 #include "LiveIntervalAnalysis.h"
 #include "LiveIntervalSplitter.h"
 #include "LoopInfo.h"
-#include "PlatformRiscV64.h"
 #include "RegCoalescer.h"
+#include "Rematerialization.h"
+#include "Use.h"
 #include "Value.h"
 
 /// @brief 构造函数，初始化溢出决策策略
@@ -81,6 +84,7 @@ void GreedyRegAllocator::allocate(Function * func)
 	splitTransfers.clear();
 	splitStackValues.clear();
 	spilledValues.clear();
+	rematOnlySpills.clear();
 	stats = RegAllocStats{};
 	intervalToIndex.clear();
 	usedCalleeSavedGprsDuringAllocation.clear();
@@ -89,6 +93,7 @@ void GreedyRegAllocator::allocate(Function * func)
 	liveAcrossCallPositions.clear();
 	instNumbering.clear();
 	valueLiveRanges.clear();
+	valueUsePositions.clear();
 	frameSize = 0;
 	outgoingArgBytes = 0;
 	availableRegs.clear();
@@ -226,6 +231,11 @@ bool GreedyRegAllocator::isSpilled(Value * vreg) const
 	return spilledValues.find(vreg) != spilledValues.end();
 }
 
+bool GreedyRegAllocator::isRematOnlySpill(Value * vreg) const
+{
+	return rematOnlySpills.find(vreg) != rematOnlySpills.end();
+}
+
 /// @brief 获取溢出变量的栈槽偏移
 /// @param vreg 虚拟寄存器（Value*）
 /// @return 栈槽偏移量，0表示未分配栈槽
@@ -328,6 +338,11 @@ void GreedyRegAllocator::refreshCoalescedAliasAllocations()
 			spilledValues.insert(alias);
 		} else {
 			spilledValues.erase(alias);
+		}
+		if (rematOnlySpills.find(representative) != rematOnlySpills.end()) {
+			rematOnlySpills.insert(alias);
+		} else {
+			rematOnlySpills.erase(alias);
 		}
 		if (splitStackValues.find(representative) != splitStackValues.end()) {
 			splitStackValues.insert(alias);
@@ -1013,6 +1028,54 @@ RegAllocInfo GreedyRegAllocator::getRegisterHoldingValueAt(Value * value, Instru
 	return getRegisterHoldingValueAt(value, it->second);
 }
 
+bool GreedyRegAllocator::canRematerializeAt(Value * value, int instNum, int depth) const
+{
+	if (value == nullptr || instNum < 0 || depth > 2 ||
+	    !RiscV64Rematerialization::isCheapRematerializable(value, depth)) {
+		return false;
+	}
+
+	auto operandAvailable = [&](Value * operand) {
+		return getRegisterHoldingValueAt(operand, instNum).hasReg() || canRematerializeAt(operand, instNum, depth + 1);
+	};
+
+	if (auto * gep = dynamic_cast<GetElementPtrInst *>(value)) {
+		return operandAvailable(gep->getBasePointer()) && operandAvailable(gep->getIndexOperand());
+	}
+
+	if (auto * binary = dynamic_cast<BinaryInst *>(value)) {
+		switch (binary->getOp()) {
+			case IRInstOperator::IRINST_OP_ADD_I:
+				return operandAvailable(binary->getLHS()) && operandAvailable(binary->getRHS());
+			case IRInstOperator::IRINST_OP_SHL_I:
+				return operandAvailable(binary->getLHS());
+			default:
+				return false;
+		}
+	}
+
+	return true;
+}
+
+bool GreedyRegAllocator::canOmitSpillSlotForRemat(Value * value) const
+{
+	if (!RiscV64Rematerialization::isCheapRematerializable(value)) {
+		return false;
+	}
+
+	for (Use * use : value->getUseList()) {
+		auto * inst = use != nullptr ? dynamic_cast<Instruction *>(use->getUser()) : nullptr;
+		if (inst == nullptr) {
+			return false;
+		}
+		auto posIt = instNumbering.find(inst);
+		if (posIt == instNumbering.end() || !canRematerializeAt(value, posIt->second)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /// @brief 从活跃区间列表重建分配映射表
 /// @param intervals 活跃区间列表
 ///
@@ -1026,6 +1089,8 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 	splitTransfers.clear();
 	splitStackValues.clear();
 	spilledValues.clear();
+	rematOnlySpills.clear();
+	valueUsePositions.clear();
 	int estimatedReloads = 0;
 	int estimatedSpillStores = 0;
 
@@ -1050,10 +1115,10 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 			}
 		} else {
 			spilledValues.insert(value);
-			estimatedReloads += static_cast<int>(interval->getUsePositions().size());
-			++estimatedSpillStores;
 		}
 
+		valueUsePositions[value].insert(valueUsePositions[value].end(), interval->getUsePositions().begin(),
+		                               interval->getUsePositions().end());
 		allocationSegments[value].push_back({interval->getStart(), interval->getEnd(), info});
 	}
 
@@ -1149,6 +1214,18 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 				[stackValue](const RegAllocSplitTransfer & transfer) { return transfer.value == stackValue; }),
 				splitTransfers.end());
 		}
+	}
+
+	for (Value * value : spilledValues) {
+		if (canOmitSpillSlotForRemat(value)) {
+			rematOnlySpills.insert(value);
+			continue;
+		}
+		auto useIt = valueUsePositions.find(value);
+		if (useIt != valueUsePositions.end()) {
+			estimatedReloads += static_cast<int>(useIt->second.size());
+		}
+		++estimatedSpillStores;
 	}
 
 	rebuildStats();

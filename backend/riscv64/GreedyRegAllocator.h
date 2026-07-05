@@ -89,6 +89,11 @@ public:
 	/// @return 是否被溢出
 	bool isSpilled(Value * vreg) const;
 
+	/// @brief 判断虚拟寄存器是否以重物化代替栈溢出
+	/// @param vreg 虚拟寄存器（Value*）
+	/// @return 是否无需栈槽/溢出store，所有use现场重算
+	bool isRematOnlySpill(Value * vreg) const;
+
 	/// @brief 获取溢出变量的栈槽偏移
 	/// @param vreg 虚拟寄存器（Value*）
 	/// @return 栈槽偏移量
@@ -355,6 +360,12 @@ private:
 	/// @param intervals 活跃区间列表
 	void rebuildAllocationMap(const std::vector<LiveInterval *> & intervals);
 
+	/// @brief 判断 value 在指定位置是否可不依赖栈槽现场重物化
+	bool canRematerializeAt(Value * value, int instNum, int depth = 0) const;
+
+	/// @brief 判断 spilled value 的所有 use 是否都能现场重物化
+	bool canOmitSpillSlotForRemat(Value * value) const;
+
 	/// @brief 根据位置敏感分配段重建统计信息
 	void rebuildStats();
 
@@ -400,6 +411,9 @@ private:
 	/// @brief 被溢出的Value集合
 	std::unordered_set<Value *> spilledValues;
 
+	/// @brief 被溢出但通过重物化代替栈槽的 Value 集合
+	std::unordered_set<Value *> rematOnlySpills;
+
 	/// @brief 活跃区间到排序列表索引的映射
 	std::unordered_map<LiveInterval *, int> intervalToIndex;
 
@@ -423,6 +437,9 @@ private:
 
 	/// @brief 虚拟寄存器活跃范围（Value* -> [start, end)），用于局部临时寄存器分配
 	std::unordered_map<class Value *, std::pair<int, int>> valueLiveRanges;
+
+	/// @brief Value 的使用点列表，用于判断 spilled value 是否可全量重物化
+	std::unordered_map<class Value *, std::vector<int>> valueUsePositions;
 
 	/// @brief 寄存器合并器
 	std::unique_ptr<RegCoalescer> coalescer_;

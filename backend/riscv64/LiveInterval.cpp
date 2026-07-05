@@ -10,6 +10,7 @@
 #include <limits>
 
 #include "LiveInterval.h"
+#include "Rematerialization.h"
 #include "Value.h"
 
 /// @brief 构造函数
@@ -79,7 +80,20 @@ void LiveInterval::addSegment(int segStart, int segEnd)
 /// @brief 添加一个使用点
 void LiveInterval::addUsePosition(int pos)
 {
+	addUsePosition(pos, 0);
+}
+
+void LiveInterval::addUsePosition(int pos, int loopDepth)
+{
 	usePositions.push_back(pos);
+	useLoopDepths.push_back(std::max(0, loopDepth));
+	maxLoopDepth = std::max(maxLoopDepth, std::max(0, loopDepth));
+}
+
+void LiveInterval::noteDefLoopDepth(int loopDepth)
+{
+	defLoopDepth = std::max(defLoopDepth, std::max(0, loopDepth));
+	maxLoopDepth = std::max(maxLoopDepth, std::max(0, loopDepth));
 }
 
 /// @brief 判断两个活跃区间是否干涉（任意子段重叠）
@@ -102,7 +116,7 @@ bool LiveInterval::overlaps(const LiveInterval & other) const
 }
 
 /// @brief 计算溢出权重
-/// spillWeight = (useCount / intervalLength) * pow(10, loopDepth)
+/// spillWeight = (defWeight + Σ useWeight) / intervalLength
 void LiveInterval::calcSpillWeight(int loopDepth)
 {
 	if (segments.empty()) {
@@ -113,8 +127,37 @@ void LiveInterval::calcSpillWeight(int loopDepth)
 	const int intervalLength = std::max(1, end - start);
 	const int useCount = static_cast<int>(usePositions.size());
 
-	// spillWeight = (useCount / length) * 10^loopDepth
-	float density = static_cast<float>(useCount) / static_cast<float>(intervalLength);
-	float loopFactor = std::pow(10.0f, static_cast<float>(loopDepth));
-	spillWeight = density * loopFactor;
+	// 当前 FPR/VR reload 仍依赖保留 scratch 寄存器；先只把 P0-2 的新权重模型用于 GPR，
+	// 避免高浮点压力用例把需要 scratch 的值换成溢出后无临时 FPR 可借。
+	if (vreg != nullptr && vreg->getType() != nullptr &&
+	    (vreg->getType()->isFloatType() || vreg->getType()->isVectorType())) {
+		float density = static_cast<float>(useCount) / static_cast<float>(intervalLength);
+		float loopFactor = std::pow(10.0f, static_cast<float>(loopDepth));
+		spillWeight = density * loopFactor;
+		return;
+	}
+
+	if (intervalLength <= 2) {
+		spillWeight = std::numeric_limits<float>::infinity();
+		return;
+	}
+
+	float weightedRefs = std::pow(10.0f, static_cast<float>(std::max(0, defLoopDepth)));
+	for (std::size_t i = 0; i < usePositions.size(); ++i) {
+		int depth = loopDepth;
+		if (i < useLoopDepths.size()) {
+			depth = useLoopDepths[i];
+		}
+		weightedRefs += std::pow(10.0f, static_cast<float>(std::max(0, depth)));
+	}
+
+	float spillCost = weightedRefs / static_cast<float>(intervalLength);
+	if (RiscV64Rematerialization::isCheapRematerializable(vreg)) {
+		spillWeight = spillCost * 0.25f;
+		return;
+	}
+
+	const float maxDepthDensity = static_cast<float>(useCount) / static_cast<float>(intervalLength) *
+	                            std::pow(10.0f, static_cast<float>(std::max(maxLoopDepth, loopDepth)));
+	spillWeight = std::max(spillCost, maxDepthDensity);
 }
