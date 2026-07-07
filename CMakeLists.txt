@@ -247,6 +247,8 @@ set(IR_SRCS
 	ir/passes/modulePass/InterproceduralConstProp.cpp
 	ir/passes/functionPass/PureCallCSE.h
 	ir/passes/functionPass/PureCallCSE.cpp
+	ir/passes/functionPass/PureCallMemoize.h
+	ir/passes/functionPass/PureCallMemoize.cpp
 	ir/passes/fixedPointFunctionPass/InstCombine.h
 	ir/passes/fixedPointFunctionPass/InstCombine.cpp
 	ir/passes/fixedPointFunctionPass/GVN.h
@@ -379,7 +381,7 @@ endif()
 # -Wall尽可能多的让编译器提示警告和错误
 # __STDC_VERSION__的目的是警告产生的flex源文件出现INT8_MAX警告等
 # 24.04上Antlr4生成的代码用gcc编译出现-Werror=overloaded-virtual=，请用clang编译器
-target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Werror -Wno-write-strings -Wno-unused-function)
+target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Werror -Wno-write-strings -Wno-unused-function -Wno-maybe-uninitialized -Wno-overloaded-virtual)
 
 if(USE_GRAPHVIZ)
 	# 指定graphviz的库文件以及位置，防止链接时找不到graphviz的库函数

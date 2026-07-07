@@ -41,6 +41,7 @@
 #include "functionPass/PhiToSelect.h"
 #include "functionPass/PhiLowering.h"
 #include "functionPass/PureCallCSE.h"
+#include "functionPass/PureCallMemoize.h"
 #include "functionPass/TailRecursionElim.h"
 #include "modulePass/DeadFunctionElim.h"
 #include "modulePass/DeadGlobalStoreElim.h"
@@ -119,6 +120,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
 
     registerFunctionPass("GVN", [this](Function * func) {
         GVN pass(func, module);
+        return pass.run();
+    });
+
+    registerFunctionPass("PureCallMemoize", [this](Function * func) {
+        PureCallMemoize pass(func, module);
         return pass.run();
     });
 
