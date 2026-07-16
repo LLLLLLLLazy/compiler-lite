@@ -123,10 +123,15 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
         return pass.run();
     });
 
-    registerFunctionPass("PureCallMemoize", [this](Function * func) {
-        PureCallMemoize pass(func, module);
-        return pass.run();
-    });
+    // memo 的哈希表、epoch 和递归深度是函数级共享状态。当前 IR 尚无原子/
+    // 线程局部存储支持，因此并行模式下不注册，避免多个线程同时调用同一递归
+    // 函数时产生数据竞争。默认单线程流水线保持启用。
+    if (!enableParallel) {
+        registerFunctionPass("PureCallMemoize", [this](Function * func) {
+            PureCallMemoize pass(func, module);
+            return pass.run();
+        });
+    }
 
     registerFunctionPass("TailRecursionElim", [](Function * func) {
         TailRecursionElim pass(func);
