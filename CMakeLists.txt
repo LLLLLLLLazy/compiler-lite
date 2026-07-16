@@ -245,6 +245,8 @@ set(IR_SRCS
 	ir/passes/modulePass/InterproceduralConstProp.cpp
 	ir/passes/functionPass/PureCallCSE.h
 	ir/passes/functionPass/PureCallCSE.cpp
+	ir/passes/functionPass/PureCallMemoize.h
+	ir/passes/functionPass/PureCallMemoize.cpp
 	ir/passes/fixedPointFunctionPass/InstCombine.h
 	ir/passes/fixedPointFunctionPass/InstCombine.cpp
 	ir/passes/fixedPointFunctionPass/GVN.h
