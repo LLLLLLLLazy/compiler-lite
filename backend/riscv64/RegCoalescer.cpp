@@ -171,12 +171,12 @@ bool RegCoalescer::canCoalesce(Value * src, Value * dst,
 	// 这条路径行为不变，覆盖局部 producer temp 的 destructive-update 合并。
 	if (isLocalComputedSource(src, copyInst)) {
 		if (graph == nullptr || !graph->hasInterference(srcIdx, dstIdx)) {
-			return true;
+			return !preciseInterferes(src, dst, copyInst, instNumbering);
 		}
 		auto copyPosIt = instNumbering.find(copyInst);
 		if (copyPosIt != instNumbering.end() &&
 		    onlyOverlapsInsideWindow(intervals[srcIdx], intervals[dstIdx], copyPosIt->second, copyPosIt->second + 1)) {
-			return true;
+			return !preciseInterferes(src, dst, copyInst, instNumbering);
 		}
 	}
 
@@ -184,16 +184,18 @@ bool RegCoalescer::canCoalesce(Value * src, Value * dst,
 	// 与 merge 值处处假干涉，导致跨块 phi-copy 无法合并。改用扩展前的精确活跃段，
 	// 并排除连接 src/dst 的 copy 那一拍的伪干涉，即可安全合并这类累加器 copy，
 	// 实现原地累加（addw a1,a1,t 而非 mv 对）
-	return !preciseInterferes(src, dst, instNumbering);
+	return !preciseInterferes(src, dst, copyInst, instNumbering);
 }
 
 /// @brief 基于精确区间判断 src/dst 是否真正干涉（hole-aware）
 bool RegCoalescer::preciseInterferes(Value * src, Value * dst,
+									 Instruction * copyInst,
                                      const std::map<Instruction *, int> & instNumbering)
 {
 	auto sIt = preciseSegments_.find(src);
 	auto dIt = preciseSegments_.find(dst);
-	if (sIt == preciseSegments_.end() || dIt == preciseSegments_.end()) {
+	auto copyPosIt = instNumbering.find(copyInst);
+	if (sIt == preciseSegments_.end() || dIt == preciseSegments_.end() || copyPosIt == instNumbering.end()) {
 		// 缺精确信息，保守认为干涉，不合并
 		return true;
 	}
@@ -228,6 +230,10 @@ bool RegCoalescer::preciseInterferes(Value * src, Value * dst,
 			}
 		}
 	}
+
+	// 区间重叠时不能仅凭 copy 的存在推断源值在该点后死亡。Phi 降级后的并行
+	// copy 可能与循环携带值、循环终止值共存，必须保留 copy 并视为真干涉
+	benignPositions.clear();
 
 	// 精确段重叠判定：copy 与两地址 op 的 def 周期重叠恒为单拍 [p,p+1)，
 	// 且 p 是 src/dst 的定义点。任何长度 >1 的重叠都意味着二者多拍共存=真干涉；
