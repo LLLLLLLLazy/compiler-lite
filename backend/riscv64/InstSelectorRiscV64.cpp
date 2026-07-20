@@ -1798,11 +1798,9 @@ bool InstSelectorRiscV64::tryTranslateDivBySmallPowerOfTwo(Instruction * inst)
 	const std::string biasName = PlatformRiscV64::regName[bias.reg()];
 
 	// C整数除法向零截断；负数右移会向-∞取整，因此先加(d-1)形式的bias。
-	// 对于除以2（shift==1），bias应该是符号位：负数时为1，正数时为0
-	// 修复：使用srliw从符号掩码生成bias，而不是直接使用全1的符号掩码
+	// 对于除以2（shift==1），bias就是符号位，单条srliw即可取得
 	if (shift == 1) {
-		iloc.inst("sraiw", biasName, srcName, "31");
-		iloc.inst("srliw", biasName, biasName, "31");  // 将全1变成0x1，保留最低位
+		iloc.inst("srliw", biasName, srcName, "31");
 		iloc.inst("addw", dstName, srcName, biasName);
 		iloc.inst("sraiw", dstName, dstName, "1");
 		if (negativeDivisor) {
@@ -1852,17 +1850,22 @@ bool InstSelectorRiscV64::tryTranslateModBySmallPowerOfTwo(Instruction * inst)
 	const std::string biasName = PlatformRiscV64::regName[bias.reg()];
 	const std::string dstName = PlatformRiscV64::regName[dstReg];
 
-	// 余数按 x - (x / d) * d 生成，保证负数余数符号与RISC-V remw/C语义一致。
-	iloc.inst("sraiw", biasName, srcName, "31");
-	iloc.inst("srliw", biasName, biasName, std::to_string(32 - shift));
-	iloc.inst("addw", qName, srcName, biasName);
-	iloc.inst("sraiw", qName, qName, std::to_string(shift));
-	if (negativeDivisor) {
-		iloc.inst("subw", qName, "zero", qName);
+	// 余数按 x - floor_biased(x) 生成，保证负数余数符号与RISC-V remw/C语义一致。
+	// x % (±2^k) 的余数与除数符号无关，无需按负除数取反。
+	// bias：shift==1 时即符号位；否则由全1符号掩码逻辑右移得到低 shift 位掩码
+	if (shift == 1) {
+		iloc.inst("srliw", biasName, srcName, "31");
+	} else {
+		iloc.inst("sraiw", biasName, srcName, "31");
+		iloc.inst("srliw", biasName, biasName, std::to_string(32 - shift));
 	}
-	iloc.inst("slliw", qName, qName, std::to_string(shift));
-	if (negativeDivisor) {
-		iloc.inst("subw", qName, "zero", qName);
+	iloc.inst("addw", qName, srcName, biasName);
+	if (shift <= 11) {
+		// -(2^shift) 在 imm12 范围内（shift<=11），andi 直接清低位，省去两次移位
+		iloc.inst("andi", qName, qName, std::to_string(-(1 << shift)));
+	} else {
+		iloc.inst("sraiw", qName, qName, std::to_string(shift));
+		iloc.inst("slliw", qName, qName, std::to_string(shift));
 	}
 	iloc.inst("subw", dstName, srcName, qName);
 
