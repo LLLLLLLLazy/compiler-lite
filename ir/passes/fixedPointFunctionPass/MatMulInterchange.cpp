@@ -2390,16 +2390,16 @@ bool MatMulInterchange::run()
             MatMulPattern pat;
             if (!matchPattern(scev, loopInfo, header, pat)) {
                 continue;
-            }
+        }
 
-            if (pat.inPlace) {
-                if (rewriteInPlaceConstantTailBlocked(func, mod, pat)) {
-                    CostModel::remark("matmul-interchange", true, "in-place constant-tail blocked");
-                    return true;
-                }
-                rewriteInPlaceRegisterBlocked(func, mod, pat);
-                CostModel::remark("matmul-interchange", true, "in-place register blocked");
-            } else {
+        if (pat.inPlace) {
+            if (rewriteInPlaceConstantTailBlocked(func, mod, pat)) {
+                CostModel::remark("matmul-interchange", true, "in-place constant-tail blocked");
+                return true;
+            }
+            rewriteInPlaceRegisterBlocked(func, mod, pat);
+            CostModel::remark("matmul-interchange", true, "in-place register blocked");
+        } else {
                 rewritePattern(func, mod, pat);
                 CostModel::remark("matmul-interchange", true, "direct accumulate");
             }

@@ -667,7 +667,7 @@ std::any MiniCCSTVisitor::visitAddExp(MiniCParser::AddExpContext * ctx)
 		return visitMulExp(ctx->mulExp()[0]);
 	}
 
-	ast_node *left, *right;
+	ast_node *left = nullptr, *right = nullptr;
 
 	// 存在addOp运算符，自左向右结合
 	auto opsCtxVec = ctx->addOp();
@@ -716,7 +716,7 @@ std::any MiniCCSTVisitor::visitMulExp(MiniCParser::MulExpContext * ctx)
 		return visitUnaryExp(ctx->unaryExp()[0]);
 	}
 
-	ast_node *left, *right;
+	ast_node *left = nullptr, *right = nullptr;
 
 	auto opsCtxVec = ctx->mulOp();
 

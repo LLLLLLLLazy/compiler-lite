@@ -72,11 +72,13 @@ private:
 
 	/// @brief 基于精确区间判断 src/dst 是否真正干涉（hole-aware）
 	///
-	/// 用扩展前的精确活跃段判重叠，并把连接 src/dst 两个合并类的所有 copy 指令
-	/// 那一拍的重叠视为伪干涉排除。循环累加器 header phi 与 merge 值仅在这些
-	/// copy 点重叠，故精确判断下不干涉、可安全合并
+	/// 用扩展前的精确活跃段判重叠，只把当前 copy 指令所在位置的单拍重叠视为
+	/// 伪干涉。循环累加器 header phi 与 merge 值仅在该 copy 点重叠，故精确判断下
+	/// 不干涉、可安全合并
+	/// @param copyInst 当前尝试消除的 copy 指令
 	/// @return true 表示真正干涉（不可合并）
 	bool preciseInterferes(Value * src, Value * dst,
+						   Instruction * copyInst,
 	                       const std::map<Instruction *, int> & instNumbering);
 
 	/// @brief 回边携带空洞守卫：判断 spanner 是否跨越 holed 类某原始成员的回边携带空洞
