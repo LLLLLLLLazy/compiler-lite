@@ -34,6 +34,22 @@ bool hasMaterializablePointerRoot(Value * val)
 
 namespace RiscV64Rematerialization {
 
+bool isConstOffsetChainFromMaterializableRoot(Value * val)
+{
+	auto * gep = dynamic_cast<GetElementPtrInst *>(val);
+	while (gep != nullptr) {
+		if (dynamic_cast<ConstInteger *>(gep->getIndexOperand()) == nullptr) {
+			return false;
+		}
+		Value * base = gep->getBasePointer();
+		if (dynamic_cast<AllocaInst *>(base) != nullptr || dynamic_cast<GlobalVariable *>(base) != nullptr) {
+			return true;
+		}
+		gep = dynamic_cast<GetElementPtrInst *>(base);
+	}
+	return false;
+}
+
 bool isCheapRematerializable(Value * val, int depth)
 {
 	if (val == nullptr || depth > 2) {
@@ -52,6 +68,9 @@ bool isCheapRematerializable(Value * val, int depth)
 
 	auto * gep = dynamic_cast<GetElementPtrInst *>(val);
 	if (gep != nullptr) {
+		if (isConstOffsetChainFromMaterializableRoot(gep)) {
+			return true;
+		}
 		if (depth >= 2 || !hasMaterializablePointerRoot(gep)) {
 			return false;
 		}

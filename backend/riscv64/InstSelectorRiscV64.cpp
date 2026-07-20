@@ -3332,6 +3332,11 @@ bool InstSelectorRiscV64::isCheapRematerializable(Value * val, Instruction * ins
 		return false;
 	}
 
+	// 纯常量下标 GEP 链自根地址即可整链重建，无需操作数寄存器可用性检查
+	if (RiscV64Rematerialization::isConstOffsetChainFromMaterializableRoot(val)) {
+		return true;
+	}
+
 	auto operandAvailable = [&](Value * operand) {
 		// 必须用严格查询：操作数只有在此处仍活跃于寄存器中才可直接读取，
 		// 否则其物理寄存器可能已被别的值复用（重新物化会读到错误数据）。
@@ -3367,6 +3372,49 @@ bool InstSelectorRiscV64::tryRematerializeGEP(GetElementPtrInst * gep, int dstRe
 	// dstReg 从这里开始承载基址，后续所有临时寄存器借用都必须避开它以及祖先帧的活跃寄存器。
 	std::set<int> childBusy = busy;
 	childBusy.insert(dstReg);
+
+	// 纯常量下标 GEP 链：整链折叠为 根地址+总偏移 一次性发射，深度无关
+	if (RiscV64Rematerialization::isConstOffsetChainFromMaterializableRoot(gep)) {
+		Value * cursor = gep;
+		int64_t totalOffset = 0;
+		Value * root = nullptr;
+		while (auto * link = dynamic_cast<GetElementPtrInst *>(cursor)) {
+			auto * basePtrType = dynamic_cast<const PointerType *>(link->getBasePointer()->getType());
+			auto * constIndex = asConstInteger(link->getIndexOperand());
+			if (basePtrType == nullptr || constIndex == nullptr) {
+				root = nullptr;
+				break;
+			}
+			Type * stepType = const_cast<Type *>(basePtrType->getPointeeType());
+			if (link->isArrayDecayGEP()) {
+				if (auto * arrayType = dynamic_cast<ArrayType *>(stepType)) {
+					stepType = arrayType->getElementType();
+				}
+			}
+			totalOffset += static_cast<int64_t>(constIndex->getVal()) * stepType->getSize();
+			cursor = link->getBasePointer();
+			if (dynamic_cast<AllocaInst *>(cursor) != nullptr || dynamic_cast<GlobalVariable *>(cursor) != nullptr) {
+				root = cursor;
+				break;
+			}
+		}
+		if (root != nullptr && fitsInt(totalOffset)) {
+			iloc.lea_var(dstReg, root);
+			if (totalOffset != 0) {
+				if (PlatformRiscV64::constExpr(static_cast<int>(totalOffset))) {
+					iloc.inst("addi", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+					          std::to_string(totalOffset));
+				} else {
+					auto offsetTmp = tempMgr.borrowExcluding(inst, childBusy);
+					iloc.load_imm(offsetTmp.reg(), static_cast<int>(totalOffset));
+					iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+					          PlatformRiscV64::regName[offsetTmp.reg()]);
+				}
+			}
+			return true;
+		}
+	}
+
 	Value * basePtr = gep->getBasePointer();
 	if (dynamic_cast<AllocaInst *>(basePtr) != nullptr || dynamic_cast<GlobalVariable *>(basePtr) != nullptr) {
 		iloc.lea_var(dstReg, basePtr);

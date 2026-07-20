@@ -1030,6 +1030,10 @@ RegAllocInfo GreedyRegAllocator::getRegisterHoldingValueAt(Value * value, Instru
 
 bool GreedyRegAllocator::canRematerializeAt(Value * value, int instNum, int depth) const
 {
+	// 纯常量下标 GEP 链整链自根重建，与任何寄存器的存活状态无关
+	if (RiscV64Rematerialization::isConstOffsetChainFromMaterializableRoot(value)) {
+		return true;
+	}
 	if (value == nullptr || instNum < 0 || depth > 2 ||
 	    !RiscV64Rematerialization::isCheapRematerializable(value, depth)) {
 		return false;
