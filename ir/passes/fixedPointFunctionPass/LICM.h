@@ -20,6 +20,7 @@ class DominatorTree;
 class Function;
 class Instruction;
 class Module;
+class PureFunctionAnalysis;
 
 class LICM {
 
@@ -55,10 +56,12 @@ private:
     /// @param header 循环头基本块
     /// @param loopBody 当前自然循环的块集合
     /// @param domTree 当前函数的支配树
+    /// @param purity 模块级纯函数分析（用于识别内存无关调用）
     /// @return 若该循环被修改则返回 true
     bool tryHoistLoop(BasicBlock * header,
                       const std::unordered_set<BasicBlock *> & loopBody,
-                      const DominatorTree & domTree);
+                      const DominatorTree & domTree,
+                      PureFunctionAnalysis & purity);
 
     /// @brief 为循环头新建 preheader 并重写相关 phi 与 CFG 边
     /// @param header 循环头基本块
@@ -118,6 +121,17 @@ private:
                                const std::unordered_set<BasicBlock *> & loopBody,
                                const DominatorTree & domTree) const;
 
+    /// @brief 判断定义块是否支配当前循环的全部 latch 块
+    /// @param defBlock 候选指令所在基本块
+    /// @param header 循环头基本块
+    /// @param loopBody 当前自然循环的块集合
+    /// @param domTree 当前函数的支配树
+    /// @return true 表示每轮完整迭代都必然执行该定义块
+    bool dominatesAllLoopLatches(BasicBlock * defBlock,
+                                 BasicBlock * header,
+                                 const std::unordered_set<BasicBlock *> & loopBody,
+                                 const DominatorTree & domTree) const;
+
     /// @brief 判断候选指令是否支配其全部使用点
     /// @param inst 待检查的候选指令
     /// @param domTree 当前函数的支配树
@@ -126,4 +140,6 @@ private:
 
     Function * func = nullptr;
     Module * mod = nullptr;
+    /// 共享纯函数分析，仅在 run() 执行期间有效（指向栈上对象）
+    PureFunctionAnalysis * purityAnalysis = nullptr;
 };
