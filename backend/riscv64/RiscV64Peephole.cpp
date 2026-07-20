@@ -2567,6 +2567,62 @@ std::string invertedBranchOpcode(const std::string & op)
 ///   b!CC rs1, rs2, L2    # 条件不成立才跳 L2，否则直落进 L1
 ///   L1:
 /// 删除一条无条件跳转、消除一个多余基本块边，且语义完全等价。
+/// @brief 将“j X；X 块仅含一条条件分支”的跳转穿透为条件分支本身
+///
+/// while 形循环的 latch 以 `j header` 回跳、header 仅含一条条件分支时，
+/// 每轮迭代需要两次控制转移（j + 条件分支）。把目标块的条件分支复制到
+/// 跳转点（j X → bcc a,b,T; j F，其中 F 为 X 的显式或直落后继），迭代
+/// 路径缩短为一次控制转移，效果等价于循环旋转后的分支形态。
+/// 复制的分支只读寄存器、目标块不含其它指令，寄存器状态经 j 原样到达，
+/// 改写恒安全；F==X 的自环无法推进，跳过。
+bool threadJumpToConditionBlock(InstList & code)
+{
+	bool changed = false;
+	std::unordered_map<std::string, InstIt> labelPos;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		if (isLabel(*it)) {
+			labelPos[(*it)->opcode] = it;
+		}
+	}
+
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * jump = *it;
+		if (!isLiveInst(jump) || jump->opcode != "j" || jump->result.empty()) {
+			continue;
+		}
+		auto found = labelPos.find(jump->result);
+		if (found == labelPos.end()) {
+			continue;
+		}
+		auto branchIt = nextMachineInst(code, found->second);
+		if (branchIt == code.end() || !isLiveInst(*branchIt) || !isBranchOpcode((*branchIt)->opcode) ||
+		    (*branchIt)->arg2.empty()) {
+			continue;
+		}
+		auto afterIt = nextMachineInst(code, branchIt);
+		if (afterIt == code.end()) {
+			continue;
+		}
+		std::string falseLabel;
+		if ((*afterIt)->opcode == "j" && !(*afterIt)->result.empty()) {
+			falseLabel = (*afterIt)->result;
+		} else if (isLabel(*afterIt)) {
+			falseLabel = (*afterIt)->opcode;
+		} else {
+			continue;
+		}
+		if (falseLabel == jump->result) {
+			continue;
+		}
+
+		auto * branch = *branchIt;
+		jump->replace(branch->opcode, branch->result, branch->arg1, branch->arg2);
+		code.insert(std::next(it), new RiscV64Inst("j", falseLabel));
+		changed = true;
+	}
+	return changed;
+}
+
 bool invertBranchOverJump(InstList & code)
 {
 	bool changed = false;
@@ -3485,6 +3541,8 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		localChanged = removeJumpToNextLabel(code) || localChanged;
 		// 基于活跃性分析的通用死定义清扫，消除跨控制流边界仍可证明无用的定义
 		localChanged = eliminateDeadDefinitions(code) || localChanged;
+		// 将 j 到“仅含一条条件分支”块的跳转穿透为条件分支，缩短循环回边路径
+		localChanged = threadJumpToConditionBlock(code) || localChanged;
 		// 反转”条件分支 + 跨越式 j”以删除多余无条件跳转
 		localChanged = invertBranchOverJump(code) || localChanged;
 		// 合并多个 ret 指令到统一返回点
