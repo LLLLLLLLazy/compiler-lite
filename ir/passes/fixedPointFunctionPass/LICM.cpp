@@ -10,7 +10,6 @@
 #include <unordered_map>
 #include <utility>
 
-#include "AllocaInst.h"
 #include "AnalysisCache.h"
 #include "BasicBlock.h"
 #include "BranchInst.h"
@@ -27,6 +26,7 @@
 #include "MemoryLocation.h"
 #include "Module.h"
 #include "PhiInst.h"
+#include "PureFunctionAnalysis.h"
 #include "StoreInst.h"
 #include "Use.h"
 #include "Value.h"
@@ -94,101 +94,15 @@ bool needsExitDominance(IRInstOperator op)
     }
 }
 
-/// @brief 函数纯度分析状态枚举，用于 LICM 判断调用是否可安全外提
-enum class FunctionPurityState {
-    Unknown,   ///< 尚未分析
-    Visiting,  ///< 正在访问（用于检测递归）
-    Pure,      ///< 纯函数：无副作用，可安全外提
-    Impure,    ///< 非纯函数：有副作用，不可外提
-};
-
-/// @brief 函数纯度分析器
-///
-/// 通过递归分析函数体中的指令来判断函数是否为纯函数。
-/// 纯函数的判定条件：不包含 store 指令、所有调用也都是纯函数调用、
-/// 其余指令均无副作用。用于 LICM 判断循环内的函数调用是否可安全外提。
-class FunctionPurity {
-public:
-    bool isPure(Function * function)
-    {
-        if (!function || function->isBuiltin() || function->getBlocks().empty()) {
-            return false;
-        }
-
-        auto it = states.find(function);
-        if (it != states.end()) {
-            return it->second == FunctionPurityState::Pure;
-        }
-
-        states[function] = FunctionPurityState::Visiting;
-        bool pure = true;
-        for (auto * bb : function->getBlocks()) {
-            for (auto * inst : bb->getInstructions()) {
-                if (!isInstructionAllowed(inst)) {
-                    pure = false;
-                    break;
-                }
-            }
-            if (!pure) {
-                break;
-            }
-        }
-
-        states[function] = pure ? FunctionPurityState::Pure : FunctionPurityState::Impure;
-        return pure;
-    }
-
-private:
-    bool isInstructionAllowed(Instruction * inst)
-    {
-        if (!inst || inst->isDead() || inst->isTerminator()) {
-            return true;
-        }
-
-        if (dynamic_cast<AllocaInst *>(inst) || dynamic_cast<LoadInst *>(inst)) {
-            return true;
-        }
-
-        if (dynamic_cast<StoreInst *>(inst)) {
-            return false;
-        }
-
-        if (auto * call = dynamic_cast<CallInst *>(inst)) {
-            auto it = states.find(call->getCallee());
-            if (it != states.end() && it->second == FunctionPurityState::Visiting) {
-                return false;
-            }
-            return isPure(call->getCallee());
-        }
-
-        return !inst->mayHaveSideEffects();
-    }
-
-    std::unordered_map<Function *, FunctionPurityState> states;  ///< 函数到纯度状态的映射
-};
-
-/// @brief 判断指令是否为纯函数调用（用于 LICM 候选判断）
-/// @param inst 待检查的指令
-/// @return true 表示该指令是纯函数调用且有返回值
-bool isPureCall(Instruction * inst)
-{
-    auto * call = dynamic_cast<CallInst *>(inst);
-    if (!call || !call->hasResultValue()) {
-        return false;
-    }
-
-    FunctionPurity purity;
-    return purity.isPure(call->getCallee());
-}
-
-/// @brief 判断循环体是否可能写入内存
+/// @brief 判断循环体是否可能写入调用者可见内存
 ///
 /// 遍历循环体中的所有指令，若存在 store 指令或非纯函数调用，
-/// 则认为循环可能修改内存，此时纯函数调用不可安全外提
+/// 则认为循环可能修改内存，此时可能读内存的纯函数调用不可安全外提
 /// （因为外提后可能改变调用与内存写入的相对顺序）。
 /// @param loopBody 循环体基本块集合
+/// @param purity 模块级纯函数分析
 /// @return true 表示循环可能写入内存
-bool loopMayWriteMemory(const std::unordered_set<BasicBlock *> & loopBody)
+bool loopMayWriteMemory(const std::unordered_set<BasicBlock *> & loopBody, PureFunctionAnalysis & purity)
 {
     for (auto * bb : loopBody) {
         for (auto * inst : bb->getInstructions()) {
@@ -199,7 +113,7 @@ bool loopMayWriteMemory(const std::unordered_set<BasicBlock *> & loopBody)
                 return true;
             }
             auto * call = dynamic_cast<CallInst *>(inst);
-            if (call && !isPureCall(call)) {
+            if (call && !purity.isPure(call->getCallee())) {
                 return true;
             }
         }
@@ -223,6 +137,11 @@ bool LICM::run()
     }
 
     bool changed = false;
+
+    // 模块级纯度分析：LICM 只移动指令、不增删 store 与调用，函数纯度在
+    // 整个 run 期间保持有效，可跨循环与迭代轮次复用缓存
+    PureFunctionAnalysis purity(mod);
+    purityAnalysis = &purity;
 
     auto & cache = func->getAnalysisCache();
     while (true) {
@@ -250,7 +169,7 @@ bool LICM::run()
                 continue;
             }
 
-            if (tryHoistLoop(header, *loopBody, domTree)) {
+            if (tryHoistLoop(header, *loopBody, domTree, purity)) {
                 localChanged = true;
                 changed = true;
                 break;
@@ -264,6 +183,7 @@ bool LICM::run()
         cache.invalidateCFGAnalyses();
     }
 
+    purityAnalysis = nullptr;
     return changed;
 }
 
@@ -318,7 +238,8 @@ BasicBlock * LICM::getExistingPreheader(const std::vector<BasicBlock *> & outsid
 /// @return 若该循环被修改则返回 true
 bool LICM::tryHoistLoop(BasicBlock * header,
                         const std::unordered_set<BasicBlock *> & loopBody,
-                        const DominatorTree & domTree)
+                        const DominatorTree & domTree,
+                        PureFunctionAnalysis & purity)
 {
     if (!header || loopBody.empty()) {
         return false;
@@ -355,9 +276,15 @@ bool LICM::tryHoistLoop(BasicBlock * header,
                     continue;
                 }
 
-                // 若候选指令是函数调用，且循环体可能写入内存，则不可外提
+                auto * callInst = dynamic_cast<CallInst *>(inst);
+                // 内存无关调用：结果只由实参决定，不读写调用者可见内存，
+                // 与循环内 store 无顺序约束，可放宽下方两项外提限制
+                bool memIndependentCall =
+                    callInst != nullptr && mod != nullptr && purity.isMemoryIndependent(callInst->getCallee());
+
+                // 若候选指令是可能读取内存的函数调用，且循环体可能写入内存，则不可外提
                 // 因为外提后调用与内存写入的相对顺序可能改变，破坏语义
-                if (dynamic_cast<CallInst *>(inst) && loopMayWriteMemory(loopBody)) {
+                if (callInst != nullptr && !memIndependentCall && loopMayWriteMemory(loopBody, purity)) {
                     continue;
                 }
 
@@ -373,9 +300,19 @@ bool LICM::tryHoistLoop(BasicBlock * header,
                     continue;
                 }
 
-                bool needsExitDom = requiresExitDominance(inst) && !isSafeLoad;
-                if (needsExitDom && !dominatesAllLoopExits(bb, loopBody, domTree)) {
-                    continue;
+                if (memIndependentCall) {
+                    // 内存无关调用推测执行不会触发访存异常，退出点支配放宽为
+                    // latch 支配（每轮完整迭代必然执行）：仅零迭代循环会在
+                    // preheader 多执行一次调用。这里假设纯函数对给定实参可
+                    // 终止，与本 pass 对全局 load 的推测策略一致
+                    if (!dominatesAllLoopLatches(bb, header, loopBody, domTree)) {
+                        continue;
+                    }
+                } else {
+                    bool needsExitDom = requiresExitDominance(inst) && !isSafeLoad;
+                    if (needsExitDom && !dominatesAllLoopExits(bb, loopBody, domTree)) {
+                        continue;
+                    }
                 }
 
                 if (!dominatesAllUses(inst, domTree)) {
@@ -587,8 +524,8 @@ bool LICM::isHoistableInstruction(Instruction * inst) const
     }
 
     // 函数调用指令：仅当被调用函数是纯函数时才允许外提
-    if (dynamic_cast<CallInst *>(inst)) {
-        return isPureCall(inst);
+    if (auto * call = dynamic_cast<CallInst *>(inst)) {
+        return purityAnalysis != nullptr && purityAnalysis->isPure(call->getCallee());
     }
 
     if (dynamic_cast<LoadInst *>(inst)) {
@@ -610,20 +547,21 @@ bool LICM::isSafeLoadToHoist(Instruction * inst, const std::unordered_set<BasicB
     }
 
     Value * pointer = load->getPointerOperand();
+    // 视为可能改写内存的调用：非纯函数（分析器缺失时保守处理）
+    auto mayClobberCall = [this](CallInst * call) {
+        return call != nullptr && (purityAnalysis == nullptr || !purityAnalysis->isPure(call->getCallee()));
+    };
+
     if (dynamic_cast<GlobalVariable *>(getPointerRoot(pointer))) {
         // 全局变量的地址在程序启动时已静态分配，恒为可访问地址，推测执行其 load 不会
         // 触发访存异常。因此无需要求全局只读，只要循环内没有别名 store/调用改写该地址，
         // 外提即安全。blocksMayClobberLoad 已通过指针根对象比较判定别名
-        return !blocksMayClobberLoad(pointer,
-                                     loopBody,
-                                     [](CallInst * call) { return call != nullptr && !isPureCall(call); });
+        return !blocksMayClobberLoad(pointer, loopBody, mayClobberCall);
     }
 
     MemoryLocation location = normalizeMemoryLocation(pointer);
     if (location.isPrecise() && !doesPointerEscape(location.object)) {
-        return !blocksMayClobberLoad(pointer,
-                                     loopBody,
-                                     [](CallInst * call) { return call != nullptr && !isPureCall(call); });
+        return !blocksMayClobberLoad(pointer, loopBody, mayClobberCall);
     }
 
     return false;
@@ -702,6 +640,34 @@ bool LICM::dominatesAllLoopExits(BasicBlock * defBlock,
             if (!domTree.dominates(defBlock, succ)) {
                 return false;
             }
+        }
+    }
+
+    return true;
+}
+
+/// @brief 判断定义块是否支配当前循环的全部 latch 块
+/// @param defBlock 候选指令所在基本块
+/// @param header 循环头基本块
+/// @param loopBody 当前自然循环的块集合
+/// @param domTree 当前函数的支配树
+/// @return true 表示每轮完整迭代都必然执行该定义块
+bool LICM::dominatesAllLoopLatches(BasicBlock * defBlock,
+                                   BasicBlock * header,
+                                   const std::unordered_set<BasicBlock *> & loopBody,
+                                   const DominatorTree & domTree) const
+{
+    if (!defBlock || !header) {
+        return false;
+    }
+
+    for (auto * pred : header->getPredecessors()) {
+        if (loopBody.find(pred) == loopBody.end()) {
+            continue;
+        }
+
+        if (!domTree.dominates(defBlock, pred)) {
+            return false;
         }
     }
 
