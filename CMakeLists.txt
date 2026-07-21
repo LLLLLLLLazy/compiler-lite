@@ -233,6 +233,8 @@ set(IR_SRCS
 	ir/analysis/MemoryAccess.cpp
 	ir/analysis/MemoryLocation.h
 	ir/analysis/MemoryLocation.cpp
+	ir/analysis/ParamAliasAnalysis.h
+	ir/analysis/ParamAliasAnalysis.cpp
 	ir/analysis/PostDominatorTree.h
 	ir/analysis/PostDominatorTree.cpp
 	ir/analysis/PureFunctionAnalysis.h
