@@ -8,6 +8,7 @@
 #include <algorithm>
 
 #include "BasicBlock.h"
+#include "BinaryInst.h"
 #include "CopyInst.h"
 #include "Function.h"
 #include "InterferenceGraph.h"
@@ -182,8 +183,8 @@ bool RegCoalescer::canCoalesce(Value * src, Value * dst,
 
 	// 精确（hole-aware）干涉判断：保守循环扩展会让循环携带累加器（header phi）
 	// 与 merge 值处处假干涉，导致跨块 phi-copy 无法合并。改用扩展前的精确活跃段，
-	// 并排除连接 src/dst 的 copy 那一拍的伪干涉，即可安全合并这类累加器 copy，
-	// 实现原地累加（addw a1,a1,t 而非 mv 对）
+	// 识别二元破坏性更新的定义单拍和对应 copy 交接单拍，即可安全合并这类累加器
+	// copy，实现原地累加（addw a1,a1,t 而非 mv 对）
 	return !preciseInterferes(src, dst, copyInst, instNumbering);
 }
 
@@ -200,40 +201,61 @@ bool RegCoalescer::preciseInterferes(Value * src, Value * dst,
 		return true;
 	}
 
-	// 收集 src/dst 两个合并类的定义点位置。在某条指令定义 X 类时，若另一类 Y 在此
-	// 被读且就此死亡（copy 的 d=s、两地址的 d=s op x 都是这种形态），二者持有可共享
-	// 的值，这一拍的重叠属伪干涉应排除；真正的干涉会体现在定义点之后仍存活的位置上，
-	// 那些位置不是定义点，会被下面如实判为干涉。这样累加器的 phi-cycle（含
-	// merge=phi+add 的 `t136=t113+prod`）也能被识别为可合并
+	// 只收集真正的破坏性二元更新位置：一类在 BinaryInst 中被定义，另一类是其
+	// 输入。若输入类恰在该点死亡，RISC-V 二元指令允许结果寄存器与输入寄存器
+	// 相同，因此这一拍的重叠是伪干涉。这里刻意排除 CopyInst：Phi 降级产生的
+	// 并行 copy 不能仅凭单拍重叠推断源值已死
 	std::unordered_set<int> benignPositions;
 	if (func_ != nullptr) {
 		for (auto * bb : func_->getBlocks()) {
 			for (auto * inst : bb->getInstructions()) {
-				Value * def = nullptr;
-				if (auto * copy = dynamic_cast<CopyInst *>(inst)) {
-					def = copy->getDst() != nullptr ? copy->getDst() : static_cast<Value *>(copy);
-				} else if (inst->hasResultValue()) {
-					def = inst;
-				}
-				if (def == nullptr) {
+				if (dynamic_cast<BinaryInst *>(inst) == nullptr || !inst->hasResultValue()) {
 					continue;
 				}
+				Value * def = inst;
 				while (representative_.find(def) != representative_.end()) {
 					def = representative_[def];
 				}
-				if (def == src || def == dst) {
-					auto pit = instNumbering.find(inst);
-					if (pit != instNumbering.end()) {
-						benignPositions.insert(pit->second);
+				Value * other = def == src ? dst : (def == dst ? src : nullptr);
+				if (other == nullptr) {
+					continue;
+				}
+				for (Value * operand : inst->getOperandsValue()) {
+					while (representative_.find(operand) != representative_.end()) {
+						operand = representative_[operand];
+					}
+					if (operand == other) {
+						auto pit = instNumbering.find(inst);
+						if (pit != instNumbering.end()) {
+							benignPositions.insert(pit->second);
+						}
+						break;
 					}
 				}
 			}
 		}
 	}
 
-	// 区间重叠时不能仅凭 copy 的存在推断源值在该点后死亡。Phi 降级后的并行
-	// copy 可能与循环携带值、循环终止值共存，必须保留 copy 并视为真干涉
-	benignPositions.clear();
+	// 只有已经观察到破坏性更新单拍时，才把当前候选 copy 的交接单拍也视为
+	// 良性。这样允许 `next = current + x; current = copy next` 原地更新，同时不会
+	// 放行单纯依赖并行 copy 顺序的 phi 轮换
+	bool hasDestructiveOverlap = false;
+	for (const auto & a : sIt->second) {
+		for (const auto & b : dIt->second) {
+			const int os = std::max(a.start, b.start);
+			const int oe = std::min(a.end, b.end);
+			if (oe - os == 1 && benignPositions.find(os) != benignPositions.end()) {
+				hasDestructiveOverlap = true;
+				break;
+			}
+		}
+		if (hasDestructiveOverlap) {
+			break;
+		}
+	}
+	if (hasDestructiveOverlap) {
+		benignPositions.insert(copyPosIt->second);
+	}
 
 	// 精确段重叠判定：copy 与两地址 op 的 def 周期重叠恒为单拍 [p,p+1)，
 	// 且 p 是 src/dst 的定义点。任何长度 >1 的重叠都意味着二者多拍共存=真干涉；

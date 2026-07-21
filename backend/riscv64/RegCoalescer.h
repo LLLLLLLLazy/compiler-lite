@@ -72,9 +72,9 @@ private:
 
 	/// @brief 基于精确区间判断 src/dst 是否真正干涉（hole-aware）
 	///
-	/// 用扩展前的精确活跃段判重叠，只把当前 copy 指令所在位置的单拍重叠视为
-	/// 伪干涉。循环累加器 header phi 与 merge 值仅在该 copy 点重叠，故精确判断下
-	/// 不干涉、可安全合并
+	/// 用扩展前的精确活跃段判重叠。仅当两个类构成二元破坏性更新且在定义点只
+	/// 重叠一拍时，才把该定义点及当前 copy 的交接单拍视为伪干涉；其余重叠和
+	/// 回边携带空洞仍按真干涉处理
 	/// @param copyInst 当前尝试消除的 copy 指令
 	/// @return true 表示真正干涉（不可合并）
 	bool preciseInterferes(Value * src, Value * dst,
