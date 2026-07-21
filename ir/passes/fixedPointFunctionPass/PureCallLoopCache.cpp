@@ -1,22 +1,22 @@
 ///
 /// @file PureCallLoopCache.cpp
-/// @brief 循环内纯调用缓存 pass 实现。
+/// @brief 循环内内存独立调用缓存 pass 实现
 ///
-/// 本 pass 对循环中实参不变的纯函数调用进行缓存优化。
-/// 核心思路：若循环 latch 块中存在一个纯函数调用，且其所有实参在循环内不变，
-/// 则该调用每轮迭代返回相同结果，可通过缓存避免重复计算。
+/// 本 pass 对循环中实参不变且不依赖调用者可见内存的函数调用进行缓存优化
+/// 核心思路：若循环 latch 块中存在一个内存独立调用，且其所有实参在循环内不变，
+/// 则该调用每轮迭代返回相同结果，可通过缓存避免重复计算
 ///
 /// 实现方式：
-///   1. 在循环头插入 cache phi（缓存上一轮调用的返回值）和 valid phi（标记缓存是否有效）；
+///   1. 在循环头插入 cache phi（缓存上一轮调用的返回值）和 valid phi（标记缓存是否有效）
 ///   2. 将 latch 中的调用拆分为 check/call/reuse/cont 四个基本块：
-///      - check 块：判断 valid phi 是否为真，若真则跳到 reuse，否则跳到 call；
-///      - call 块：执行实际调用，结果进入 cont 块的 result phi；
-///      - reuse 块：直接使用 cache phi 的值，进入 cont 块的 result phi；
-///      - cont 块：通过 result phi 合并两条路径的结果。
-///   3. valid phi 的语义：若循环体中存在 store 或非纯调用，则缓存失效（valid=false）；
-///      否则 valid 沿着循环体传播，保持上一轮的有效性。
+///      - check 块：判断 valid phi 是否为真，若真则跳到 reuse，否则跳到 call
+///      - call 块：执行实际调用，结果进入 cont 块的 result phi
+///      - reuse 块：直接使用 cache phi 的值，进入 cont 块的 result phi
+///      - cont 块：通过 result phi 合并两条路径的结果
+///   3. valid phi 在首次调用后保持有效；候选调用必须不依赖调用者可见内存
+///      因此循环内的内存写入不会改变缓存结果
 ///
-/// 这是一种通用的循环优化，不依赖特定函数名或输入模式。
+/// 这是一种通用的循环优化，不依赖特定函数名或输入模式
 ///
 
 #include "PureCallLoopCache.h"
@@ -140,36 +140,6 @@ bool operandsAreLoopInvariant(CallInst * call, const std::unordered_set<BasicBlo
     return true;
 }
 
-/// @brief 判断基本块是否会使缓存失效
-///
-/// 若基本块中包含 store 指令或非纯函数调用，则该块可能修改内存状态，
-/// 导致缓存的纯调用结果不再有效。
-/// @param bb 待检查的基本块
-/// @return true 表示该块会使缓存失效
-bool blockInvalidatesCache(BasicBlock * bb)
-{
-    if (!bb) {
-        return true;
-    }
-
-    for (auto * inst : bb->getInstructions()) {
-        if (!inst || inst->isDead()) {
-            continue;
-        }
-        if (dynamic_cast<StoreInst *>(inst)) {
-            return true;
-        }
-        auto * call = dynamic_cast<CallInst *>(inst);
-        if (call) {
-            FunctionSideEffectAnalysis sideEffects;
-            if (!sideEffects.isSideEffectFree(call->getCallee())) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 /// @brief 为给定类型创建零值默认值，用于缓存 phi 的初始值
 /// @param mod 所属模块
 /// @param type 值类型
@@ -245,10 +215,10 @@ bool hasUniqueLoopBackedge(BasicBlock * header,
     return insidePreds == 1;
 }
 
-/// @brief 在 latch 块中查找唯一可缓存的纯函数调用
+/// @brief 在 latch 块中查找唯一可缓存的内存独立调用
 ///
-/// 可缓存的条件：调用是纯函数调用、有返回值、实参循环不变，
-/// 且 latch 块中最多只有一个满足条件的调用（避免多个调用的缓存冲突）。
+/// 可缓存的条件：调用不依赖调用者可见内存、有返回值、实参循环不变，
+/// 且 latch 块中最多只有一个满足条件的调用（避免多个调用的缓存冲突）
 /// @param latch 循环 latch 块
 /// @param loopBody 循环体基本块集合
 /// @param purity 纯度分析器
@@ -267,7 +237,7 @@ CallInst * findCacheableLatchCall(BasicBlock * latch,
         if (!call || !call->hasResultValue()) {
             continue;
         }
-        if (!purity.isPure(call->getCallee()) || !operandsAreLoopInvariant(call, loopBody)) {
+        if (!purity.isMemoryIndependent(call->getCallee()) || !operandsAreLoopInvariant(call, loopBody)) {
             continue;
         }
         if (candidate != nullptr) {
@@ -366,11 +336,11 @@ SplitCallBlocks splitCallBlock(Function * func, CallInst * call, Value * cachedV
     return result;
 }
 
-/// @brief 对循环内的纯函数调用执行缓存优化
+/// @brief 对循环内的内存独立调用执行缓存优化
 ///
 /// 在循环头插入 cache phi 和 valid phi，将 latch 中的调用拆分为
 /// 条件分支（缓存有效则复用，否则执行调用），并设置 valid phi 的
-/// incoming 值：若某基本块会使缓存失效则 valid=false，否则传播上一轮的 valid。
+/// incoming 值：循环外为 false，首次调用完成后为 true，循环内沿 CFG 传播
 /// @param func 所属函数
 /// @param mod 所属模块
 /// @param header 循环头基本块
@@ -398,16 +368,13 @@ bool cacheCallInLoop(Function * func,
     auto * trueValue = mod->newConstInteger(IntegerType::getTypeInt1(), 1);
 
     std::unordered_map<BasicBlock *, PhiInst *> validIn;
-    std::unordered_map<BasicBlock *, bool> invalidates;
     for (auto * bb : loopBody) {
         auto * phi = new PhiInst(func, IntegerType::getTypeInt1());
         insertPhiAtBlockStart(bb, phi);
         validIn[bb] = phi;
-        invalidates[bb] = blockInvalidatesCache(bb);
     }
 
-    Value * validAtCall = invalidates[latch] ? static_cast<Value *>(falseValue) : static_cast<Value *>(validIn[latch]);
-    auto split = splitCallBlock(func, call, defaultCache, validAtCall);
+    auto split = splitCallBlock(func, call, defaultCache, validIn[latch]);
     if (!split.contBlock || !split.resultPhi) {
         return false;
     }
@@ -415,7 +382,6 @@ bool cacheCallInLoop(Function * func,
     auto * cachePhi = new PhiInst(func, call->getType());
     insertPhiAtBlockStart(header, cachePhi);
 
-    const bool contInvalidates = blockInvalidatesCache(split.contBlock);
     for (auto * bb : loopBody) {
         auto * phi = validIn[bb];
         if (!phi) {
@@ -425,9 +391,9 @@ bool cacheCallInLoop(Function * func,
         for (auto * pred : bb->getPredecessors()) {
             Value * incoming = falseValue;
             if (bb == header && pred == split.contBlock) {
-                incoming = contInvalidates ? static_cast<Value *>(falseValue) : static_cast<Value *>(trueValue);
+                incoming = trueValue;
             } else if (loopBody.find(pred) != loopBody.end()) {
-                incoming = invalidates[pred] ? static_cast<Value *>(falseValue) : static_cast<Value *>(validIn[pred]);
+                incoming = validIn[pred];
             }
             phi->addIncoming(incoming, pred);
         }
