@@ -330,11 +330,17 @@ bool InstCombine::simplifyBinary(BinaryInst * inst)
             if (isIntegerZero(rhs)) {
                 return replaceInstWithValue(inst, lhs);
             }
+            if (tryLinearReassociate(inst)) {
+                return true;
+            }
             break;
 
         case IRInstOperator::IRINST_OP_SUB_I:
             if (isIntegerZero(rhs)) {
                 return replaceInstWithValue(inst, lhs);
+            }
+            if (tryLinearReassociate(inst)) {
+                return true;
             }
             break;
 
@@ -413,6 +419,200 @@ bool InstCombine::simplifyBinary(BinaryInst * inst)
     }
 
     return false;
+}
+
+/// @brief 尝试把整数 add/sub 链折叠为最简线性组合
+///
+/// 以 inst 为根收集 add/sub 构成的 DAG（允许链内共享节点），在 i32
+/// 回绕环上把整条链规范化为 Σ coeff·term + K（精确等价，无溢出语义
+/// 问题）。当全部系数绝对值不超过 1 且重建指令数严格少于被吸收的
+/// 链节点数时，按「正项相加、负项相减、常量最后」重建。
+/// 典型收益：源码用加减法模拟位运算的链，如
+/// a-(a+b)+b-(a+b) → -(a+b)，甚至整链坍缩为常量。
+bool InstCombine::tryLinearReassociate(BinaryInst * inst)
+{
+    constexpr std::size_t kMaxChainNodes = 32;
+
+    if (!inst || inst->isDead() || !inst->getType()->isIntegerType() ||
+        inst->getType() == IntegerType::getTypeInt1()) {
+        return false;
+    }
+
+    auto asChainOp = [](Value * value) -> BinaryInst * {
+        auto * binary = dynamic_cast<BinaryInst *>(value);
+        if (!binary || binary->isDead()) {
+            return nullptr;
+        }
+        IRInstOperator op = binary->getOp();
+        if (op != IRInstOperator::IRINST_OP_ADD_I && op != IRInstOperator::IRINST_OP_SUB_I) {
+            return nullptr;
+        }
+        return binary;
+    };
+
+    // 仅在链根触发：唯一使用者仍是 add/sub 时交给根节点统一处理，
+    // 避免对同一条链的每个内部节点重复扫描
+    if (inst->getUseList().size() == 1) {
+        auto * user = dynamic_cast<Instruction *>(inst->getUseList().front()->getUser());
+        if (user != nullptr && !user->isDead() && asChainOp(user) != nullptr) {
+            return false;
+        }
+    }
+
+    // 第一阶段：从根出发收集候选链节点
+    std::vector<BinaryInst *> discovered = {inst};
+    std::unordered_set<BinaryInst *> chain = {inst};
+    for (std::size_t i = 0; i < discovered.size(); ++i) {
+        if (chain.size() > kMaxChainNodes) {
+            return false;
+        }
+        for (Value * operand : {discovered[i]->getLHS(), discovered[i]->getRHS()}) {
+            auto * child = asChainOp(operand);
+            if (child != nullptr && child != inst && chain.insert(child).second) {
+                discovered.push_back(child);
+            }
+        }
+    }
+    if (discovered.size() < 2) {
+        return false;
+    }
+
+    // 第二阶段：非根节点若存在链外使用者则降级为原子项，迭代至稳定
+    bool demotedAny = true;
+    while (demotedAny) {
+        demotedAny = false;
+        for (auto * node : discovered) {
+            if (node == inst || chain.find(node) == chain.end()) {
+                continue;
+            }
+            for (auto * use : node->getUseList()) {
+                auto * userBinary = dynamic_cast<BinaryInst *>(use->getUser());
+                if (userBinary == nullptr || userBinary->isDead() ||
+                    chain.find(userBinary) == chain.end()) {
+                    chain.erase(node);
+                    demotedAny = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // 重新求根可达的链节点集合，并生成逆后序（DAG 拓扑序，父先于子）
+    std::vector<BinaryInst *> postOrder;
+    std::unordered_set<BinaryInst *> visited;
+    std::function<void(BinaryInst *)> dfs = [&](BinaryInst * node) {
+        if (!visited.insert(node).second) {
+            return;
+        }
+        for (Value * operand : {node->getLHS(), node->getRHS()}) {
+            auto * child = asChainOp(operand);
+            if (child != nullptr && chain.find(child) != chain.end()) {
+                dfs(child);
+            }
+        }
+        postOrder.push_back(node);
+    };
+    dfs(inst);
+    if (postOrder.size() < 2) {
+        return false;
+    }
+    std::vector<BinaryInst *> topoOrder(postOrder.rbegin(), postOrder.rend());
+
+    // 第三阶段：沿拓扑序传播乘数，累积原子项系数与常量
+    std::unordered_map<BinaryInst *, std::int64_t> multiplier;
+    std::unordered_map<Value *, std::int64_t> coeffs;
+    std::vector<Value *> termOrder;
+    std::int64_t constant = 0;
+    multiplier[inst] = 1;
+    for (auto * node : topoOrder) {
+        std::int64_t factor = multiplier[node];
+        if (factor == 0) {
+            continue;
+        }
+        const bool isSub = node->getOp() == IRInstOperator::IRINST_OP_SUB_I;
+        Value * operands[2] = {node->getLHS(), node->getRHS()};
+        for (int index = 0; index < 2; ++index) {
+            std::int64_t sign = (index == 1 && isSub) ? -factor : factor;
+            Value * operand = operands[index];
+            auto * child = asChainOp(operand);
+            if (child != nullptr && visited.find(child) != visited.end() &&
+                chain.find(child) != chain.end()) {
+                multiplier[child] += sign;
+                continue;
+            }
+            if (auto * constInt = dynamic_cast<ConstInteger *>(operand)) {
+                constant += sign * static_cast<std::int64_t>(constInt->getVal());
+                continue;
+            }
+            if (coeffs.find(operand) == coeffs.end()) {
+                termOrder.push_back(operand);
+            }
+            coeffs[operand] += sign;
+        }
+    }
+
+    // 常量按 i32 回绕语义归一
+    const auto wrappedConstant =
+        static_cast<std::int32_t>(static_cast<std::uint32_t>(static_cast<std::uint64_t>(constant)));
+
+    // 收集非零系数项；v1 仅处理系数 ±1 的情形
+    std::vector<Value *> positives;
+    std::vector<Value *> negatives;
+    for (auto * term : termOrder) {
+        std::int64_t coeff = coeffs[term];
+        if (coeff == 0) {
+            continue;
+        }
+        if (coeff == 1) {
+            positives.push_back(term);
+        } else if (coeff == -1) {
+            negatives.push_back(term);
+        } else {
+            return false;
+        }
+    }
+
+    const std::size_t expandedCount = postOrder.size();
+    const std::size_t termCount = positives.size() + negatives.size();
+    std::size_t newCost = 0;
+    if (termCount > 0) {
+        newCost = termCount - 1 + (positives.empty() ? 1 : 0) + (wrappedConstant != 0 ? 1 : 0);
+    }
+    if (newCost >= expandedCount) {
+        return false;
+    }
+
+    // 第四阶段：重建（正项相加 → 负项相减 → 常量最后，保持确定性顺序）
+    Type * resultType = inst->getType();
+    auto emitBinary = [&](IRInstOperator op, Value * lhsValue, Value * rhsValue) -> Value * {
+        auto * created = new BinaryInst(func, op, lhsValue, rhsValue, resultType);
+        insertInstBefore(inst, created);
+        return created;
+    };
+
+    Value * accumulated = nullptr;
+    for (auto * term : positives) {
+        accumulated = accumulated == nullptr
+                          ? term
+                          : emitBinary(IRInstOperator::IRINST_OP_ADD_I, accumulated, term);
+    }
+    for (auto * term : negatives) {
+        if (accumulated == nullptr) {
+            accumulated =
+                emitBinary(IRInstOperator::IRINST_OP_SUB_I, mod->newConstInteger(resultType, 0), term);
+        } else {
+            accumulated = emitBinary(IRInstOperator::IRINST_OP_SUB_I, accumulated, term);
+        }
+    }
+    if (accumulated == nullptr) {
+        accumulated = mod->newConstInteger(resultType, wrappedConstant);
+    } else if (wrappedConstant != 0) {
+        accumulated = emitBinary(IRInstOperator::IRINST_OP_ADD_I,
+                                 accumulated,
+                                 mod->newConstInteger(resultType, wrappedConstant));
+    }
+
+    return replaceInstWithValue(inst, accumulated);
 }
 
 /// @brief 化简冗余 phi

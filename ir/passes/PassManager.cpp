@@ -28,6 +28,7 @@
 #include "fixedPointFunctionPass/LoopTiling.h"
 #include "fixedPointFunctionPass/LoopVectorize.h"
 #include "fixedPointFunctionPass/MatMulInterchange.h"
+#include "fixedPointFunctionPass/RangeModSimplify.h"
 #include "fixedPointFunctionPass/LocalMemoryOpt.h"
 #include "fixedPointFunctionPass/RemoveEmptyLoop.h"
 #include "fixedPointFunctionPass/SimpleLoopUnroll.h"
@@ -241,6 +242,13 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
         LoopFusion pass(func, module);
         return pass.run();
     });
+    // 基于值域的 2 的幂取模/除法削减：此时循环仍是规范计数形态，
+    // SCEV 可用归纳变量的常量迭代数证明被除数非负，将带符号取模/除法
+    // 改写为 and/移位；须在 LSR 把归纳变量改写为指针游标之前运行
+    registerFixedPointFunctionPass("RangeModSimplify", [this](Function * func) {
+        RangeModSimplify pass(func, module);
+        return pass.run();
+    });
     // 基于 SCEV 把规范计数循环头部递推 phi 的出口取值替换为闭式表达式，
     // 随后消除因此变为无副作用且出口无依赖的空循环
     registerFixedPointFunctionPass("LoopExitValueRewrite", [this](Function * func) {
@@ -440,6 +448,32 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
         // 18 个受影响用例中有 16 个加速，因此暂时禁用并保留代码供后续复测
         // LoopRotate loopRotate(func);
         // changed = loopRotate.run() || changed;
+
+        return changed;
+    });
+
+    // LateLoopOpt 中的 CanonicalizeLoop 会为多回边循环重建 synthetic 合并
+    // latch（仅含 phi + 无条件跳转），该块在热循环每迭代引入额外的 phi 拷贝
+    // 与跳转。此时所有循环分析已结束，不再需要唯一回边形态，补一轮
+    // LateLoopCFGCleanup 把 latch phi 折回头部 phi、让各回边直接跳头部
+    registerLateFunctionPass("PostLateLoopCFGCleanup", [](Function * func) {
+        if (!func || func->isBuiltin() || func->getBlocks().empty()) {
+            return false;
+        }
+
+        bool changed = false;
+        bool localChanged = false;
+        do {
+            localChanged = false;
+
+            LateLoopCFGCleanup lateLoopCFGCleanup(func);
+            localChanged = lateLoopCFGCleanup.run() || localChanged;
+
+            CFGSimplify cfgSimplify(func);
+            localChanged = cfgSimplify.run() || localChanged;
+
+            changed = localChanged || changed;
+        } while (localChanged);
 
         return changed;
     });
