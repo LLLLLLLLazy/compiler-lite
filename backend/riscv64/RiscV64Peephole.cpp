@@ -719,92 +719,128 @@ bool foldPowerOfTwoRemainderZeroBranch(InstList & code)
 	const MachineLiveness liveness = buildMachineLiveness(code);
 
 	for (auto it = code.begin(); it != code.end(); ++it) {
-		// 第一步：匹配符号掩码指令 sraiw biasReg, srcReg, 31
-		// 这是编译器生成的 signed remainder 序列的起始指令，
-		// 将源操作数的符号位扩展到所有位，得到 0 或 -1
-		auto * signMask = *it;
-		if (!isLiveInst(signMask) || signMask->opcode != "sraiw" || signMask->arg2 != "31") {
+		// 第一步：匹配偏置（bias）计算。有两种形态：
+		//   通用形态：sraiw biasReg, srcReg, 31 ; srliw biasReg, biasReg, 32-k
+		//   k==1 精简形态（65f8750 之后）：srliw biasReg, srcReg, 31 单条取符号位
+		auto * first = *it;
+		if (!isLiveInst(first) || first->arg2 != "31" ||
+		    (first->opcode != "sraiw" && first->opcode != "srliw")) {
 			continue;
 		}
 
-		const std::string biasReg = signMask->result;
-		const std::string srcReg = signMask->arg1;
-		if (biasReg.empty() || srcReg.empty()) {
+		const std::string biasReg = first->result;
+		const std::string srcReg = first->arg1;
+		if (biasReg.empty() || srcReg.empty() || biasReg == srcReg) {
 			continue;
 		}
 
-		// 第二步：依次匹配后续三条指令，构成除法商的计算链：
-		//   srliw biasReg, biasReg, (32-k)   -- 右移得到偏移修正值
-		//   addw  quotientReg, srcReg, biasReg -- 加上偏移修正
-		//   sraiw quotientReg, quotientReg, k  -- 算术右移k位得到商
-		auto biasShiftIt = nextMachineInst(code, it);
-		auto addIt = nextMachineInst(code, biasShiftIt);
-		auto quotientShiftIt = nextMachineInst(code, addIt);
-		if (biasShiftIt == code.end() || addIt == code.end() || quotientShiftIt == code.end()) {
-			continue;
-		}
-
-		auto * biasShift = *biasShiftIt;
-		auto * add = *addIt;
-		auto * quotientShift = *quotientShiftIt;
-		int biasShiftAmount = 0;
+		std::vector<InstIt> chainIts = {it};
+		auto currentIt = it;
 		int quotientShiftAmount = 0;
-		if (!isLiveInst(biasShift) || biasShift->opcode != "srliw" || biasShift->result != biasReg ||
-		    biasShift->arg1 != biasReg || !parseIntImmediate(biasShift->arg2, biasShiftAmount) ||
-		    !isLiveInst(add) || add->opcode != "addw" || add->arg1 != srcReg || add->arg2 != biasReg ||
-		    add->result.empty() || !isLiveInst(quotientShift) || quotientShift->opcode != "sraiw" ||
-		    quotientShift->result != add->result || quotientShift->arg1 != add->result ||
-		    !parseIntImmediate(quotientShift->arg2, quotientShiftAmount)) {
-			continue;
-		}
 
-		const std::string quotientReg = add->result;
-		// 验证移位量合法性：k 在 [1,30] 范围内，且偏移移位量 = 32 - k
-		if (quotientShiftAmount <= 0 || quotientShiftAmount >= 31 ||
-		    biasShiftAmount != 32 - quotientShiftAmount) {
-			continue;
-		}
-
-		// 收集所有需要标记为死代码的指令迭代器
-		auto currentIt = quotientShiftIt;
-		std::vector<InstIt> chainIts = {it, biasShiftIt, addIt, quotientShiftIt};
-
-		// 第三步：可选地匹配负除数的取反指令 subw q, zero, q
-		// 若除数为负数（如 x % -8），编译器会在商计算后插入取反操作
-		bool negativeDivisor = false;
-		auto maybeNegateIt = nextMachineInst(code, currentIt);
-		if (maybeNegateIt != code.end() && isNegateSelf(*maybeNegateIt, quotientReg)) {
-			negativeDivisor = true;
-			chainIts.push_back(maybeNegateIt);
-			currentIt = maybeNegateIt;
-		}
-
-		// 第四步：匹配商乘以除数的左移指令 slliw q, q, k
-		// 这是计算 quotient * divisor = quotient * 2^k 的步骤
-		auto productShiftIt = nextMachineInst(code, currentIt);
-		if (productShiftIt == code.end()) {
-			continue;
-		}
-		auto * productShift = *productShiftIt;
-		int productShiftAmount = 0;
-		if (!isLiveInst(productShift) || productShift->opcode != "slliw" ||
-		    productShift->result != quotientReg || productShift->arg1 != quotientReg ||
-		    !parseIntImmediate(productShift->arg2, productShiftAmount) ||
-		    productShiftAmount != quotientShiftAmount) {
-			continue;
-		}
-		chainIts.push_back(productShiftIt);
-		currentIt = productShiftIt;
-
-		// 若除数为负数，还需匹配第二次取反指令 subw q, zero, q
-		// 用于将 quotient * (-2^k) 的结果取反
-		if (negativeDivisor) {
-			auto secondNegateIt = nextMachineInst(code, currentIt);
-			if (secondNegateIt == code.end() || !isNegateSelf(*secondNegateIt, quotientReg)) {
+		if (first->opcode == "sraiw") {
+			// 全 1 符号掩码逻辑右移 32-k 位得到偏置
+			auto biasShiftIt = nextMachineInst(code, currentIt);
+			if (biasShiftIt == code.end()) {
 				continue;
 			}
-			chainIts.push_back(secondNegateIt);
-			currentIt = secondNegateIt;
+			auto * biasShift = *biasShiftIt;
+			int biasShiftAmount = 0;
+			if (!isLiveInst(biasShift) || biasShift->opcode != "srliw" || biasShift->result != biasReg ||
+			    biasShift->arg1 != biasReg || !parseIntImmediate(biasShift->arg2, biasShiftAmount) ||
+			    biasShiftAmount <= 1 || biasShiftAmount >= 32) {
+				continue;
+			}
+			quotientShiftAmount = 32 - biasShiftAmount;
+			chainIts.push_back(biasShiftIt);
+			currentIt = biasShiftIt;
+		} else {
+			// srliw biasReg, srcReg, 31：偏置即符号位，k==1
+			quotientShiftAmount = 1;
+		}
+
+		// 验证移位量合法性：k 在 [1,30] 范围内
+		if (quotientShiftAmount <= 0 || quotientShiftAmount >= 31) {
+			continue;
+		}
+
+		// 第二步：匹配加偏置指令 addw quotientReg, srcReg, biasReg
+		auto addIt = nextMachineInst(code, currentIt);
+		if (addIt == code.end()) {
+			continue;
+		}
+		auto * add = *addIt;
+		if (!isLiveInst(add) || add->opcode != "addw" || add->arg1 != srcReg || add->arg2 != biasReg ||
+		    add->result.empty()) {
+			continue;
+		}
+		const std::string quotientReg = add->result;
+		chainIts.push_back(addIt);
+		currentIt = addIt;
+
+		// 第三步：匹配「商×除数」计算。有两种形态：
+		//   旧式：sraiw q,q,k ; [subw q,zero,q] ; slliw q,q,k ; [subw q,zero,q]
+		//   新式（65f8750，k<=11）：andi q,q,-(2^k) 直接清低位
+		auto quotientOpIt = nextMachineInst(code, currentIt);
+		if (quotientOpIt == code.end()) {
+			continue;
+		}
+		auto * quotientOp = *quotientOpIt;
+		if (!isLiveInst(quotientOp) || quotientOp->result != quotientReg || quotientOp->arg1 != quotientReg) {
+			continue;
+		}
+		if (quotientOp->opcode == "andi") {
+			int andImmediate = 0;
+			if (!parseIntImmediate(quotientOp->arg2, andImmediate) ||
+			    andImmediate != -(1 << quotientShiftAmount)) {
+				continue;
+			}
+			chainIts.push_back(quotientOpIt);
+			currentIt = quotientOpIt;
+		} else if (quotientOp->opcode == "sraiw") {
+			int shiftAmount = 0;
+			if (!parseIntImmediate(quotientOp->arg2, shiftAmount) || shiftAmount != quotientShiftAmount) {
+				continue;
+			}
+			chainIts.push_back(quotientOpIt);
+			currentIt = quotientOpIt;
+
+			// 可选地匹配负除数的取反指令 subw q, zero, q
+			bool negativeDivisor = false;
+			auto maybeNegateIt = nextMachineInst(code, currentIt);
+			if (maybeNegateIt != code.end() && isNegateSelf(*maybeNegateIt, quotientReg)) {
+				negativeDivisor = true;
+				chainIts.push_back(maybeNegateIt);
+				currentIt = maybeNegateIt;
+			}
+
+			// 匹配商乘以除数的左移指令 slliw q, q, k
+			auto productShiftIt = nextMachineInst(code, currentIt);
+			if (productShiftIt == code.end()) {
+				continue;
+			}
+			auto * productShift = *productShiftIt;
+			int productShiftAmount = 0;
+			if (!isLiveInst(productShift) || productShift->opcode != "slliw" ||
+			    productShift->result != quotientReg || productShift->arg1 != quotientReg ||
+			    !parseIntImmediate(productShift->arg2, productShiftAmount) ||
+			    productShiftAmount != quotientShiftAmount) {
+				continue;
+			}
+			chainIts.push_back(productShiftIt);
+			currentIt = productShiftIt;
+
+			// 若除数为负数，还需匹配第二次取反指令 subw q, zero, q
+			if (negativeDivisor) {
+				auto secondNegateIt = nextMachineInst(code, currentIt);
+				if (secondNegateIt == code.end() || !isNegateSelf(*secondNegateIt, quotientReg)) {
+					continue;
+				}
+				chainIts.push_back(secondNegateIt);
+				currentIt = secondNegateIt;
+			}
+		} else {
+			continue;
 		}
 
 		// 第五步：匹配余数计算指令 subw remainderReg, srcReg, quotientReg
@@ -911,8 +947,7 @@ bool foldPowerOfTwoRemainderZeroBranch(InstList & code)
 }
 
 /// @brief 判断寄存器在当前块内是否先被使用（或遇到控制流边界），再被重定义
-bool registerUsedBeforeRedef(InstList & code, InstIt start, const std::string & reg)
-{
+bool registerUsedBeforeRedef(InstList & code, InstIt start, const std::string & reg){
 	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
 		auto * inst = *it;
 		if (usesRegister(inst, reg) || instructionImplicitlyUsesRegister(inst, reg)) {
