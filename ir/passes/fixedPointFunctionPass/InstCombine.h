@@ -57,6 +57,11 @@ private:
     /// @return 若成功化简则返回 true
     bool simplifyBinary(BinaryInst * inst);
 
+    /// @brief 尝试把整数 add/sub 链折叠为最简线性组合
+    /// @param inst 链根候选指令
+    /// @return 若成功重建为更短序列则返回 true
+    bool tryLinearReassociate(BinaryInst * inst);
+
     /// @brief 化简冗余 phi
     /// @param phi 待化简的 phi 指令
     /// @return 若成功化简则返回 true

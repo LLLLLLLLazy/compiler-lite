@@ -243,6 +243,8 @@ set(IR_SRCS
 	ir/passes/functionPass/LoopParallelize.cpp
 	ir/passes/fixedPointFunctionPass/ConstProp.h
 	ir/passes/fixedPointFunctionPass/ConstProp.cpp
+	ir/passes/fixedPointFunctionPass/RangeModSimplify.h
+	ir/passes/fixedPointFunctionPass/RangeModSimplify.cpp
 	ir/passes/modulePass/InterproceduralConstProp.h
 	ir/passes/modulePass/InterproceduralConstProp.cpp
 	ir/passes/functionPass/PureCallCSE.h

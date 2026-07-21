@@ -1964,16 +1964,19 @@ bool isMoveFromRegister(RiscV64Inst * inst, std::string & dst, std::string & src
 ///   ...
 ///   mv/fsgnj.s dst, tmp
 ///
-/// 只在同一基本块内改写；tmp 的第一次后续提及必须就是该 copy，
-/// dst 在 producer 与 copy 之间不能出现，copy 后 tmp 在本块内也不能
-/// 再被读取。这样把“计算到 tmp 再搬到 dst”收成“直接计算到 dst”。
+/// producer 的第一次后续提及必须是该 move、tmp 不得 live-out；若 dst 或
+/// producer 的任一输入寄存器在中间被重定义，则不能仅重定向 def（会改变
+/// 读取时刻），此时在同一基本块内将 producer 下沉到 move 前，再把结果直接
+/// 写到 dst。中间使用 dst 不妨碍下沉：写 dst 的时刻仍与原 move 一致。
+/// load/store/call/分支不会作为 producer 或被跨越（控制边界直接停止）。
 bool retargetSingleUseDefinitions(InstList & code)
 {
 	bool changed = false;
 	const MachineLiveness liveness = buildMachineLiveness(code);
 	for (auto it = code.begin(); it != code.end(); ++it) {
 		auto * def = *it;
-		if (!definesResultOperand(def) || def->result.empty()) {
+		if (!definesResultOperand(def) || def->result.empty() || isMemoryOpcode(def->opcode) ||
+		    isControlBoundary(def)) {
 			continue;
 		}
 
@@ -1989,17 +1992,44 @@ bool retargetSingleUseDefinitions(InstList & code)
 
 			std::string dst;
 			std::string src;
-			if (!isMoveFromRegister(inst, dst, src) || src != tmp || dst.empty() || dst == tmp) {
-				break;
-			}
-
-			const auto betweenBegin = nextLive(code, it);
-			if (registerMentionedInRange(betweenBegin, scan, dst) ||
+			if (!isMoveFromRegister(inst, dst, src) || src != tmp || dst.empty() || dst == tmp ||
 			    registerUsedAfterBeforeRedefOrBoundary(code, scan, tmp) ||
 			    registerLiveOutOfBlock(liveness, inst, tmp)) {
 				break;
 			}
 
+			const auto betweenBegin = nextLive(code, it);
+			bool dstMentioned = registerMentionedInRange(betweenBegin, scan, dst);
+			bool inputRedefined = false;
+			const auto inputs = instructionUseSet(def);
+			for (auto between = betweenBegin; between != scan; ++between) {
+				auto * middle = *between;
+				if (!isLiveInst(middle)) {
+					continue;
+				}
+				if (definesResultOperand(middle) && inputs.find(middle->result) != inputs.end()) {
+					inputRedefined = true;
+					break;
+				}
+			}
+
+			if (inputRedefined) {
+				// producer 原本读取的是旧值；下沉会改为读取中间重定义后的新值
+				break;
+			}
+
+			if (!dstMentioned) {
+				// 原安全快速路径：producer 原地改目标，无需改变调度位置
+				def->result = dst;
+				inst->setDead();
+				changed = true;
+				break;
+			}
+
+			// dst 在中间被提及但输入寄存器保持不变：把 producer 下沉到
+			// move 的原位置，保持写 dst 的语义时刻，同时读取值不变
+			auto beforeMove = scan;
+			code.splice(beforeMove, code, it);
 			def->result = dst;
 			inst->setDead();
 			changed = true;
