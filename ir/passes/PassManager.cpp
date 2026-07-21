@@ -419,8 +419,7 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
     // 晚期循环优化：在所有优化收敛且 CFG 化简完成后执行。
     // 先重跑 CanonicalizeLoop 重建可能被 CFGSimplify 破坏的 preheader/dedicated exit，
     // 再提升循环内重复使用的大常量到 preheader（此时无 ConstProp/InstCombine 会还原），
-    // 最后对规范计数循环做 header-test → latch-test 旋转。
-    // 放在最后确保无后续 pass 破坏优化结果
+    // LoopRotate 暂不执行；其余晚期循环优化仍放在最后，避免后续 pass 破坏结果
     registerLateFunctionPass("LateLoopOpt", [this](Function * func) {
         if (!func || func->isBuiltin() || func->getBlocks().empty()) {
             return false;
@@ -437,9 +436,10 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
         LoopConstantPromotion constPromo(func, module);
         changed = constPromo.run() || changed;
 
-        // 对规范计数循环做旋转
-        LoopRotate loopRotate(func);
-        changed = loopRotate.run() || changed;
+        // 开发板 A/B 测试中关闭 LoopRotate 后总耗时由 144.7150s 降至 144.3572s，
+        // 18 个受影响用例中有 16 个加速，因此暂时禁用并保留代码供后续复测
+        // LoopRotate loopRotate(func);
+        // changed = loopRotate.run() || changed;
 
         return changed;
     });
