@@ -11,12 +11,16 @@
 #include <utility>
 
 #include "AnalysisCache.h"
+#include "AllocaInst.h"
 #include "BasicBlock.h"
 #include "BranchInst.h"
 #include "CallInst.h"
 #include "CondBranchInst.h"
+#include "ConstInteger.h"
+#include "CostModel.h"
 #include "DominatorTree.h"
 #include "Function.h"
+#include "FormalParam.h"
 #include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "Instruction.h"
@@ -25,6 +29,7 @@
 #include "MemoryAccess.h"
 #include "MemoryLocation.h"
 #include "Module.h"
+#include "ParamAliasAnalysis.h"
 #include "PhiInst.h"
 #include "PureFunctionAnalysis.h"
 #include "StoreInst.h"
@@ -81,12 +86,15 @@ bool isPureLoopInvariantOp(IRInstOperator op)
 /// @brief 判断操作码是否需要用退出点支配来禁止不安全的推测执行
 /// @param op 指令操作码
 /// @return true 表示外提前必须保证原位置支配全部循环退出点
+///
+/// 浮点除法在 RISC-V 与 x86（IRCompiler 解释执行）上都不会陷入，
+/// 可自由推测执行，因此不在此列；整数除/模的常量除数豁免见
+/// LICM::requiresExitDominance
 bool needsExitDominance(IRInstOperator op)
 {
     switch (op) {
         case IRInstOperator::IRINST_OP_DIV_I:
         case IRInstOperator::IRINST_OP_MOD_I:
-        case IRInstOperator::IRINST_OP_DIV_F:
             return true;
 
         default:
@@ -96,12 +104,12 @@ bool needsExitDominance(IRInstOperator op)
 
 /// @brief 判断循环体是否可能写入调用者可见内存
 ///
-/// 遍历循环体中的所有指令，若存在 store 指令或非纯函数调用，
-/// 则认为循环可能修改内存，此时可能读内存的纯函数调用不可安全外提
-/// （因为外提后可能改变调用与内存写入的相对顺序）。
+/// 遍历循环体中的所有指令：纯函数调用不写内存，非逃逸局部对象的 store
+/// 对被调函数不可见，两者都不构成外提纯调用时的读写顺序约束；
+/// 其余 store、非纯调用以及向量写等按可能写内存处理。
 /// @param loopBody 循环体基本块集合
 /// @param purity 模块级纯函数分析
-/// @return true 表示循环可能写入内存
+/// @return true 表示循环可能写入调用者可见内存
 bool loopMayWriteMemory(const std::unordered_set<BasicBlock *> & loopBody, PureFunctionAnalysis & purity)
 {
     for (auto * bb : loopBody) {
@@ -109,16 +117,46 @@ bool loopMayWriteMemory(const std::unordered_set<BasicBlock *> & loopBody, PureF
             if (!inst || inst->isDead()) {
                 continue;
             }
-            if (inst->mayWriteMemory()) {
+            if (auto * call = dynamic_cast<CallInst *>(inst)) {
+                if (purity.isPure(call->getCallee())) {
+                    continue;
+                }
                 return true;
             }
-            auto * call = dynamic_cast<CallInst *>(inst);
-            if (call && !purity.isPure(call->getCallee())) {
+            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+                if (isNonEscapingLocalStore(store)) {
+                    continue;
+                }
+                return true;
+            }
+            if (inst->mayWriteMemory()) {
                 return true;
             }
         }
     }
     return false;
+}
+
+/// @brief 判断指令是否属于「不会陷入但代价高」的可推测除法类指令
+///
+/// 到达调用点时除法类指令已通过 requiresExitDominance 的豁免检查
+/// （常量除数整除/模，或浮点除法），因此这里只按操作码分类
+/// @param inst 待检查的指令
+/// @return true 表示该指令是可推测执行的除法类指令
+bool isSpeculatableDivision(Instruction * inst)
+{
+    if (!inst) {
+        return false;
+    }
+    switch (inst->getOp()) {
+        case IRInstOperator::IRINST_OP_DIV_I:
+        case IRInstOperator::IRINST_OP_MOD_I:
+        case IRInstOperator::IRINST_OP_DIV_F:
+            return true;
+
+        default:
+            return false;
+    }
 }
 
 } // namespace
@@ -142,6 +180,9 @@ bool LICM::run()
     // 整个 run 期间保持有效，可跨循环与迭代轮次复用缓存
     PureFunctionAnalysis purity(mod);
     purityAnalysis = &purity;
+    // 形参别名分析：LICM 不增删调用点、不改写实参，指向集在 run 期间有效
+    ParamAliasAnalysis paramAlias(mod);
+    paramAliasAnalysis = mod != nullptr ? &paramAlias : nullptr;
 
     auto & cache = func->getAnalysisCache();
     while (true) {
@@ -184,6 +225,7 @@ bool LICM::run()
     }
 
     purityAnalysis = nullptr;
+    paramAliasAnalysis = nullptr;
     return changed;
 }
 
@@ -256,7 +298,9 @@ bool LICM::tryHoistLoop(BasicBlock * header,
     }
 
     std::unordered_set<Instruction *> invariants;
-    std::vector<Instruction *> invariantOrder;
+    std::vector<std::pair<Instruction *, const char *>> invariantOrder;
+    // 候选被拒原因（同一指令跨轮覆盖，仅保留最后一次判定），用于 opt-remark 统计
+    std::unordered_map<Instruction *, const char *> rejectedCandidates;
 
     bool discoveredNewInvariant = false;
     do {
@@ -278,13 +322,14 @@ bool LICM::tryHoistLoop(BasicBlock * header,
 
                 auto * callInst = dynamic_cast<CallInst *>(inst);
                 // 内存无关调用：结果只由实参决定，不读写调用者可见内存，
-                // 与循环内 store 无顺序约束，可放宽下方两项外提限制
+                // 与循环内 store 无顺序约束
                 bool memIndependentCall =
                     callInst != nullptr && mod != nullptr && purity.isMemoryIndependent(callInst->getCallee());
 
-                // 若候选指令是可能读取内存的函数调用，且循环体可能写入内存，则不可外提
-                // 因为外提后调用与内存写入的相对顺序可能改变，破坏语义
+                // 若候选指令是可能读取内存的函数调用，且循环体可能写入调用者可见内存，
+                // 则不可外提：外提后调用与内存写入的相对顺序可能改变，破坏语义
                 if (callInst != nullptr && !memIndependentCall && loopMayWriteMemory(loopBody, purity)) {
+                    rejectedCandidates[inst] = "call rejected: loop writes caller-visible memory";
                     continue;
                 }
 
@@ -292,27 +337,47 @@ bool LICM::tryHoistLoop(BasicBlock * header,
                     continue;
                 }
 
-                // 已通过 isSafeLoadToHoist 确认安全的 load：地址来自只读全局或非逃逸局部
-                // 变量，且循环内无别名 store。这类 load 的地址在进入循环前已确定有效，
-                // 推测执行不会触发访存异常，因此无需满足退出点支配约束
-                bool isSafeLoad = dynamic_cast<LoadInst *>(inst) && isSafeLoadToHoist(inst, loopBody);
-                if (dynamic_cast<LoadInst *>(inst) && !isSafeLoad) {
-                    continue;
+                auto * loadInst = dynamic_cast<LoadInst *>(inst);
+                LoadHoistKind loadKind = LoadHoistKind::Speculate;
+                if (loadInst != nullptr) {
+                    loadKind = classifyLoadHoist(inst, loopBody);
+                    if (loadKind == LoadHoistKind::Reject) {
+                        rejectedCandidates[inst] = "load rejected: clobbered or unsupported root";
+                        continue;
+                    }
                 }
 
-                if (memIndependentCall) {
-                    // 内存无关调用推测执行不会触发访存异常，退出点支配放宽为
-                    // latch 支配（每轮完整迭代必然执行）：仅零迭代循环会在
+                if (callInst != nullptr) {
+                    // 纯调用统一要求 latch 支配（每轮完整迭代必然执行）：
+                    // 纯调用推测执行不会触发访存异常，仅零迭代循环会在
                     // preheader 多执行一次调用。这里假设纯函数对给定实参可
-                    // 终止，与本 pass 对全局 load 的推测策略一致
+                    // 终止，与本 pass 对全局 load 的推测策略一致；可能读内存
+                    // 的调用与循环写内存的顺序约束已由上方检查排除
                     if (!dominatesAllLoopLatches(bb, header, loopBody, domTree)) {
+                        rejectedCandidates[inst] = "call rejected: not dominating all latches";
                         continue;
                     }
-                } else {
-                    bool needsExitDom = requiresExitDominance(inst) && !isSafeLoad;
-                    if (needsExitDom && !dominatesAllLoopExits(bb, loopBody, domTree)) {
+                } else if (loadInst != nullptr) {
+                    // 形参根 load 的地址有效性由「首轮完整迭代必然执行该 load」
+                    // 保证，因此要求 latch 支配；全局/本帧 alloca 根的 load
+                    // 地址恒有效，可自由推测执行
+                    if (loadKind == LoadHoistKind::LatchDominance &&
+                        !dominatesAllLoopLatches(bb, header, loopBody, domTree)) {
+                        rejectedCandidates[inst] = "param load rejected: not dominating all latches";
                         continue;
                     }
+                } else if (requiresExitDominance(inst)) {
+                    if (!dominatesAllLoopExits(bb, loopBody, domTree)) {
+                        rejectedCandidates[inst] = "div/mod rejected: not dominating all exits";
+                        continue;
+                    }
+                } else if (isSpeculatableDivision(inst) &&
+                           !dominatesAllLoopLatches(bb, header, loopBody, domTree)) {
+                    // 可推测的除法类指令虽不会陷入，但代价高：仅当每轮完整迭代
+                    // 必然执行时才外提，避免把条件路径上的偶发除法变成每次进入
+                    // 循环都要执行的固定开销
+                    rejectedCandidates[inst] = "div rejected: not dominating all latches";
+                    continue;
                 }
 
                 if (!dominatesAllUses(inst, domTree)) {
@@ -320,18 +385,35 @@ bool LICM::tryHoistLoop(BasicBlock * header,
                 }
 
                 invariants.insert(inst);
-                invariantOrder.push_back(inst);
+                const char * hoistTag = "hoist arith";
+                if (callInst != nullptr) {
+                    hoistTag = "hoist call";
+                } else if (loadInst != nullptr) {
+                    hoistTag = loadKind == LoadHoistKind::LatchDominance ? "hoist load(param)"
+                                                                        : "hoist load(global/local)";
+                } else if (isSpeculatableDivision(inst)) {
+                    hoistTag = "hoist div";
+                }
+                invariantOrder.emplace_back(inst, hoistTag);
+                rejectedCandidates.erase(inst);
                 discoveredNewInvariant = true;
             }
         }
     } while (discoveredNewInvariant);
 
+    if (CostModel::remarksEnabled()) {
+        for (const auto & entry : rejectedCandidates) {
+            CostModel::remark("licm", false, entry.second);
+        }
+    }
+
     if (invariantOrder.empty()) {
         return false;
     }
 
-    for (auto * inst : invariantOrder) {
-        moveToPreheader(inst, preheader);
+    for (const auto & entry : invariantOrder) {
+        moveToPreheader(entry.first, preheader);
+        CostModel::remark("licm", true, entry.second);
     }
 
     return true;
@@ -535,15 +617,16 @@ bool LICM::isHoistableInstruction(Instruction * inst) const
     return isPureLoopInvariantOp(inst->getOp());
 }
 
-/// @brief 判断 load 是否满足安全外提条件
+/// @brief 对 load 按指针根对象分类外提安全性
 /// @param inst 待检查的 load 指令
 /// @param loopBody 当前自然循环的块集合
-/// @return true 表示该 load 不会被循环内写入改写
-bool LICM::isSafeLoadToHoist(Instruction * inst, const std::unordered_set<BasicBlock *> & loopBody) const
+/// @return 分类结果，见 LoadHoistKind
+LICM::LoadHoistKind LICM::classifyLoadHoist(Instruction * inst,
+                                            const std::unordered_set<BasicBlock *> & loopBody) const
 {
     auto * load = dynamic_cast<LoadInst *>(inst);
     if (!load) {
-        return false;
+        return LoadHoistKind::Reject;
     }
 
     Value * pointer = load->getPointerOperand();
@@ -552,40 +635,149 @@ bool LICM::isSafeLoadToHoist(Instruction * inst, const std::unordered_set<BasicB
         return call != nullptr && (purityAnalysis == nullptr || !purityAnalysis->isPure(call->getCallee()));
     };
 
-    if (dynamic_cast<GlobalVariable *>(getPointerRoot(pointer))) {
+    Value * root = getPointerRoot(pointer);
+
+    if (dynamic_cast<GlobalVariable *>(root) != nullptr) {
         // 全局变量的地址在程序启动时已静态分配，恒为可访问地址，推测执行其 load 不会
         // 触发访存异常。因此无需要求全局只读，只要循环内没有别名 store/调用改写该地址，
         // 外提即安全。blocksMayClobberLoad 已通过指针根对象比较判定别名
-        return !blocksMayClobberLoad(pointer, loopBody, mayClobberCall);
+        return blocksMayClobberLoad(pointer, loopBody, mayClobberCall) ? LoadHoistKind::Reject
+                                                                       : LoadHoistKind::Speculate;
     }
 
-    MemoryLocation location = normalizeMemoryLocation(pointer);
-    if (location.isPrecise() && !doesPointerEscape(location.object)) {
-        return !blocksMayClobberLoad(pointer, loopBody, mayClobberCall);
+    if (auto * alloca = dynamic_cast<AllocaInst *>(root)) {
+        MemoryLocation location = normalizeMemoryLocation(pointer);
+        if (location.isPrecise() && !doesPointerEscape(location.object)) {
+            // 精确非逃逸位点：沿用精确别名路径
+            return blocksMayClobberLoad(pointer, loopBody, mayClobberCall) ? LoadHoistKind::Reject
+                                                                           : LoadHoistKind::Speculate;
+        }
+        // 逃逸或非精确位点的本帧 alloca：栈地址恒有效，可推测执行；
+        // 全局/其他 alloca/形参都不会与本帧对象别名，仅同根 store 与
+        // 可能写内存的调用视为改写
+        return loopMayClobberAllocaLoad(alloca, loopBody) ? LoadHoistKind::Reject : LoadHoistKind::Speculate;
     }
 
+    if (auto * param = dynamic_cast<FormalParam *>(root)) {
+        if (paramAliasAnalysis == nullptr) {
+            return LoadHoistKind::Reject;
+        }
+        // 形参根地址由调用方保证进入循环时有效，但零迭代循环下推测执行仍可能
+        // 访问越界地址，因此调用方要求 latch 支配（首轮完整迭代必然执行该 load）
+        return loopMayClobberParamLoad(param, loopBody) ? LoadHoistKind::Reject
+                                                        : LoadHoistKind::LatchDominance;
+    }
+
+    // 指针 phi/select 等未知根（如 LSR 改写后的指针游标）：保守拒绝
+    return LoadHoistKind::Reject;
+}
+
+/// @brief 判断循环体是否可能改写以本帧 alloca 为根的 load 地址
+/// @param root load 地址的根 alloca
+/// @param loopBody 当前自然循环的块集合
+/// @return true 表示存在可能的改写
+bool LICM::loopMayClobberAllocaLoad(AllocaInst * root,
+                                    const std::unordered_set<BasicBlock *> & loopBody) const
+{
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+                Value * storeRoot = getPointerRoot(store->getPointerOperand());
+                if (storeRoot == root) {
+                    return true;
+                }
+                // 其他 alloca/全局与本帧对象不别名；形参指向调用方的对象，
+                // 不可能指向本帧 alloca（递归时指向的是调用方帧的同名对象）
+                if (dynamic_cast<AllocaInst *>(storeRoot) != nullptr ||
+                    dynamic_cast<GlobalVariable *>(storeRoot) != nullptr ||
+                    dynamic_cast<FormalParam *>(storeRoot) != nullptr) {
+                    continue;
+                }
+                return true;
+            }
+            if (auto * call = dynamic_cast<CallInst *>(inst)) {
+                if (purityAnalysis == nullptr || !purityAnalysis->isPure(call->getCallee())) {
+                    return true;
+                }
+                continue;
+            }
+            if (inst->mayWriteMemory()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// @brief 判断循环体是否可能改写以形参为根的 load 地址
+/// @param root load 地址的根形参
+/// @param loopBody 当前自然循环的块集合
+/// @return true 表示存在可能的改写
+bool LICM::loopMayClobberParamLoad(FormalParam * root,
+                                   const std::unordered_set<BasicBlock *> & loopBody) const
+{
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+                Value * storeRoot = getPointerRoot(store->getPointerOperand());
+                // 本帧 alloca 不可能被形参别名
+                if (dynamic_cast<AllocaInst *>(storeRoot) != nullptr) {
+                    continue;
+                }
+                if (auto * globalRoot = dynamic_cast<GlobalVariable *>(storeRoot)) {
+                    if (paramAliasAnalysis->mayAliasGlobal(root, globalRoot)) {
+                        return true;
+                    }
+                    continue;
+                }
+                if (auto * paramRoot = dynamic_cast<FormalParam *>(storeRoot)) {
+                    if (paramAliasAnalysis->mayAliasParam(root, paramRoot)) {
+                        return true;
+                    }
+                    continue;
+                }
+                return true;
+            }
+            if (auto * call = dynamic_cast<CallInst *>(inst)) {
+                if (purityAnalysis == nullptr || !purityAnalysis->isPure(call->getCallee())) {
+                    return true;
+                }
+                continue;
+            }
+            if (inst->mayWriteMemory()) {
+                return true;
+            }
+        }
+    }
     return false;
 }
 
 /// @brief 判断候选指令是否需要额外满足退出点支配约束
 /// @param inst 待检查的指令
 /// @return true 表示该指令不可安全推测执行
+///
+/// 仅整数除/模需要该约束（除零/INT_MIN 除 -1 在 x86 解释执行下会陷入）。
+/// 非零且非 -1 的常量除数在任一执行环境都不会陷入，可推测执行；
+/// 调用与 load 的安全性由 tryHoistLoop 中的专门路径处理，不经过本函数
 bool LICM::requiresExitDominance(Instruction * inst) const
 {
     if (!inst) {
         return false;
     }
 
-    // 函数调用始终需要退出点支配，因为调用可能抛异常或产生副作用
-    if (dynamic_cast<CallInst *>(inst)) {
+    IRInstOperator op = inst->getOp();
+    if (op == IRInstOperator::IRINST_OP_DIV_I || op == IRInstOperator::IRINST_OP_MOD_I) {
+        auto operands = inst->getOperandsValue();
+        if (operands.size() >= 2) {
+            auto * divisor = dynamic_cast<ConstInteger *>(operands[1]);
+            if (divisor != nullptr && divisor->getVal() != 0 && divisor->getVal() != -1) {
+                return false;
+            }
+        }
         return true;
     }
 
-    if (dynamic_cast<LoadInst *>(inst)) {
-        return true;
-    }
-
-    return needsExitDominance(inst->getOp());
+    return needsExitDominance(op);
 }
 
 /// @brief 判断指令的全部操作数是否已经循环不变

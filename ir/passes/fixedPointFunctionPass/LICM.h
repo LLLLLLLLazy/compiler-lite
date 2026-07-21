@@ -15,11 +15,14 @@
 #include <unordered_set>
 #include <vector>
 
+class AllocaInst;
 class BasicBlock;
 class DominatorTree;
+class FormalParam;
 class Function;
 class Instruction;
 class Module;
+class ParamAliasAnalysis;
 class PureFunctionAnalysis;
 
 class LICM {
@@ -34,6 +37,13 @@ public:
     bool run();
 
 private:
+    /// @brief load 外提安全性分类
+    enum class LoadHoistKind {
+        Reject,          ///< 不可外提
+        Speculate,       ///< 地址恒有效（全局/本帧 alloca 根），可推测执行
+        LatchDominance,  ///< 形参根：需支配全部 latch，仅零迭代循环会多执行一次
+    };
+
     struct HeaderPhiPlan {
         Instruction * phi = nullptr;
         std::vector<class Value *> outsideValues;
@@ -91,11 +101,26 @@ private:
     /// @return true 表示该指令属于可外提的纯计算指令
     bool isHoistableInstruction(Instruction * inst) const;
 
-    /// @brief 判断 load 是否满足安全外提条件
+    /// @brief 对 load 按指针根对象分类外提安全性
     /// @param inst 待检查的 load 指令
     /// @param loopBody 当前自然循环的块集合
-    /// @return true 表示 load 指向只读全局或未逃逸局部精确槽且循环内无冲突写
-    bool isSafeLoadToHoist(Instruction * inst, const std::unordered_set<BasicBlock *> & loopBody) const;
+    /// @return 分类结果，见 LoadHoistKind
+    LoadHoistKind classifyLoadHoist(Instruction * inst,
+                                    const std::unordered_set<BasicBlock *> & loopBody) const;
+
+    /// @brief 判断循环体是否可能改写以本帧 alloca 为根的 load 地址
+    /// @param root load 地址的根 alloca
+    /// @param loopBody 当前自然循环的块集合
+    /// @return true 表示存在可能的改写
+    bool loopMayClobberAllocaLoad(AllocaInst * root,
+                                  const std::unordered_set<BasicBlock *> & loopBody) const;
+
+    /// @brief 判断循环体是否可能改写以形参为根的 load 地址
+    /// @param root load 地址的根形参
+    /// @param loopBody 当前自然循环的块集合
+    /// @return true 表示存在可能的改写
+    bool loopMayClobberParamLoad(FormalParam * root,
+                                 const std::unordered_set<BasicBlock *> & loopBody) const;
 
     /// @brief 判断候选指令是否需要额外满足退出点支配约束
     /// @param inst 待检查的指令
@@ -142,4 +167,6 @@ private:
     Module * mod = nullptr;
     /// 共享纯函数分析，仅在 run() 执行期间有效（指向栈上对象）
     PureFunctionAnalysis * purityAnalysis = nullptr;
+    /// 共享形参别名分析，仅在 run() 执行期间有效（指向栈上对象）
+    ParamAliasAnalysis * paramAliasAnalysis = nullptr;
 };
