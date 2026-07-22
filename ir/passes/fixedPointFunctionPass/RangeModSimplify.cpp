@@ -172,6 +172,13 @@ bool RangeModSimplify::run()
 
     bool changed = false;
     for (auto * bb : func->getBlocks()) {
+        // 本 pass 的新增证明能力来自循环 add-recurrence。循环外的常量/直线
+        // 表达式由 ConstProp/InstCombine 处理；不要为它们构造 SCEV。超长直线
+        // 用例可能含上千条 %/÷（如 2026_func_29_long_line），在固定点每轮
+        // 对其递归求值会造成数量级编译时回归。
+        if (loopInfo.getLoopDepth(bb) <= 0) {
+            continue;
+        }
         for (auto * inst : bb->getInstructions()) {
             if (!inst || inst->isDead()) {
                 continue;
