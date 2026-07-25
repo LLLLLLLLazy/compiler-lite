@@ -11,8 +11,19 @@
 /// @param _func 指令所属函数
 /// @param _op 指令操作码
 /// @param _type 指令结果类型
+int64_t Instruction::currentEmitLine = -1;
+
 Instruction::Instruction(Function * _func, IRInstOperator _op, Type * _type) : User(_type), op(_op), func(_func)
-{}
+{
+    srcLine = currentEmitLine;
+}
+
+/// @brief 设置"当前源码行号"，供前端在遍历语句时更新
+/// @param line 源码行号，-1 表示无行号信息
+void Instruction::setCurrentEmitLine(int64_t line)
+{
+    currentEmitLine = line;
+}
 
 /// @brief 获取指令操作码
 /// @return 当前指令的操作码

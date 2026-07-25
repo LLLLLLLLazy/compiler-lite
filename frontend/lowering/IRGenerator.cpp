@@ -153,7 +153,12 @@ bool IRGenerator::run()
         return false;
     }
 
-    return visitCompileUnit(root);
+    bool ok = visitCompileUnit(root);
+
+    // 前端生成结束后重置当前行号，避免优化 pass 新建的指令误挂上旧行号
+    Instruction::setCurrentEmitLine(-1);
+
+    return ok;
 }
 
 /// @brief 预扫描全局 const 声明，在函数预声明前填充 constBindings
@@ -289,10 +294,35 @@ bool IRGenerator::visitCompileUnit(ast_node * node)
 /// @brief 生成单条语句对应的 IR
 /// @param node 语句节点
 /// @return true 表示生成成功，false 表示生成失败
+/// @brief 取 AST 节点及其子树中最早出现的源码行号，找不到返回 -1
+static int64_t findAstLine(ast_node * n)
+{
+    if (!n) {
+        return -1;
+    }
+    if (n->line_no >= 0) {
+        return n->line_no;
+    }
+    for (auto * son: n->sons) {
+        int64_t line = findAstLine(son);
+        if (line >= 0) {
+            return line;
+        }
+    }
+    return -1;
+}
+
 bool IRGenerator::visitStatement(ast_node * node)
 {
     if (!node) {
         return true;
+    }
+
+    // 记录语句所在源码行号，供后续新建的 IR 指令捕获，最终在汇编中按基本块注释源码。
+    // 内部节点大多没有行号，向下取子树中最早出现的行号
+    int64_t stmtLine = findAstLine(node);
+    if (stmtLine >= 0) {
+        Instruction::setCurrentEmitLine(stmtLine);
     }
 
     switch (node->node_type) {
@@ -1726,6 +1756,11 @@ Value * IRGenerator::visitExpr(ast_node * node)
 {
     if (!node) {
         return nullptr;
+    }
+
+    // 表达式粒度更新当前源码行号，多行语句内的指令行号更精确
+    if (node->line_no >= 0) {
+        Instruction::setCurrentEmitLine(node->line_no);
     }
 
     switch (node->node_type) {
