@@ -2028,6 +2028,81 @@ void InstSelectorRiscV64::translate_icmp(Instruction * inst)
 	}
 	const std::string dst = PlatformRiscV64::regName[dstReg];
 
+	// 常量操作数优先走 slti 立即数形式：LT/GE 直接比较，GT/LE 借 c+1 变换归一。
+	// 常量在左侧时交换操作数并镜像比较方向。EQ/NE 无立即数比较指令，仍走寄存器路径。
+	{
+		auto * lhsConst = asConstInteger(icmp->getLHS());
+		auto * rhsConst = asConstInteger(icmp->getRHS());
+		Value * regSide = nullptr;
+		int64_t imm = 0;
+		IRInstOperator op = inst->getOp();
+		if (rhsConst != nullptr && lhsConst == nullptr) {
+			regSide = icmp->getLHS();
+			imm = rhsConst->getVal();
+		} else if (lhsConst != nullptr && rhsConst == nullptr) {
+			regSide = icmp->getRHS();
+			imm = lhsConst->getVal();
+			switch (op) {
+				case IRInstOperator::IRINST_OP_LT_I:
+					op = IRInstOperator::IRINST_OP_GT_I;
+					break;
+				case IRInstOperator::IRINST_OP_GT_I:
+					op = IRInstOperator::IRINST_OP_LT_I;
+					break;
+				case IRInstOperator::IRINST_OP_LE_I:
+					op = IRInstOperator::IRINST_OP_GE_I;
+					break;
+				case IRInstOperator::IRINST_OP_GE_I:
+					op = IRInstOperator::IRINST_OP_LE_I;
+					break;
+				default:
+					break;
+			}
+		}
+		if (regSide != nullptr) {
+			// 与0比较相等性可单条seqz/snez完成（寄存器值恒为规范符号扩展的i32）
+			if (imm == 0 &&
+			    (op == IRInstOperator::IRINST_OP_EQ_I || op == IRInstOperator::IRINST_OP_NE_I)) {
+				OperandReg src = loadOperand(regSide, inst, dstReg);
+				iloc.inst(op == IRInstOperator::IRINST_OP_EQ_I ? "seqz" : "snez", dst,
+				          PlatformRiscV64::regName[src.reg]);
+				releaseOperand(src);
+				storeResult(inst, dstReg, inst);
+				return;
+			}
+			bool applicable = true;
+			bool invert = false;
+			int64_t sltImm = imm;
+			switch (op) {
+				case IRInstOperator::IRINST_OP_LT_I:
+					break;
+				case IRInstOperator::IRINST_OP_GE_I:
+					invert = true;
+					break;
+				case IRInstOperator::IRINST_OP_LE_I:
+					sltImm = imm + 1;
+					break;
+				case IRInstOperator::IRINST_OP_GT_I:
+					sltImm = imm + 1;
+					invert = true;
+					break;
+				default:
+					applicable = false;
+					break;
+			}
+			if (applicable && sltImm >= -2048 && sltImm <= 2047) {
+				OperandReg src = loadOperand(regSide, inst, dstReg);
+				iloc.inst("slti", dst, PlatformRiscV64::regName[src.reg], std::to_string(sltImm));
+				if (invert) {
+					iloc.inst("xori", dst, dst, "1");
+				}
+				releaseOperand(src);
+				storeResult(inst, dstReg, inst);
+				return;
+			}
+		}
+	}
+
 	OperandReg lhsOperand = loadOperand(icmp->getLHS(), inst, dstReg);
 	const int rhsPreferredReg = lhsOperand.reg != dstReg ? dstReg : -1;
 	OperandReg rhsOperand = loadOperand(icmp->getRHS(), inst, rhsPreferredReg < 0 ? dstReg : -1, rhsPreferredReg);
