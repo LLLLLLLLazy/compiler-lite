@@ -107,6 +107,12 @@ private:
 	/// @brief 在当前指令前插入 split 边界搬运
 	void emitSplitTransfersBefore(Instruction * inst);
 
+	/// @brief 若指令的源码行号与上次注释不同，则在其前输出 "# 行号: 源码" 注释
+	void emitSourceLineComment(Instruction * inst);
+
+	/// @brief 上一次已注释的源码行号，避免重复输出
+	int64_t lastCommentedLine_ = -1;
+
 	/// @brief 按指定分配信息搬运同一个 Value
 	void emitSplitTransfer(Value * value, const RegAllocInfo & from, const RegAllocInfo & to, Instruction * inst);
 

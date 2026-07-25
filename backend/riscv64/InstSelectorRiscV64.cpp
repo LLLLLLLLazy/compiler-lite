@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <set>
@@ -699,6 +700,9 @@ void InstSelectorRiscV64::run()
 			iloc.label(blockLabel(bb));
 		}
 
+		// 每个基本块重新开始注释上下文，块首指令即使与上块同行也会注释
+		lastCommentedLine_ = -1;
+
 		if (bb->getInstructions().empty()) {
 			continue;
 		}
@@ -706,6 +710,7 @@ void InstSelectorRiscV64::run()
 		for (auto * inst: bb->getInstructions()) {
 			emitSplitTransfersBefore(inst);
 			if (!inst->isDead()) {
+				emitSourceLineComment(inst);
 				translate(inst);
 			}
 		}
@@ -2963,6 +2968,77 @@ void InstSelectorRiscV64::emitGprRegMoves(std::vector<RegMove> & regMoves, int s
 			}
 		}
 	}
+}
+
+/// @brief 读取并缓存源文件的所有行，文件不可读时返回空向量
+static const std::vector<std::string> & getSourceFileLines(const std::string & path)
+{
+	static std::unordered_map<std::string, std::vector<std::string>> cache;
+	auto it = cache.find(path);
+	if (it != cache.end()) {
+		return it->second;
+	}
+	std::vector<std::string> lines;
+	std::ifstream in(path);
+	std::string line;
+	while (std::getline(in, line)) {
+		lines.push_back(line);
+	}
+	return cache.emplace(path, std::move(lines)).first->second;
+}
+
+/// @brief 推断指令的源码行号：自身无行号时，沿操作数的定义指令有限深度回溯继承
+/// @param inst 待推断的指令
+/// @param depth 剩余回溯深度
+/// @return 源码行号，找不到返回 -1
+static int64_t inferSourceLine(Instruction * inst, int depth = 3)
+{
+	if (inst == nullptr) {
+		return -1;
+	}
+	if (inst->getSourceLine() >= 1) {
+		return inst->getSourceLine();
+	}
+	if (depth <= 0) {
+		return -1;
+	}
+	for (int32_t i = 0; i < inst->getOperandsNum(); ++i) {
+		auto * opInst = dynamic_cast<Instruction *>(inst->getOperand(i));
+		if (opInst == nullptr) {
+			continue;
+		}
+		int64_t line = inferSourceLine(opInst, depth - 1);
+		if (line >= 1) {
+			return line;
+		}
+	}
+	return -1;
+}
+
+/// @brief 若指令的源码行号与上次注释不同，则在其前输出 "# 行号: 源码" 注释
+/// @param inst 即将翻译的 IR 指令
+void InstSelectorRiscV64::emitSourceLineComment(Instruction * inst)
+{
+	Module * module = iloc.getModule();
+	if (module == nullptr) {
+		return;
+	}
+
+	int64_t lineNo = inferSourceLine(inst);
+	if (lineNo < 1 || lineNo == lastCommentedLine_) {
+		return;
+	}
+	lastCommentedLine_ = lineNo;
+
+	const auto & srcLines = getSourceFileLines(module->getName());
+	std::string text;
+	if (static_cast<size_t>(lineNo) <= srcLines.size()) {
+		text = srcLines[static_cast<size_t>(lineNo) - 1];
+		// 去掉行首缩进，注释更紧凑
+		size_t firstNonSpace = text.find_first_not_of(" \t");
+		text = firstNonSpace == std::string::npos ? std::string() : text.substr(firstNonSpace);
+	}
+	iloc.comment(std::to_string(lineNo) + ": " + text);
 }
 
 /// @brief 生成形参从ABI寄存器到分配位置的移动指令
