@@ -162,7 +162,7 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
             GVN gvn(func, currentModule);
             changed = gvn.run() || changed;
 
-            LICM licm(func, currentModule);
+            LICM licm(func);
             changed = licm.run() || changed;
 
             InstCombine instCombine(func, currentModule);
@@ -193,7 +193,7 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
                 GVN gvn(func, currentModule);
                 gvn.run();
 
-                LICM licm(func, currentModule);
+                LICM licm(func);
                 licm.run();
 
                 InstCombine instCombine(func, currentModule);
@@ -217,8 +217,8 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
         GVN pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass("LICM", [this](Function * func) {
-        LICM pass(func, module);
+    registerFixedPointFunctionPass("LICM", [](Function * func) {
+        LICM pass(func);
         return pass.run();
     });
     registerFixedPointFunctionPass("CanonicalizeLoop", [this](Function * func) {
@@ -324,8 +324,8 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
         PureCallCSE pass(func, module);
         return pass.run();
     });
-    registerFixedPointFunctionPass("LICM", [this](Function * func) {
-        LICM pass(func, module);
+    registerFixedPointFunctionPass("LICM", [](Function * func) {
+        LICM pass(func);
         return pass.run();
     });
     registerFixedPointFunctionPass("PureCallLoopCache", [this](Function * func) {
@@ -392,7 +392,7 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
                 GVN gvn(func, currentModule);
                 gvn.run();
 
-                LICM licm(func, currentModule);
+                LICM licm(func);
                 licm.run();
 
                 InstCombine instCombine(func, currentModule);

@@ -57,7 +57,9 @@ bool PureFunctionAnalysis::isMemoryIndependent(Function * function)
     }
 
     if (memoryIndepVisiting.count(function) != 0U) {
-        return true;
+        // 递归环需要以 SCC 不动点求解才能证明内存独立
+        // 当前分析不做该证明，因此保守拒绝
+        return false;
     }
     memoryIndepVisiting.insert(function);
 
@@ -109,10 +111,7 @@ bool PureFunctionAnalysis::isInstructionAllowed(Instruction * inst)
     }
 
     if (auto * call = dynamic_cast<CallInst *>(inst)) {
-        auto it = states.find(call->getCallee());
-        if (it != states.end() && it->second == PureFunctionState::Visiting) {
-            return true;
-        }
+        // isPure 对 Visiting 状态返回 false，递归 SCC 在未整体证明前按非纯处理
         return isPure(call->getCallee());
     }
 
