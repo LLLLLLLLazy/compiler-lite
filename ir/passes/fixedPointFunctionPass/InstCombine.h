@@ -87,6 +87,11 @@ private:
     /// @return 若成功化简则返回 true
     bool simplifySelect(SelectInst * inst);
 
+    /// @brief 识别 abs/负abs 惯用法，将分支型 select 重写为无分支移位序列
+    /// @param inst 待化简的 select 指令
+    /// @return 若成功重写则返回 true
+    bool tryCombineSelectAbs(SelectInst * inst);
+
     /// @brief 折叠常量 float-to-int cast
     /// @param inst 待化简的 fptosi 指令
     /// @return 若成功化简则返回 true
