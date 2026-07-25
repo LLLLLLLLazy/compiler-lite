@@ -732,8 +732,15 @@ void InstSelectorRiscV64::translate(Instruction * inst)
 		outputIRInstruction(inst);
 	}
 
-	if (auto * icmp = dynamic_cast<ICmpInst *>(inst); icmp != nullptr && isCompareOnlyUsedByCondBranch(icmp)) {
-		return;
+	if (auto * icmp = dynamic_cast<ICmpInst *>(inst); icmp != nullptr) {
+		if (isCompareOnlyUsedByCondBranch(icmp)) {
+			return;
+		}
+		// 比较将折叠进紧邻select的条件分支，无需物化0/1结果
+		if (auto * select = getFusableSelectUser(icmp);
+		    select != nullptr && shouldFuseIcmpIntoSelect(icmp, select)) {
+			return;
+		}
 	}
 
 	int miStart = iloc.getMachineInstCount();
@@ -2255,12 +2262,120 @@ bool InstSelectorRiscV64::isCompareOnlyUsedByCondBranch(ICmpInst * icmp) const
 	return *prevIt == static_cast<Instruction *>(icmp);
 }
 
-/// @brief 将整数比较直接翻译为跳向 trueLabel 的条件分支
+/// @brief 若比较指令的唯一使用者是同块内其后小窗口内的select且作为其条件，返回该select
+///
+/// 与cond_br折叠不同，select的true/false值（如取负）常定义在icmp与select之间，
+/// 无法要求严格紧邻；改为限定同块内小窗口，操作数寄存器的有效性
+/// 由shouldFuseIcmpIntoSelect按活跃区间验证
+SelectInst * InstSelectorRiscV64::getFusableSelectUser(ICmpInst * icmp) const
+{
+	if (icmp == nullptr) {
+		return nullptr;
+	}
+
+	const auto & uses = icmp->getUseList();
+	if (uses.size() != 1 || uses.front() == nullptr) {
+		return nullptr;
+	}
+
+	auto * select = dynamic_cast<SelectInst *>(uses.front()->getUser());
+	if (select == nullptr || select->getCondition() != static_cast<Value *>(icmp)) {
+		return nullptr;
+	}
+
+	BasicBlock * bb = icmp->getParentBlock();
+	if (bb == nullptr || bb != select->getParentBlock()) {
+		return nullptr;
+	}
+
+	const auto & insts = bb->getInstructions();
+	auto selIt = std::find(insts.begin(), insts.end(), static_cast<Instruction *>(select));
+	if (selIt == insts.end()) {
+		return nullptr;
+	}
+
+	constexpr int kMaxFuseWindow = 8;
+	auto it = selIt;
+	for (int steps = 0; steps < kMaxFuseWindow && it != insts.begin(); ++steps) {
+		--it;
+		if (*it == static_cast<Instruction *>(icmp)) {
+			return select;
+		}
+	}
+	return nullptr;
+}
+
+/// @brief 判断比较能否安全折叠进select的条件分支
+///
+/// 折叠决策在跳过icmp物化（translate分派）与translate_select两处独立求值，
+/// 只依赖RA静态分配信息，保证两处结论一致。
+/// icmp与select间可能存在其它指令（如true值的取负），分支在select处重读比较
+/// 操作数，因此要求操作数为常量0或其活跃区间确实覆盖select（getLiveRegInfo，
+/// 不回退到可能已被复用的home寄存器）；正向模式还须先把false值写入dst再发
+/// 分支，故操作数寄存器不得是dst，false值加载不得引入临时借用。
+bool InstSelectorRiscV64::shouldFuseIcmpIntoSelect(ICmpInst * icmp, SelectInst * select) const
+{
+	if (icmp == nullptr || select == nullptr || select->getType()->isFloatType()) {
+		return false;
+	}
+
+	switch (icmp->getOp()) {
+		case IRInstOperator::IRINST_OP_LT_I:
+		case IRInstOperator::IRINST_OP_GT_I:
+		case IRInstOperator::IRINST_OP_LE_I:
+		case IRInstOperator::IRINST_OP_GE_I:
+		case IRInstOperator::IRINST_OP_EQ_I:
+		case IRInstOperator::IRINST_OP_NE_I:
+			break;
+		default:
+			return false;
+	}
+
+	const int dstReg = getResultReg(select);
+	if (dstReg < 0) {
+		// 结果寄存器未分配时translate_select会借用临时寄存器，
+		// 该寄存器在icmp分派时不可知，无法静态验证安全性
+		return false;
+	}
+
+	auto * selInst = static_cast<Instruction *>(select);
+	RegAllocInfo trueInfo = getAllocInfo(select->getTrueValue(), selInst);
+	const bool reversed = trueInfo.hasReg() && trueInfo.regId == dstReg;
+
+	for (Value * op : {icmp->getLHS(), icmp->getRHS()}) {
+		if (isConstIntValue(op, 0)) {
+			continue;
+		}
+		RegAllocInfo live = getLiveRegInfo(op, selInst);
+		if (!live.hasReg()) {
+			return false;
+		}
+		// 反向模式先发分支后写dst，操作数与dst同寄存器也安全
+		if (!reversed && live.regId == dstReg) {
+			return false;
+		}
+	}
+	if (reversed) {
+		return true;
+	}
+
+	Value * falseVal = select->getFalseValue();
+	if (asConstInteger(falseVal) == nullptr && !getAllocInfo(falseVal, selInst).hasReg()) {
+		return false;
+	}
+	return true;
+}
+
+/// @brief 将整数比较直接翻译为条件分支
 /// @param icmp 比较指令
 /// @param inst 当前插入位置对应的 IR 指令
-/// @param trueLabel 比较为真时跳转到的标签
+/// @param label 跳转目标标签
+/// @param branchOnTrue true时比较成立跳转；false时按取反条件（比较不成立）跳转
 /// @return 若成功生成直接比较分支则返回 true
-bool InstSelectorRiscV64::emitDirectIcmpTrueBranch(ICmpInst * icmp, Instruction * inst, const std::string & trueLabel)
+bool InstSelectorRiscV64::emitDirectIcmpBranch(ICmpInst * icmp,
+                                               Instruction * inst,
+                                               const std::string & label,
+                                               bool branchOnTrue)
 {
 	if (icmp == nullptr || inst == nullptr) {
 		return false;
@@ -2281,24 +2396,51 @@ bool InstSelectorRiscV64::emitDirectIcmpTrueBranch(ICmpInst * icmp, Instruction 
 		rhs = PlatformRiscV64::regName[rhsOperand.reg];
 	}
 
-	switch (icmp->getOp()) {
+	IRInstOperator op = icmp->getOp();
+	if (!branchOnTrue) {
+		// 取反比较方向：六种比较在取反下封闭
+		switch (op) {
+			case IRInstOperator::IRINST_OP_LT_I:
+				op = IRInstOperator::IRINST_OP_GE_I;
+				break;
+			case IRInstOperator::IRINST_OP_GE_I:
+				op = IRInstOperator::IRINST_OP_LT_I;
+				break;
+			case IRInstOperator::IRINST_OP_GT_I:
+				op = IRInstOperator::IRINST_OP_LE_I;
+				break;
+			case IRInstOperator::IRINST_OP_LE_I:
+				op = IRInstOperator::IRINST_OP_GT_I;
+				break;
+			case IRInstOperator::IRINST_OP_EQ_I:
+				op = IRInstOperator::IRINST_OP_NE_I;
+				break;
+			case IRInstOperator::IRINST_OP_NE_I:
+				op = IRInstOperator::IRINST_OP_EQ_I;
+				break;
+			default:
+				break;
+		}
+	}
+
+	switch (op) {
 		case IRInstOperator::IRINST_OP_LT_I:
-			iloc.inst("blt", lhs, rhs, trueLabel);
+			iloc.inst("blt", lhs, rhs, label);
 			break;
 		case IRInstOperator::IRINST_OP_GT_I:
-			iloc.inst("blt", rhs, lhs, trueLabel);
+			iloc.inst("blt", rhs, lhs, label);
 			break;
 		case IRInstOperator::IRINST_OP_LE_I:
-			iloc.inst("bge", rhs, lhs, trueLabel);
+			iloc.inst("bge", rhs, lhs, label);
 			break;
 		case IRInstOperator::IRINST_OP_GE_I:
-			iloc.inst("bge", lhs, rhs, trueLabel);
+			iloc.inst("bge", lhs, rhs, label);
 			break;
 		case IRInstOperator::IRINST_OP_EQ_I:
-			iloc.inst("beq", lhs, rhs, trueLabel);
+			iloc.inst("beq", lhs, rhs, label);
 			break;
 		case IRInstOperator::IRINST_OP_NE_I:
-			iloc.inst("bne", lhs, rhs, trueLabel);
+			iloc.inst("bne", lhs, rhs, label);
 			break;
 		default:
 			releaseOperand(rhsOperand);
@@ -2317,7 +2459,7 @@ bool InstSelectorRiscV64::translateDirectIcmpBranch(ICmpInst * icmp, CondBranchI
 		return false;
 	}
 	const std::string trueLabel = blockLabel(condBr->getTrueDest());
-	if (!emitDirectIcmpTrueBranch(icmp, condBr, trueLabel)) {
+	if (!emitDirectIcmpBranch(icmp, condBr, trueLabel, true)) {
 		return false;
 	}
 
@@ -2853,15 +2995,24 @@ void InstSelectorRiscV64::translate_select(Instruction * inst)
 		dstReg = dstLease.reg();
 	}
 
-	OperandReg cond = loadOperand(select->getCondition(), inst);
+	// 条件是紧邻的单用途icmp时，比较直接折叠为分支，跳过0/1物化与cond寄存器读取。
+	// 折叠判定与translate分派处跳过icmp的判定完全一致
+	auto * condIcmp = dynamic_cast<ICmpInst *>(select->getCondition());
+	const bool fuseCond = condIcmp != nullptr && getFusableSelectUser(condIcmp) == select &&
+	                      shouldFuseIcmpIntoSelect(condIcmp, select);
 
 	// 若 trueValue 已被寄存器合并到 dstReg（累加器场景），先把 falseValue 写进 dst
 	// 会覆盖仍存活于 dst 的 trueValue，且其后"按 cond 覆写 true"因 true 已在 dst 被跳过，
 	// 使 select 恒取 falseValue。此时改用反向模式：dst 已持有 true，cond 为假时再用 false 覆写
 	RegAllocInfo trueInfo = getAllocInfo(select->getTrueValue(), inst);
 	if (trueInfo.hasReg() && trueInfo.regId == dstReg) {
-		iloc.inst("bne", PlatformRiscV64::regName[cond.reg], "zero", doneLabel);
-		releaseOperand(cond);
+		if (fuseCond) {
+			emitDirectIcmpBranch(condIcmp, inst, doneLabel, true);
+		} else {
+			OperandReg cond = loadOperand(select->getCondition(), inst);
+			iloc.inst("bne", PlatformRiscV64::regName[cond.reg], "zero", doneLabel);
+			releaseOperand(cond);
+		}
 		OperandReg falseOperand = loadOperand(select->getFalseValue(), inst, -1, dstReg);
 		if (falseOperand.reg != dstReg) {
 			iloc.mov_reg(dstReg, falseOperand.reg);
@@ -2872,13 +3023,25 @@ void InstSelectorRiscV64::translate_select(Instruction * inst)
 		return;
 	}
 
-	OperandReg falseOperand = loadOperand(select->getFalseValue(), inst, cond.reg, dstReg);
-	if (falseOperand.reg != dstReg) {
-		iloc.mov_reg(dstReg, falseOperand.reg);
+	if (fuseCond) {
+		// 折叠谓词已保证false值加载只写dst、比较操作数驻留寄存器且异于dst，
+		// 因此先写false再按取反条件跳过true覆写是安全的
+		OperandReg falseOperand = loadOperand(select->getFalseValue(), inst, -1, dstReg);
+		if (falseOperand.reg != dstReg) {
+			iloc.mov_reg(dstReg, falseOperand.reg);
+		}
+		releaseOperand(falseOperand);
+		emitDirectIcmpBranch(condIcmp, inst, doneLabel, false);
+	} else {
+		OperandReg cond = loadOperand(select->getCondition(), inst);
+		OperandReg falseOperand = loadOperand(select->getFalseValue(), inst, cond.reg, dstReg);
+		if (falseOperand.reg != dstReg) {
+			iloc.mov_reg(dstReg, falseOperand.reg);
+		}
+		releaseOperand(falseOperand);
+		iloc.inst("beq", PlatformRiscV64::regName[cond.reg], "zero", doneLabel);
+		releaseOperand(cond);
 	}
-	releaseOperand(falseOperand);
-	iloc.inst("beq", PlatformRiscV64::regName[cond.reg], "zero", doneLabel);
-	releaseOperand(cond);
 
 	OperandReg trueOperand = loadOperand(select->getTrueValue(), inst, -1, dstReg);
 	if (trueOperand.reg != dstReg) {

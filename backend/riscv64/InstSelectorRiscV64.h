@@ -224,8 +224,12 @@ private:
 	bool tryTranslateRepeatedPowerOfTwoDivRemCall(class CallInst * call);
 	/// @brief 判断比较指令是否只被条件分支使用
 	bool isCompareOnlyUsedByCondBranch(class ICmpInst * icmp) const;
-	/// @brief 将整数比较直接翻译为跳向 trueLabel 的条件分支
-	bool emitDirectIcmpTrueBranch(class ICmpInst * icmp, Instruction * inst, const std::string & trueLabel);
+	/// @brief 若比较指令的唯一使用者是紧邻其后的select条件，返回该select
+	class SelectInst * getFusableSelectUser(class ICmpInst * icmp) const;
+	/// @brief 判断比较能否安全折叠进select的条件分支（跳过0/1物化）
+	bool shouldFuseIcmpIntoSelect(class ICmpInst * icmp, class SelectInst * select) const;
+	/// @brief 将整数比较直接翻译为条件分支；branchOnTrue为false时按取反条件跳转
+	bool emitDirectIcmpBranch(class ICmpInst * icmp, Instruction * inst, const std::string & label, bool branchOnTrue);
 	/// @brief 将单用途整数比较直接翻译为条件分支
 	bool translateDirectIcmpBranch(class ICmpInst * icmp, class CondBranchInst * condBr);
 
