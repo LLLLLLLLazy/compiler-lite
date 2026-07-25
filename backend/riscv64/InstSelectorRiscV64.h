@@ -300,8 +300,11 @@ private:
 	/// @param inst 当前IR指令
 	/// @param excludeReg 借用临时寄存器时需要排除的寄存器
 	/// @param preferredReg 可直接承载该操作数的首选寄存器
+	/// @param foldConstZero 整数常量0是否直接复用恒零寄存器x0；
+	///        rs1=x0具特殊语义的指令（如vsetvli的AVL）必须传false
 	/// @return 操作数寄存器及是否需要释放
-	OperandReg loadOperand(Value * val, Instruction * inst, int excludeReg = -1, int preferredReg = -1);
+	OperandReg loadOperand(Value * val, Instruction * inst, int excludeReg = -1, int preferredReg = -1,
+	                       bool foldConstZero = true);
 
 	/// @brief 释放通过loadOperand借用的临时寄存器
 	void releaseOperand(OperandReg & operand);
