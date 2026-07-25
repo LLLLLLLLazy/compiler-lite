@@ -65,6 +65,7 @@ Suites:
   2026_perf         -> tests/2026_performance
   2026_performance  -> tests/2026_performance
   for_loop          -> tests/for_loop
+  licm_regression   -> tests/licm_regression
   static_test       -> tests/static_test (+ compile_fail in llvmir mode)
   all               -> all suites above
 
@@ -166,6 +167,9 @@ suite_dir_from_key() {
         for_loop)
             echo "for_loop"
             ;;
+        licm_regression)
+            echo "licm_regression"
+            ;;
         static_test)
             echo "static_test"
             ;;
@@ -197,6 +201,9 @@ infer_suite_from_testcase() {
             ;;
         for_loop_*)
             echo "for_loop"
+            ;;
+        licm_*)
+            echo "licm_regression"
             ;;
         static_*)
             echo "static_test"
@@ -595,6 +602,7 @@ elif [[ "${suite_key}" == "all" ]]; then
     run_suite "2026_function"
     run_suite "2026_performance"
     run_suite "for_loop"
+    run_suite "licm_regression"
     run_suite "static_test"
 else
     suite_dir=$(suite_dir_from_key "${suite_key}") || \

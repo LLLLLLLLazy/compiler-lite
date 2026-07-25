@@ -1,0 +1,29 @@
+int state;
+
+int first(int depth, int p1, int p2, int p3, int p4, int p5, int p6, int p7, int p8)
+{
+    if (depth > 0) {
+        return second(depth - 1, p1, p2, p3, p4, p5, p6, p7, p8);
+    }
+    state = state + 1;
+    return state;
+}
+
+int second(int depth, int p1, int p2, int p3, int p4, int p5, int p6, int p7, int p8)
+{
+    if (depth > 0) {
+        return first(depth - 1, p1, p2, p3, p4, p5, p6, p7, p8);
+    }
+    return 0;
+}
+
+int main()
+{
+    state = 0;
+    if (getint() != 0) {
+        first(1, 0, 0, 0, 0, 0, 0, 0, 0);
+    }
+    int before = second(1, 0, 0, 0, 0, 0, 0, 0, 0);
+    int after = second(1, 0, 0, 0, 0, 0, 0, 0, 0);
+    return after - before;
+}

@@ -1,0 +1,15 @@
+int diverge(int value)
+{
+    return diverge(value);
+}
+
+int main()
+{
+    int count = getint();
+    int result = 0;
+    while (count > 0) {
+        result = result + diverge(0);
+        count = count - 1;
+    }
+    return result;
+}

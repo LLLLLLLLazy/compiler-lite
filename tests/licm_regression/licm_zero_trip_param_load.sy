@@ -1,0 +1,15 @@
+int readIfExecuted(int values[], int count)
+{
+    int result = 0;
+    while (count > 0) {
+        result = result + values[100000000];
+        count = count - 1;
+    }
+    return result;
+}
+
+int main()
+{
+    int values[1] = {7};
+    return readIfExecuted(values, getint());
+}
