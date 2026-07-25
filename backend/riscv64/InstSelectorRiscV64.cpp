@@ -1168,7 +1168,8 @@ void InstSelectorRiscV64::translate_vsetvl(Instruction * inst)
 		dstReg = dstLease.reg();
 	}
 
-	OperandReg avl = loadOperand(vsetvl->getAVL(), inst, dstReg);
+	// AVL 禁止折叠常量0到x0：vsetvli rs1=x0且rd≠x0时语义为vl=VLMAX而非0
+	OperandReg avl = loadOperand(vsetvl->getAVL(), inst, dstReg, -1, false);
 	// 当前向量化只生成 i32/float 元素，统一使用 e32,m1；tu 保留旧 tail 便于归约累加。
 	iloc.inst("vsetvli",
 	          PlatformRiscV64::regName[dstReg],
@@ -3736,8 +3737,14 @@ void InstSelectorRiscV64::storeVectorValueFromReg(Value * val, int srcReg, Instr
 /// @param preferredReg 可直接承载该操作数的首选寄存器
 /// @return 操作数寄存器及是否需要释放
 InstSelectorRiscV64::OperandReg
-InstSelectorRiscV64::loadOperand(Value * val, Instruction * inst, int excludeReg, int preferredReg)
+InstSelectorRiscV64::loadOperand(Value * val, Instruction * inst, int excludeReg, int preferredReg, bool foldConstZero)
 {
+	// 整数常量0直接复用恒零寄存器x0，避免li的冗余物化。
+	// 所有调用点均将操作数寄存器作为只读源使用；rs1=x0具特殊语义的指令须传foldConstZero=false豁免。
+	if (foldConstZero && isConstIntValue(val, 0)) {
+		return OperandReg(0);
+	}
+
 	RegAllocInfo info = getAllocInfo(val, inst);
 	if (info.hasReg()) {
 		return OperandReg(info.regId);
