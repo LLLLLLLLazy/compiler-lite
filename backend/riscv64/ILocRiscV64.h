@@ -190,6 +190,12 @@ public:
 	/// @brief 析构函数
 	~ILocRiscV64();
 
+	/// @brief 获取符号表模块
+	Module * getModule() const
+	{
+		return module;
+	}
+
 	/// @brief 设置寄存器分配信息映射表
 	/// @param allocMap 寄存器分配信息（由GreedyRegAllocator产生）
 	void setRegAllocMap(const std::unordered_map<Value *, RegAllocInfo> & allocMap);

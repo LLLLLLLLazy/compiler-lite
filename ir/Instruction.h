@@ -122,9 +122,31 @@ public:
         parentBlock = bb;
     }
 
+    /// @brief 获取指令对应的源码行号，-1 表示无行号信息
+    int64_t getSourceLine() const
+    {
+        return srcLine;
+    }
+
+    /// @brief 设置指令对应的源码行号
+    void setSourceLine(int64_t line)
+    {
+        srcLine = line;
+    }
+
+    /// @brief 设置"当前源码行号"，此后新建的指令都会捕获该行号；
+    /// 由前端 IRGenerator 在遍历语句时更新，前端结束后应重置为 -1
+    static void setCurrentEmitLine(int64_t line);
+
 protected:
     enum IRInstOperator op = IRInstOperator::IRINST_OP_MAX;
     bool dead = false;
     Function * func = nullptr;
     BasicBlock * parentBlock = nullptr;
+
+    /// @brief 指令对应的源码行号，-1 表示无行号信息
+    int64_t srcLine = -1;
+
+    /// @brief 前端遍历语句时维护的当前源码行号，新建指令在构造时捕获
+    static int64_t currentEmitLine;
 };
