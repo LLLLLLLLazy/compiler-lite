@@ -21,6 +21,7 @@
 #include "Function.h"
 #include "AnalysisCache.h"
 #include "GetElementPtrInst.h"
+#include "ICmpInst.h"
 #include "Instruction.h"
 #include "IntegerType.h"
 #include "Module.h"
@@ -730,11 +731,137 @@ bool InstCombine::simplifySelect(SelectInst * inst)
 
     auto * condition = dynamic_cast<ConstInteger *>(inst->getCondition());
     if (!condition) {
-        return false;
+        return tryCombineSelectAbs(inst);
     }
 
     // 条件已知时直接挑出对应分支值
     return replaceInstWithValue(inst, condition->getVal() != 0 ? inst->getTrueValue() : inst->getFalseValue());
+}
+
+/// @brief 匹配 0 - x 形式的取负，返回被取负的 x，不匹配返回 nullptr
+static Value * matchNegOf(Value * value)
+{
+    auto * binary = dynamic_cast<BinaryInst *>(value);
+    if (!binary || binary->getOp() != IRInstOperator::IRINST_OP_SUB_I) {
+        return nullptr;
+    }
+    auto * zero = dynamic_cast<ConstInteger *>(binary->getLHS());
+    if (!zero || zero->getVal() != 0) {
+        return nullptr;
+    }
+    return binary->getRHS();
+}
+
+/// @brief 将新指令插入到锚点指令之前；新指令无行号时沿用锚点的源码行号
+static void insertBeforeInst(Instruction * anchor, Instruction * created)
+{
+    auto * bb = anchor->getParentBlock();
+    auto & insts = bb->getInstructions();
+    auto pos = std::find(insts.begin(), insts.end(), anchor);
+    created->setParentBlock(bb);
+    if (created->getSourceLine() < 0) {
+        created->setSourceLine(anchor->getSourceLine());
+    }
+    insts.insert(pos, created);
+}
+
+/// @brief 识别 abs/负abs 惯用法，将分支型 select 重写为无分支移位序列
+///
+/// select(x<0, -x, x) 即 |x|，改写为 s = x ashr 31; |x| = (x^s) - s；
+/// 取负与比较方向配对相反时为 -|x| = s - (x^s)。两种形式对 INT_MIN
+/// 均为回绕语义，与分支版本行为一致。
+bool InstCombine::tryCombineSelectAbs(SelectInst * inst)
+{
+    if (!inst->getType()->isInt32Type()) {
+        return false;
+    }
+    auto * icmp = dynamic_cast<ICmpInst *>(inst->getCondition());
+    if (!icmp) {
+        return false;
+    }
+
+    Value * trueVal = inst->getTrueValue();
+    Value * falseVal = inst->getFalseValue();
+
+    Value * x = nullptr;
+    bool trueIsNeg = false;
+    if (matchNegOf(trueVal) == falseVal && falseVal != nullptr) {
+        x = falseVal;
+        trueIsNeg = true;
+    } else if (matchNegOf(falseVal) == trueVal && trueVal != nullptr) {
+        x = trueVal;
+        trueIsNeg = false;
+    } else {
+        return false;
+    }
+
+    // 归一化比较为 x REL 0；常量 0 在左侧时镜像比较方向
+    IRInstOperator rel = icmp->getOp();
+    auto isConstZero = [](Value * v) {
+        auto * c = dynamic_cast<ConstInteger *>(v);
+        return c != nullptr && c->getVal() == 0;
+    };
+    if (icmp->getLHS() == x && isConstZero(icmp->getRHS())) {
+        // 已是 x REL 0
+    } else if (icmp->getRHS() == x && isConstZero(icmp->getLHS())) {
+        switch (rel) {
+            case IRInstOperator::IRINST_OP_LT_I:
+                rel = IRInstOperator::IRINST_OP_GT_I;
+                break;
+            case IRInstOperator::IRINST_OP_GT_I:
+                rel = IRInstOperator::IRINST_OP_LT_I;
+                break;
+            case IRInstOperator::IRINST_OP_LE_I:
+                rel = IRInstOperator::IRINST_OP_GE_I;
+                break;
+            case IRInstOperator::IRINST_OP_GE_I:
+                rel = IRInstOperator::IRINST_OP_LE_I;
+                break;
+            default:
+                break;
+        }
+    } else {
+        return false;
+    }
+
+    // 比较为真是否表示 x 为负（x<0 与 x<=0 对 abs 等价：x==0 时两路同为 0）
+    bool condMeansNegative;
+    switch (rel) {
+        case IRInstOperator::IRINST_OP_LT_I:
+        case IRInstOperator::IRINST_OP_LE_I:
+            condMeansNegative = true;
+            break;
+        case IRInstOperator::IRINST_OP_GT_I:
+        case IRInstOperator::IRINST_OP_GE_I:
+            condMeansNegative = false;
+            break;
+        default:
+            return false;
+    }
+
+    // "为负取相反数"配对 ⇒ |x|；反向配对 ⇒ -|x|
+    const bool isAbs = trueIsNeg == condMeansNegative;
+
+    // select/取负常由 if 转换等优化期 pass 创建而无行号，从原比较指令兜底继承，
+    // 保证汇编源码行注释不因重写丢失
+    int64_t srcLine = inst->getSourceLine();
+    if (srcLine < 0) {
+        srcLine = icmp->getSourceLine();
+    }
+
+    Type * type = inst->getType();
+    auto * sign =
+        new BinaryInst(func, IRInstOperator::IRINST_OP_ASHR_I, x, mod->newConstInteger(type, 31), type);
+    sign->setSourceLine(srcLine);
+    insertBeforeInst(inst, sign);
+    auto * xored = new BinaryInst(func, IRInstOperator::IRINST_OP_XOR_I, x, sign, type);
+    xored->setSourceLine(srcLine);
+    insertBeforeInst(inst, xored);
+    auto * result = isAbs ? new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, xored, sign, type)
+                          : new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, sign, xored, type);
+    result->setSourceLine(srcLine);
+    insertBeforeInst(inst, result);
+    return replaceInstWithValue(inst, result);
 }
 
 /// @brief 折叠常量 float-to-int cast
