@@ -21,6 +21,7 @@
 #include "fixedPointFunctionPass/InstCombine.h"
 #include "fixedPointFunctionPass/LICM.h"
 #include "fixedPointFunctionPass/LoopConstantPromotion.h"
+#include "fixedPointFunctionPass/GuardedTailCollapse.h"
 #include "fixedPointFunctionPass/LoopExitValueRewrite.h"
 #include "fixedPointFunctionPass/LoopFusion.h"
 #include "fixedPointFunctionPass/LoopStrengthReduce.h"
@@ -247,6 +248,14 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
     // 改写为 and/移位；须在 LSR 把归纳变量改写为指针游标之前运行
     registerFixedPointFunctionPass("RangeModSimplify", [this](Function * func) {
         RangeModSimplify pass(func, module);
+        return pass.run();
+    });
+    // 单调守卫循环的空转尾部折叠：把"唯一工作被 IV 单调谓词守卫"的计数循环
+    // 上界钳制为工作区间上限并消除守卫分支，使循环收敛为单 latch 形态。
+    // 须在 LSR 之前运行（折叠后 LSR 才能识别唯一 latch 并做指针游标化），
+    // 也须在 RangeModSimplify 之后（钳制会把常量迭代数变为 select 动态值）
+    registerFixedPointFunctionPass("GuardedTailCollapse", [this](Function * func) {
+        GuardedTailCollapse pass(func, module);
         return pass.run();
     });
     // 基于 SCEV 把规范计数循环头部递推 phi 的出口取值替换为闭式表达式，
