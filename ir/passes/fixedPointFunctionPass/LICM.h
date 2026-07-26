@@ -15,35 +15,23 @@
 #include <unordered_set>
 #include <vector>
 
-class AllocaInst;
 class BasicBlock;
 class DominatorTree;
-class FormalParam;
 class Function;
 class Instruction;
-class Module;
-class ParamAliasAnalysis;
-class PureFunctionAnalysis;
 
 class LICM {
 
 public:
     /// @brief 构造 LICM pass
     /// @param func 待优化的函数
-    explicit LICM(Function * func, Module * mod = nullptr);
+    explicit LICM(Function * func);
 
     /// @brief 对函数原地执行 LICM
     /// @return 若 IR 被修改则返回 true
     bool run();
 
 private:
-    /// @brief load 外提安全性分类
-    enum class LoadHoistKind {
-        Reject,          ///< 不可外提
-        Speculate,       ///< 地址恒有效（全局/本帧 alloca 根），可推测执行
-        LatchDominance,  ///< 形参根：需支配全部 latch，仅零迭代循环会多执行一次
-    };
-
     struct HeaderPhiPlan {
         Instruction * phi = nullptr;
         std::vector<class Value *> outsideValues;
@@ -66,12 +54,10 @@ private:
     /// @param header 循环头基本块
     /// @param loopBody 当前自然循环的块集合
     /// @param domTree 当前函数的支配树
-    /// @param purity 模块级纯函数分析（用于识别内存无关调用）
     /// @return 若该循环被修改则返回 true
     bool tryHoistLoop(BasicBlock * header,
                       const std::unordered_set<BasicBlock *> & loopBody,
-                      const DominatorTree & domTree,
-                      PureFunctionAnalysis & purity);
+                      const DominatorTree & domTree);
 
     /// @brief 为循环头新建 preheader 并重写相关 phi 与 CFG 边
     /// @param header 循环头基本块
@@ -101,26 +87,12 @@ private:
     /// @return true 表示该指令属于可外提的纯计算指令
     bool isHoistableInstruction(Instruction * inst) const;
 
-    /// @brief 对 load 按指针根对象分类外提安全性
+    /// @brief 判断 load 是否满足保守外提条件
     /// @param inst 待检查的 load 指令
     /// @param loopBody 当前自然循环的块集合
-    /// @return 分类结果，见 LoadHoistKind
-    LoadHoistKind classifyLoadHoist(Instruction * inst,
-                                    const std::unordered_set<BasicBlock *> & loopBody) const;
-
-    /// @brief 判断循环体是否可能改写以本帧 alloca 为根的 load 地址
-    /// @param root load 地址的根 alloca
-    /// @param loopBody 当前自然循环的块集合
-    /// @return true 表示存在可能的改写
-    bool loopMayClobberAllocaLoad(AllocaInst * root,
-                                  const std::unordered_set<BasicBlock *> & loopBody) const;
-
-    /// @brief 判断循环体是否可能改写以形参为根的 load 地址
-    /// @param root load 地址的根形参
-    /// @param loopBody 当前自然循环的块集合
-    /// @return true 表示存在可能的改写
-    bool loopMayClobberParamLoad(FormalParam * root,
-                                 const std::unordered_set<BasicBlock *> & loopBody) const;
+    /// @return true 表示 load 位点精确或来自全局，且循环内没有潜在改写
+    bool isSafeLoadToHoist(Instruction * inst,
+                           const std::unordered_set<BasicBlock *> & loopBody) const;
 
     /// @brief 判断候选指令是否需要额外满足退出点支配约束
     /// @param inst 待检查的指令
@@ -146,17 +118,6 @@ private:
                                const std::unordered_set<BasicBlock *> & loopBody,
                                const DominatorTree & domTree) const;
 
-    /// @brief 判断定义块是否支配当前循环的全部 latch 块
-    /// @param defBlock 候选指令所在基本块
-    /// @param header 循环头基本块
-    /// @param loopBody 当前自然循环的块集合
-    /// @param domTree 当前函数的支配树
-    /// @return true 表示每轮完整迭代都必然执行该定义块
-    bool dominatesAllLoopLatches(BasicBlock * defBlock,
-                                 BasicBlock * header,
-                                 const std::unordered_set<BasicBlock *> & loopBody,
-                                 const DominatorTree & domTree) const;
-
     /// @brief 判断候选指令是否支配其全部使用点
     /// @param inst 待检查的候选指令
     /// @param domTree 当前函数的支配树
@@ -164,9 +125,4 @@ private:
     bool dominatesAllUses(Instruction * inst, const DominatorTree & domTree) const;
 
     Function * func = nullptr;
-    Module * mod = nullptr;
-    /// 共享纯函数分析，仅在 run() 执行期间有效（指向栈上对象）
-    PureFunctionAnalysis * purityAnalysis = nullptr;
-    /// 共享形参别名分析，仅在 run() 执行期间有效（指向栈上对象）
-    ParamAliasAnalysis * paramAliasAnalysis = nullptr;
 };

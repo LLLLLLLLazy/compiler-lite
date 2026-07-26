@@ -1,0 +1,16 @@
+int sum(int values[], int count)
+{
+    if (count <= 0) {
+        return 0;
+    }
+    return values[count - 1] + sum(values, count - 1);
+}
+
+int main()
+{
+    int values[2] = {1, 2};
+    int before = sum(values, 2);
+    values[0] = 5;
+    int after = sum(values, 2);
+    return after - before;
+}

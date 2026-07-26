@@ -112,6 +112,7 @@ bool PureCallMemoize::run()
     }
 
     PureFunctionAnalysis purity(mod);
+    // 每次顶层调用都会切换 epoch，缓存只在本次无外部写入的递归闭包内复用
     if (!purity.isPure(func)) {
         return false;
     }
