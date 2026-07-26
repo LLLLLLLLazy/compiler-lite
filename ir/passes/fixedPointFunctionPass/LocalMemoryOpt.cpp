@@ -890,6 +890,81 @@ bool eliminateDeadStores(Function * func,
     return changed;
 }
 
+/// @brief 删除“目标内存已持有待写值”的冗余写回 store
+///
+/// 块内反向回溯：对 store V,P，寻找一个已确立 mem[P]==V 的锚点
+/// （load V <- P，或更早的 store V,P）。若锚点与该 store 之间所有可能
+/// 写内存的指令都是“写入同一 SSA 值 V 的普通 store”，则无论这些 store
+/// 的地址是否与 P 别名（别名时写入的也是 V），P 处内容必然仍为 V，
+/// 该写回是空操作，可直接删除。不依赖任何别名分析，对全局数组同样成立。
+/// 典型形态来自逐元素交换惯用法：
+///   %v = load %p ; store %v, %q ; store %v, %p   ← 第三条恒冗余
+/// @param func 待优化函数
+/// @return true 表示至少删除了一条 store
+bool removeRedundantStoreBacks(Function * func)
+{
+    bool changed = false;
+    for (auto * bb : func->getBlocks()) {
+        auto & insts = bb->getInstructions();
+        for (auto it = insts.begin(); it != insts.end();) {
+            auto * store = dynamic_cast<StoreInst *>(*it);
+            if (!store || store->isDead()) {
+                ++it;
+                continue;
+            }
+
+            Value * value = store->getValueOperand();
+            Value * pointer = store->getPointerOperand();
+            bool redundant = false;
+            for (auto rit = std::make_reverse_iterator(it); rit != insts.rend(); ++rit) {
+                Instruction * prev = *rit;
+                if (!prev || prev->isDead()) {
+                    continue;
+                }
+
+                if (auto * prevLoad = dynamic_cast<LoadInst *>(prev)) {
+                    if (static_cast<Value *>(prevLoad) == value && prevLoad->getPointerOperand() == pointer) {
+                        redundant = true;
+                        break;
+                    }
+                    continue;
+                }
+
+                if (auto * prevStore = dynamic_cast<StoreInst *>(prev)) {
+                    if (prevStore->getValueOperand() != value) {
+                        break;
+                    }
+                    if (prevStore->getPointerOperand() == pointer) {
+                        redundant = true;
+                    }
+                    if (redundant) {
+                        break;
+                    }
+                    continue;
+                }
+
+                if (prev->mayWriteMemory()) {
+                    break;
+                }
+            }
+
+            if (!redundant) {
+                ++it;
+                continue;
+            }
+
+            store->clearOperands();
+            auto next = std::next(it);
+            insts.erase(it);
+            delete store;
+            it = next;
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
 } // namespace
 
 /// @brief 构造局部内存优化器
@@ -912,16 +987,21 @@ bool LocalMemoryOpt::run()
         return false;
     }
 
+    // 冗余写回消除只依赖 SSA 值恒等，不依赖可跟踪 alloca，须在提前返回之前执行
+    bool changed = removeRedundantStoreBacks(func);
+
     LocalMemoryAnalysis localMemory(func);
     const auto & trackableAllocas = localMemory.getTrackableAllocas();
     if (trackableAllocas.empty()) {
-        return false;
+        if (changed) {
+            func->getAnalysisCache().invalidateValueAnalyses();
+        }
+        return changed;
     }
 
     DominatorTree dt(func);
     const auto & rpo = dt.getRPO();
     const ReachableBlockSet reachableBlocks = collectReachableBlocks(dt);
-    bool changed = false;
     // 先提升只有一次入口 store 的 alloca，覆盖 mem2reg 不处理的指针临时槽
     changed = promoteSingleEntryStoreAllocas(func, trackableAllocas) || changed;
 
