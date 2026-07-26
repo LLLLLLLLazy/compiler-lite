@@ -36,6 +36,13 @@ private:
                                   BasicBlock * latch,
                                   class ScalarEvolution & scev,
                                   const std::unordered_set<BasicBlock *> & loopBody);
+    /// @brief 将 gep(base, IV*S + C)（S/C 循环不变，步长为运行期值）的下标改写为
+    ///        每步累加 step*S 的 i32 递推，消去每迭代一次的乘法
+    ///        （停留在 i32 宽度，回绕语义与原式逐迭代一致）
+    bool reduceInvariantStrideGEP(BasicBlock * header,
+                                  BasicBlock * preheader,
+                                  BasicBlock * latch,
+                                  const std::unordered_set<BasicBlock *> & loopBody);
     bool sweepDeadInstructions() const;
 
     Function * func = nullptr;
