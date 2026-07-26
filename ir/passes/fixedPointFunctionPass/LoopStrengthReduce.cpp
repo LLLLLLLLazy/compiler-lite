@@ -451,7 +451,11 @@ bool LoopStrengthReduce::tryReduceHeader(BasicBlock * header)
         return true;
     }
 
-    return reducePointerIVOffsetGEP(header, preheader, latch, scev, loopBody);
+    if (reducePointerIVOffsetGEP(header, preheader, latch, scev, loopBody)) {
+        return true;
+    }
+
+    return reduceInvariantStrideGEP(header, preheader, latch, loopBody);
 }
 
 bool LoopStrengthReduce::reduceFirstCandidate(BasicBlock * header,
@@ -697,6 +701,230 @@ bool LoopStrengthReduce::reducePointerIVOffsetGEP(BasicBlock * header,
         gep->clearOperands();
         gep->setDead(true);
     }
+
+    return true;
+}
+
+/// @brief 将 gep(base, IV*S + C) 的下标改写为每步累加 s*S 的 i32 归纳递推
+///
+/// reduceFirstCandidate 依赖 SCEV 常量步长递推，无法表达 {C,+,S}（S 为运行期
+/// 循环不变量，如按列访问 A[j*n+i] 中的 n）。本方法直接在 IR 上匹配：
+///   idx = add(mul(IV, S), C) / add(C, mul(IV, S)) / mul(IV, S)
+/// 其中 IV 为本循环头的 i32 归纳 phi（latch 入值为 add(IV, 常量 s)），
+/// S、C 均循环不变。改写为：
+///   preheader: initIdx = IV0*S + C（IV0 为常量 0 时折叠）
+///              stepIdx = s*S（s==1 时直接复用 S）
+///   header:    idxPhi = phi [initIdx, preheader], [nextIdx, latch]
+///   latch:     nextIdx = add(idxPhi, stepIdx)
+///   体  内:    gep 的下标操作数替换为 idxPhi，每迭代省下一条乘法
+///
+/// 递推保持在 i32 宽度内，因而在二进制补码回绕语义下逐点等价，不依赖
+/// "有符号运算不溢出"这一未定义行为假设：模 2^32 剩余类环上乘法对加法可分配，
+///   wrap32(wrap32(IV0 + n·s)·S + C) = wrap32((IV0·S + C) + n·(s·S))
+///                                   = wrap32(initIdx + n·stepIdx)
+/// 对每个 n 恒成立，回绕与否两边同步。注意这里刻意不下沉为 64 位指针递推
+/// ptr += S·4：那等价于按无回绕的整数值计算地址，只在 i32 下标回绕时才与
+/// 源语义不同，属于对有符号溢出未定义的利用（GCC -O3 正是这么做的）。
+/// @param header 循环头
+/// @param preheader 唯一 preheader
+/// @param latch 唯一 latch
+/// @param loopBody 循环体块集合
+/// @return true 表示至少改写了一个 gep
+bool LoopStrengthReduce::reduceInvariantStrideGEP(BasicBlock * header,
+                                                  BasicBlock * preheader,
+                                                  BasicBlock * latch,
+                                                  const std::unordered_set<BasicBlock *> & loopBody)
+{
+    // 匹配种子：gep(不变基址, add(mul(IV,S),C) | mul(IV,S))，结果为标量指针
+    GetElementPtrInst * seed = nullptr;
+    PhiInst * ivPhi = nullptr;
+    Value * strideValue = nullptr;   // S
+    Value * addendValue = nullptr;   // C，可为空
+    int32_t ivStep = 0;              // s
+
+    for (auto * bb : func->getBlocks()) {
+        if (loopBody.find(bb) == loopBody.end()) {
+            continue;
+        }
+
+        for (auto * inst : bb->getInstructions()) {
+            auto * gep = dynamic_cast<GetElementPtrInst *>(inst);
+            if (!gep || gep->isDead() || gep->isArrayDecayGEP()) {
+                continue;
+            }
+            if (!isLoopInvariantValue(gep->getBasePointer(), loopBody) || !allUsesStayInLoop(gep, loopBody)) {
+                continue;
+            }
+
+            // 结果必须是标量指针（int*/float*），保证 gep 索引单位即元素大小
+            auto * resultPtrType = dynamic_cast<PointerType *>(gep->getType());
+            if (!resultPtrType) {
+                continue;
+            }
+            const Type * pointee = resultPtrType->getPointeeType();
+            if (!pointee || !(pointee->isIntegerType() || pointee->isFloatType())) {
+                continue;
+            }
+
+            // 拆解 idx = mul(...) 或 add(mul(...), C)
+            Value * index = gep->getIndexOperand();
+            auto * indexInst = dynamic_cast<BinaryInst *>(index);
+            if (!indexInst) {
+                continue;
+            }
+            BinaryInst * mulInst = nullptr;
+            Value * addend = nullptr;
+            if (indexInst->getOp() == IRInstOperator::IRINST_OP_MUL_I) {
+                mulInst = indexInst;
+            } else if (indexInst->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
+                mulInst = dynamic_cast<BinaryInst *>(indexInst->getLHS());
+                addend = indexInst->getRHS();
+                if (!mulInst || mulInst->getOp() != IRInstOperator::IRINST_OP_MUL_I) {
+                    mulInst = dynamic_cast<BinaryInst *>(indexInst->getRHS());
+                    addend = indexInst->getLHS();
+                }
+            }
+            if (!mulInst || mulInst->getOp() != IRInstOperator::IRINST_OP_MUL_I) {
+                continue;
+            }
+            if (addend && (isDefinedInLoop(addend, loopBody) || !addend->getType() ||
+                           !addend->getType()->isInt32Type())) {
+                continue;
+            }
+
+            // mul 的一侧是本循环归纳 phi，另一侧循环不变
+            PhiInst * phi = nullptr;
+            Value * stride = nullptr;
+            for (int side = 0; side < 2; ++side) {
+                Value * a = (side == 0) ? mulInst->getLHS() : mulInst->getRHS();
+                Value * b = (side == 0) ? mulInst->getRHS() : mulInst->getLHS();
+                auto * candPhi = dynamic_cast<PhiInst *>(a);
+                if (candPhi && candPhi->getParentBlock() == header && !isDefinedInLoop(b, loopBody)) {
+                    phi = candPhi;
+                    stride = b;
+                    break;
+                }
+            }
+            if (!phi || !stride || !phi->getType() || !phi->getType()->isInt32Type() ||
+                !stride->getType() || !stride->getType()->isInt32Type()) {
+                continue;
+            }
+
+            // 归纳 phi 结构：恰两条入边（preheader + latch），latch 入值为 add(phi, 常量 s)
+            if (phi->getIncomingCount() != 2) {
+                continue;
+            }
+            Value * latchIncoming = nullptr;
+            bool shapeOk = true;
+            for (int32_t i = 0; i < phi->getIncomingCount(); ++i) {
+                BasicBlock * inBlock = phi->getIncomingBlock(i);
+                if (inBlock == preheader) {
+                    continue;
+                }
+                if (inBlock != latch) {
+                    shapeOk = false;
+                    break;
+                }
+                latchIncoming = phi->getIncomingValue(i);
+            }
+            if (!shapeOk || !latchIncoming) {
+                continue;
+            }
+            auto * stepAdd = dynamic_cast<BinaryInst *>(latchIncoming);
+            if (!stepAdd || stepAdd->getOp() != IRInstOperator::IRINST_OP_ADD_I) {
+                continue;
+            }
+            ConstInteger * stepConst = nullptr;
+            if (stepAdd->getLHS() == phi) {
+                stepConst = dynamic_cast<ConstInteger *>(stepAdd->getRHS());
+            } else if (stepAdd->getRHS() == phi) {
+                stepConst = dynamic_cast<ConstInteger *>(stepAdd->getLHS());
+            }
+            if (!stepConst || stepConst->getVal() == 0) {
+                continue;
+            }
+
+            seed = gep;
+            ivPhi = phi;
+            strideValue = stride;
+            addendValue = addend;
+            ivStep = stepConst->getVal();
+            break;
+        }
+
+        if (seed) {
+            break;
+        }
+    }
+
+    if (!seed) {
+        return false;
+    }
+
+    Value * ivInit = nullptr;
+    for (int32_t i = 0; i < ivPhi->getIncomingCount(); ++i) {
+        if (ivPhi->getIncomingBlock(i) == preheader) {
+            ivInit = ivPhi->getIncomingValue(i);
+            break;
+        }
+    }
+    if (!ivInit) {
+        return false;
+    }
+
+    Type * i32Type = ivPhi->getType();
+    Type * elemPtrType = seed->getType();
+    Value * base = seed->getBasePointer();
+
+    // preheader：initIdx = IV0*S + C，IV0 为常量 0 时折叠乘法项
+    Value * initIdx = nullptr;
+    auto * ivInitConst = dynamic_cast<ConstInteger *>(ivInit);
+    if (!ivInitConst || ivInitConst->getVal() != 0) {
+        auto * initMul = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, ivInit, strideValue, i32Type);
+        insertBeforeTerminator(preheader, initMul);
+        initIdx = initMul;
+    }
+    if (addendValue) {
+        if (initIdx) {
+            auto * initAdd = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, initIdx, addendValue, i32Type);
+            insertBeforeTerminator(preheader, initAdd);
+            initIdx = initAdd;
+        } else {
+            initIdx = addendValue;
+        }
+    }
+    if (!initIdx) {
+        initIdx = mod->newConstInt32(0);
+    }
+
+    // stepIdx = s*S（s==1 时直接复用 S）
+    Value * stepIdx = strideValue;
+    if (ivStep != 1) {
+        auto * stepMul = new BinaryInst(func,
+                                        IRInstOperator::IRINST_OP_MUL_I,
+                                        strideValue,
+                                        mod->newConstInt32(ivStep),
+                                        i32Type);
+        insertBeforeTerminator(preheader, stepMul);
+        stepIdx = stepMul;
+    }
+
+    // 下标递推：idxPhi = phi [initIdx, preheader], [idxPhi + stepIdx, latch]
+    // 全程停留在 i32，回绕行为与原 IV*S+C 逐迭代一致
+    auto * idxPhi = new PhiInst(func, i32Type);
+    auto * nextIdx = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, idxPhi, stepIdx, i32Type);
+
+    insertPhiAtHeader(header, idxPhi);
+    insertBeforeTerminator(latch, nextIdx);
+    idxPhi->addIncoming(initIdx, preheader);
+    idxPhi->addIncoming(nextIdx, latch);
+
+    // 保留 gep 本身（地址仍由 base + sext(idx)*elemSize 现算），只换掉下标来源
+    auto * reducedGep = new GetElementPtrInst(func, base, idxPhi, elemPtrType, seed->isArrayDecayGEP());
+    insertBeforeInstruction(seed, reducedGep);
+    seed->replaceAllUseWith(reducedGep);
+    seed->clearOperands();
+    seed->setDead(true);
 
     return true;
 }
