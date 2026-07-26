@@ -2487,6 +2487,103 @@ int countLabelBranchReferences(const InstList & code, const std::string & label)
 /// - 中间 GPR R 在循环体内只在该三指令序列中出现
 /// - 循环头标签在全函数中仅被 latch 回边引用一次，且头部由前导块顺序进入，
 ///   以保证提升点支配整个循环
+/// @brief 外提底测单块循环内的循环不变量移位
+///
+/// IR 级强度削减把变步长地址递推降为 gep(ptr, S)，指令选择按元素规模展开为
+/// 每迭代一次的 `slli tmp, S, k; add ptr, ptr, tmp`。当 S 在循环体内不被改写时
+/// slli 结果恒定，可上提到循环入口标签之前，回边路径每迭代少执行一条指令。
+/// 匹配的循环形态为底测单块循环：
+///   label: <体，无标签/无控制转移> ; bcc ..., label
+/// 且 label 仅被该回边引用一次、由上方顺序落入（外提点支配全部迭代）。
+/// slli 的源与目的寄存器在体内均无其他定值，且目的寄存器在 slli 之前无使用
+///（避免首迭代读到被提前改写的旧值）。
+/// @param code 指令列表
+/// @return true 表示发生外提
+bool hoistLoopInvariantShifts(InstList & code)
+{
+	for (auto labelIt = code.begin(); labelIt != code.end(); ++labelIt) {
+		auto * label = *labelIt;
+		if (!isLabel(label)) {
+			continue;
+		}
+		const std::string headerLabel = label->opcode;
+
+		// 从标签顺序扫到以该标签为目标的条件回边；中途遇到任何标签或控制转移即放弃
+		InstIt backedgeIt = code.end();
+		for (auto it = nextLive(code, labelIt); it != code.end(); it = nextLive(code, it)) {
+			auto * inst = *it;
+			if (isBranchOpcode(inst->opcode) && inst->arg2 == headerLabel) {
+				backedgeIt = it;
+				break;
+			}
+			if (isLabel(inst) || isBranchOpcode(inst->opcode) || inst->opcode == "j" ||
+			    inst->opcode == "jal" || inst->opcode == "call" || inst->opcode == "ret") {
+				break;
+			}
+		}
+		if (backedgeIt == code.end()) {
+			continue;
+		}
+
+		// 标签仅被回边引用一次，且必须由上方顺序落入循环
+		if (countLabelBranchReferences(code, headerLabel) != 1) {
+			continue;
+		}
+		InstIt prevIt = code.end();
+		for (auto scan = labelIt; scan != code.begin();) {
+			--scan;
+			if (isLiveInst(*scan) && !isCommentInst(*scan)) {
+				prevIt = scan;
+				break;
+			}
+		}
+		if (prevIt == code.end()) {
+			continue;
+		}
+		auto * prev = *prevIt;
+		if (isLabel(prev) || prev->opcode == "j" || prev->opcode == "ret") {
+			continue;
+		}
+
+		// 体内寻找源不变、目的无冲突的 slli 并外提
+		for (auto it = nextLive(code, labelIt); it != backedgeIt; it = nextLive(code, it)) {
+			auto * shift = *it;
+			if (!isInst(shift, "slli") || shift->result.empty() || shift->arg1.empty() ||
+			    shift->result == shift->arg1) {
+				continue;
+			}
+			const std::string dst = shift->result;
+			const std::string src = shift->arg1;
+
+			bool blocked = false;
+			bool beforeShift = true;
+			for (auto scan = nextLive(code, labelIt); scan != backedgeIt; scan = nextLive(code, scan)) {
+				if (scan == it) {
+					beforeShift = false;
+					continue;
+				}
+				auto * inst = *scan;
+				if (definesResultOperand(inst) && (inst->result == dst || inst->result == src)) {
+					blocked = true;
+					break;
+				}
+				if (beforeShift && usesRegister(inst, dst)) {
+					blocked = true;
+					break;
+				}
+			}
+			if (blocked) {
+				continue;
+			}
+
+			// 上提到循环标签之前：落入路径恰好执行一次，绕过路径不执行
+			code.splice(labelIt, code, it);
+			return true;
+		}
+	}
+	return false;
+}
+
 bool hoistLoopInvariantFloatConstants(InstList & code)
 {
 	for (auto headerIt = code.begin(); headerIt != code.end(); ++headerIt) {
@@ -3573,6 +3670,8 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		localChanged = normalizeFsgnjInstructions(code) || localChanged;		// 仿射地址递推优化：将循环内 base+i*stride 地址计算改为指针步进
 		localChanged = reduceAffineAddressRecurrences(code) || localChanged;
 		localChanged = foldInvariantAddressOffsetsIntoRecurrences(code) || localChanged;
+		// 底测单块循环内的不变量 slli 外提（变步长指针递推的步长字节数只算一次）
+		localChanged = hoistLoopInvariantShifts(code) || localChanged;
 		localChanged = reduceMulByConst(code) || localChanged;
 		localChanged = foldUnitStepIncrements(code) || localChanged;
 		localChanged = foldAddiAddressIntoMemoryOffset(code) || localChanged;
