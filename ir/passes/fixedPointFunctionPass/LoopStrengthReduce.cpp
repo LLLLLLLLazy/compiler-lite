@@ -7,8 +7,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -18,16 +20,23 @@
 #include "CondBranchInst.h"
 #include "ConstInteger.h"
 #include "DominatorTree.h"
+#include "FCmpInst.h"
+#include "FPToSIInst.h"
 #include "Function.h"
 #include "GetElementPtrInst.h"
 #include "ICmpInst.h"
 #include "Instruction.h"
+#include "LoadInst.h"
 #include "LoopInfo.h"
 #include "Module.h"
 #include "PhiInst.h"
 #include "ScalarEvolution.h"
+#include "SelectInst.h"
+#include "SIToFPInst.h"
+#include "StoreInst.h"
 #include "Type.h"
 #include "Value.h"
+#include "ZExtInst.h"
 #include "Types/ArrayType.h"
 #include "Types/PointerType.h"
 #include "AnalysisCache.h"
@@ -155,6 +164,62 @@ void insertPhiAtHeader(BasicBlock * header, PhiInst * phi)
 
     phi->setParentBlock(header);
     insts.insert(insertPos, phi);
+}
+
+/// @brief 判断指令是否属于循环版本化克隆支持的类型
+///
+/// 白名单限定为纯数据流指令与普通访存：二元运算、比较、访存、gep、类型转换、
+/// select、phi。call/alloca/copy/向量指令与 return 一律拒绝——版本化只面向
+/// 简单计数循环，遇到复杂形态放弃版本化仅保留精确慢路径即可，不承担风险。
+bool isVersionCloneableInstruction(Instruction * inst)
+{
+    return dynamic_cast<BinaryInst *>(inst) != nullptr || dynamic_cast<ICmpInst *>(inst) != nullptr ||
+           dynamic_cast<FCmpInst *>(inst) != nullptr || dynamic_cast<LoadInst *>(inst) != nullptr ||
+           dynamic_cast<StoreInst *>(inst) != nullptr || dynamic_cast<GetElementPtrInst *>(inst) != nullptr ||
+           dynamic_cast<ZExtInst *>(inst) != nullptr || dynamic_cast<SelectInst *>(inst) != nullptr ||
+           dynamic_cast<SIToFPInst *>(inst) != nullptr || dynamic_cast<FPToSIInst *>(inst) != nullptr ||
+           dynamic_cast<PhiInst *>(inst) != nullptr;
+}
+
+/// @brief 克隆指令外壳（操作数暂指向原值，由调用方统一重映射；phi 入边不填）
+Instruction * cloneVersionInstructionShell(Instruction * inst, Function * func)
+{
+    if (auto * binary = dynamic_cast<BinaryInst *>(inst)) {
+        return new BinaryInst(func, binary->getOp(), binary->getLHS(), binary->getRHS(), binary->getType());
+    }
+    if (auto * icmp = dynamic_cast<ICmpInst *>(inst)) {
+        return new ICmpInst(func, icmp->getOp(), icmp->getLHS(), icmp->getRHS(), icmp->getType());
+    }
+    if (auto * fcmp = dynamic_cast<FCmpInst *>(inst)) {
+        return new FCmpInst(func, fcmp->getOp(), fcmp->getLHS(), fcmp->getRHS(), fcmp->getType());
+    }
+    if (auto * load = dynamic_cast<LoadInst *>(inst)) {
+        return new LoadInst(func, load->getPointerOperand(), load->getType());
+    }
+    if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+        return new StoreInst(func, store->getValueOperand(), store->getPointerOperand());
+    }
+    if (auto * gep = dynamic_cast<GetElementPtrInst *>(inst)) {
+        return new GetElementPtrInst(func, gep->getBasePointer(), gep->getIndexOperand(), gep->getType(),
+                                     gep->isArrayDecayGEP());
+    }
+    if (auto * zext = dynamic_cast<ZExtInst *>(inst)) {
+        return new ZExtInst(func, zext->getSource(), zext->getType());
+    }
+    if (auto * select = dynamic_cast<SelectInst *>(inst)) {
+        return new SelectInst(func, select->getCondition(), select->getTrueValue(), select->getFalseValue(),
+                              select->getType());
+    }
+    if (auto * sitofp = dynamic_cast<SIToFPInst *>(inst)) {
+        return new SIToFPInst(func, sitofp->getSource(), sitofp->getType());
+    }
+    if (auto * fptosi = dynamic_cast<FPToSIInst *>(inst)) {
+        return new FPToSIInst(func, fptosi->getSource(), fptosi->getType());
+    }
+    if (dynamic_cast<PhiInst *>(inst) != nullptr) {
+        return new PhiInst(func, inst->getType());
+    }
+    return nullptr;
 }
 
 const ScalarEvolution::AddRecurrenceExpr * getLoopIndexRecurrence(GetElementPtrInst * gep,
@@ -909,6 +974,13 @@ bool LoopStrengthReduce::reduceInvariantStrideGEP(BasicBlock * header,
         stepIdx = stepMul;
     }
 
+    // 先尝试构造运行期无回绕检查守护的快路径克隆：此刻循环仍是原始 mul 形态，
+    // 克隆体内的下标计算被改写为 64 位指针递推。无论成败，原循环随后都改写为
+    // i32 下标递推——版本化成功时作为检查不通过的慢路径兜底，失败时作为唯一路径。
+    // 版本化成功后 header 的环外前驱变为 slowEntry，新增 phi 的入边块须随之切换。
+    BasicBlock * slowEntry = tryVersionInvariantStrideLoop(header, preheader, latch, loopBody, seed, ivPhi,
+                                                           ivInit, ivStep, initIdx, stepIdx);
+
     // 下标递推：idxPhi = phi [initIdx, preheader], [idxPhi + stepIdx, latch]
     // 全程停留在 i32，回绕行为与原 IV*S+C 逐迭代一致
     auto * idxPhi = new PhiInst(func, i32Type);
@@ -916,7 +988,7 @@ bool LoopStrengthReduce::reduceInvariantStrideGEP(BasicBlock * header,
 
     insertPhiAtHeader(header, idxPhi);
     insertBeforeTerminator(latch, nextIdx);
-    idxPhi->addIncoming(initIdx, preheader);
+    idxPhi->addIncoming(initIdx, slowEntry != nullptr ? slowEntry : preheader);
     idxPhi->addIncoming(nextIdx, latch);
 
     // 保留 gep 本身（地址仍由 base + sext(idx)*elemSize 现算），只换掉下标来源
@@ -926,7 +998,553 @@ bool LoopStrengthReduce::reduceInvariantStrideGEP(BasicBlock * header,
     seed->clearOperands();
     seed->setDead(true);
 
+    if (slowEntry != nullptr) {
+        func->getAnalysisCache().invalidateCFGAnalyses();
+    }
     return true;
+}
+
+/// @brief 为不变量步长下标递推构造"运行期无回绕检查 + 快慢双版本循环"
+///
+/// 慢路径（i32 下标递推）无条件精确但每迭代需 slli+add 现算地址；快路径
+/// （64 位指针递推）每迭代仅一条加法，但只有 i32 下标序列全程不回绕时才与
+/// 源语义一致。本方法构造两级运行期检查，"证明"该前提后才进入快路径克隆，
+/// 否则回落原循环：
+///
+///   编译期前提：s == 1，IV0 为非负常量 v0（v0 < INT32_MAX），
+///              循环体 ≤3 块（收益门控，见正文）
+///   preheader:  km = Bound - (v0+1)            —— 步数上界 kmax
+///               km ≥ kMinProfitableTrips ? → checkBlock : → slowPre
+///   checkBlock: q = (INT32_MAX - initIdx) / km
+///               (initIdx|stepIdx) ≥ 0 ∧ stepIdx ≤ q ? → fastPre : → slowPre
+///
+/// 小行程循环在 preheader 只付 2 条指令便回落精确慢路径——此时每迭代 +2
+/// 指令的总代价上限 2·km 本就与检查成本同量级，版本化无利可图。
+///
+/// 精确性论证（回绕语义下逐点成立，检查只做证明、不做假设）：
+///   (i)  头测 IV < Bound 门控每次迭代：若有任何迭代执行则 Bound ≥ v0+1 ≥ 1，
+///        km 的 i32 计算不回绕；Bound ≤ v0 时循环零迭代，快慢路径平凡一致，
+///        检查取值无关紧要（km 即使回绕也只影响选路，不影响正确性）。
+///   (ii) s == 1 且每次继续前都通过 IV < Bound ≤ INT32_MAX，IV+1 恒不回绕，
+///        故第 k 次迭代 IV = v0+k 精确成立且 k ≤ km；进入 checkBlock 时
+///        km ≥ kMinProfitableTrips ≥ 1，除法无需钳制除数。
+///   (iii) 理想下标 E_k = initIdx + k·stepIdx：E_0 = initIdx ≥ 0 且单调不减
+///        （两个非负条件合并为符号位测试 (initIdx|stepIdx) ≥ 0），
+///        E_k ≤ initIdx + km·((INT32_MAX-initIdx)/km) ≤ INT32_MAX。
+///        全程 E_k ∈ [0, INT32_MAX] ⇒ wrap32(E_k) = E_k ⇒ 指针递推
+///        base+4·E_k 与源地址 base+4·sext(wrap32(E_k)) 相等。
+///   检查不成立（含负步长、负起点、可能越界）一律走慢路径，正确性由
+///   慢路径的模 2^32 环同态论证兜底；快路径执行的前提被运行期证明，
+///   两条路径均不利用有符号溢出未定义行为。
+///
+/// 结构改写：preheader 原无条件跳转改为 condbr(km≥T, checkBlock, slowPre)；
+/// checkBlock 以 condbr(fast, fastPre, slowPre) 收尾；slowPre 空块入原循环，
+/// 使 header 恒保持 slowPre+latch 双前驱。fastPre 物化 initPtr 后进入循环
+/// 克隆；克隆内种子 gep 替换为 ptrPhi = phi [initPtr, fastPre],
+/// [gep(ptrPhi, stepIdx), latchClone]。出口块 phi 为克隆出口边补入映射值。
+/// @brief 匹配 GuardedTailCollapse 钳制出的嵌套三角形态，构造整体提升到外层
+///        循环之外的无回绕检查
+///
+/// 目标形态（transpose 类三角遍历，GTC 折叠后的规范产物）：
+///   bound   = select(icmp lt(inv, B0), inv 或 inv+1, B0)   —— min 钳制
+///   initIdx = inv = 外层循环头 phi P（起点非负常量、步长 +1、头测 P < C0）
+///   S、B0、C0 在外层 preheader（P 的非递增入边块 outerPre）处已可用
+///
+/// 此时每行 i 的下标峰值可整体伸缩：
+///   E_i = i + km_i·S，km_i = bound_i - 1 ≤ B0-1（min 钳制保证），i ≤ C0-1
+///   ⇒ max_i E_i ≤ (C0-1) + (B0-1)·S
+/// 于是一次性在 outerPre 检查
+///   S ≥ 0 ∧ C0-1 ≥ 0 ∧ S ≤ (INT32_MAX - (C0-1)) / max(B0-1, 1)
+/// 便覆盖全部行；行内选路退化为一条对提升 i1 的条件跳转，小行程行不再支付
+/// 逐行检查。B0 ≤ 1 或 C0 ≤ 0 的角落里被除数/被减数即使回绕也只影响选路
+/// （相应行/整个嵌套零迭代，快慢平凡一致），不影响正确性。
+/// 外层 IV 自身不回绕由起点非负常量 + 步长 1 + 头测 P < C0 ≤ INT32_MAX 保证，
+/// 与内层论证 (ii) 同构。
+/// @return 提升检查的 i1 结果值；形态不匹配返回空（回落逐行两级检查）
+Value * LoopStrengthReduce::tryBuildHoistedNestCheck(BasicBlock * preheader,
+                                                     Value * bound,
+                                                     Value * initIdx,
+                                                     Value * stepIdx,
+                                                     Type * i1Type,
+                                                     Type * i32Type)
+{
+    auto * sel = dynamic_cast<SelectInst *>(bound);
+    if (!sel) {
+        return nullptr;
+    }
+    auto * selCmp = dynamic_cast<ICmpInst *>(sel->getCondition());
+    if (!selCmp || selCmp->getOp() != IRInstOperator::IRINST_OP_LT_I) {
+        return nullptr;
+    }
+    Value * inv = selCmp->getLHS();
+    Value * b0 = sel->getFalseValue();
+    if (selCmp->getRHS() != b0) {
+        return nullptr;
+    }
+
+    // 真臂须为 inv 或 inv+1，保证 select 结果 ≤ B0
+    auto matchPlusOne = [](Value * value, Value * base) -> bool {
+        auto * add = dynamic_cast<BinaryInst *>(value);
+        if (!add || add->getOp() != IRInstOperator::IRINST_OP_ADD_I) {
+            return false;
+        }
+        auto * lhsConst = dynamic_cast<ConstInteger *>(add->getLHS());
+        auto * rhsConst = dynamic_cast<ConstInteger *>(add->getRHS());
+        return (add->getLHS() == base && rhsConst && rhsConst->getVal() == 1) ||
+               (add->getRHS() == base && lhsConst && lhsConst->getVal() == 1);
+    };
+    Value * trueArm = sel->getTrueValue();
+    if (trueArm != inv && !matchPlusOne(trueArm, inv)) {
+        return nullptr;
+    }
+
+    // initIdx 必须就是钳制不变量本身，且为外层循环头 phi
+    if (inv != initIdx) {
+        return nullptr;
+    }
+    auto * outerIv = dynamic_cast<PhiInst *>(inv);
+    if (!outerIv || outerIv->getIncomingCount() != 2) {
+        return nullptr;
+    }
+
+    // 外层归纳结构：一条入边为 add(P, 1)，另一条入边为非负常量起点
+    BasicBlock * outerPre = nullptr;
+    ConstInteger * outerInit = nullptr;
+    bool haveOuterStep = false;
+    for (int32_t i = 0; i < outerIv->getIncomingCount(); ++i) {
+        Value * incoming = outerIv->getIncomingValue(i);
+        if (matchPlusOne(incoming, outerIv)) {
+            haveOuterStep = true;
+            continue;
+        }
+        outerPre = outerIv->getIncomingBlock(i);
+        outerInit = dynamic_cast<ConstInteger *>(incoming);
+    }
+    if (!haveOuterStep || !outerPre || !outerInit || outerInit->getVal() < 0 ||
+        outerInit->getVal() >= std::numeric_limits<int32_t>::max()) {
+        return nullptr;
+    }
+
+    // 外层头测 P < C0（真分支入体），内层 preheader 须被外层体支配——
+    // 保证内层每次进入时 P < C0 成立
+    BasicBlock * outerHeader = outerIv->getParentBlock();
+    auto * outerBr = dynamic_cast<CondBranchInst *>(outerHeader->getTerminator());
+    if (!outerBr) {
+        return nullptr;
+    }
+    auto * outerCmp = dynamic_cast<ICmpInst *>(outerBr->getCondition());
+    if (!outerCmp) {
+        return nullptr;
+    }
+    Value * outerBound = nullptr;
+    if (outerCmp->getOp() == IRInstOperator::IRINST_OP_LT_I && outerCmp->getLHS() == outerIv) {
+        outerBound = outerCmp->getRHS();
+    } else if (outerCmp->getOp() == IRInstOperator::IRINST_OP_GT_I && outerCmp->getRHS() == outerIv) {
+        outerBound = outerCmp->getLHS();
+    } else {
+        return nullptr;
+    }
+    BasicBlock * outerBody = outerBr->getTrueDest();
+    if (outerBody == outerHeader) {
+        return nullptr;
+    }
+
+    auto & cache = func->getAnalysisCache();
+    auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+    if (!domTree.dominates(outerPre, preheader) || !domTree.dominates(outerBody, preheader)) {
+        return nullptr;
+    }
+
+    // S、B0、C0 在 outerPre 末尾可用（常量/形参/全局天然可用，指令须支配 outerPre）
+    auto availableAtOuterPre = [&domTree, outerPre](Value * value) -> bool {
+        auto * inst = dynamic_cast<Instruction *>(value);
+        if (!inst) {
+            return true;
+        }
+        BasicBlock * defBlock = inst->getParentBlock();
+        return defBlock && (defBlock == outerPre || domTree.dominates(defBlock, outerPre));
+    };
+    if (!availableAtOuterPre(stepIdx) || !availableAtOuterPre(b0) || !availableAtOuterPre(outerBound)) {
+        return nullptr;
+    }
+
+    // ---- outerPre 一次性物化整嵌套检查 ----
+    auto * zeroConst = mod->newConstInt32(0);
+    auto * oneConst = mod->newConstInt32(1);
+    auto * intMaxConst = mod->newConstInt32(std::numeric_limits<int32_t>::max());
+
+    auto * b0m1 = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, b0, oneConst, i32Type);
+    insertBeforeTerminator(outerPre, b0m1);
+    auto * b0Positive = new ICmpInst(func, IRInstOperator::IRINST_OP_GT_I, b0m1, zeroConst, i1Type);
+    insertBeforeTerminator(outerPre, b0Positive);
+    auto * b0Clamped = new SelectInst(func, b0Positive, b0m1, oneConst, i32Type);
+    insertBeforeTerminator(outerPre, b0Clamped);
+    auto * c0m1 = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, outerBound, oneConst, i32Type);
+    insertBeforeTerminator(outerPre, c0m1);
+    auto * room = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, intMaxConst, c0m1, i32Type);
+    insertBeforeTerminator(outerPre, room);
+    auto * quot = new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, room, b0Clamped, i32Type);
+    insertBeforeTerminator(outerPre, quot);
+    auto * signOr = new BinaryInst(func, IRInstOperator::IRINST_OP_OR_I, stepIdx, c0m1, i32Type);
+    insertBeforeTerminator(outerPre, signOr);
+    auto * signOk = new ICmpInst(func, IRInstOperator::IRINST_OP_GE_I, signOr, zeroConst, i1Type);
+    insertBeforeTerminator(outerPre, signOk);
+    auto * stepFits = new ICmpInst(func, IRInstOperator::IRINST_OP_LE_I, stepIdx, quot, i1Type);
+    insertBeforeTerminator(outerPre, stepFits);
+    auto * signZext = new ZExtInst(func, signOk, i32Type);
+    insertBeforeTerminator(outerPre, signZext);
+    auto * fitsZext = new ZExtInst(func, stepFits, i32Type);
+    insertBeforeTerminator(outerPre, fitsZext);
+    auto * andAll = new BinaryInst(func, IRInstOperator::IRINST_OP_AND_I, signZext, fitsZext, i32Type);
+    insertBeforeTerminator(outerPre, andAll);
+    auto * hoistedOk = new ICmpInst(func, IRInstOperator::IRINST_OP_NE_I, andAll, zeroConst, i1Type);
+    insertBeforeTerminator(outerPre, hoistedOk);
+
+    return hoistedOk;
+}
+
+/// @return 版本化成功返回原循环新的环外前驱 slowPre（CFG 已改变，调用方需
+///         失效 CFG 分析，且为 header 新增 phi 须以 slowPre 为入边块）；
+///         放弃版本化返回空指针
+BasicBlock * LoopStrengthReduce::tryVersionInvariantStrideLoop(BasicBlock * header,
+                                                               BasicBlock * preheader,
+                                                               BasicBlock * latch,
+                                                               const std::unordered_set<BasicBlock *> & loopBody,
+                                                               GetElementPtrInst * seed,
+                                                               PhiInst * ivPhi,
+                                                               Value * ivInit,
+                                                               int32_t ivStep,
+                                                               Value * initIdx,
+                                                               Value * stepIdx)
+{
+    if (std::getenv("MINIC_DISABLE_LSR_VERSIONING") != nullptr) {
+        return nullptr;
+    }
+
+    // 编译期前提：s == 1（IV 递增不回绕由 Bound ≤ INT32_MAX 免费保证），
+    // IV0 为非负常量（km 的构造与论证 (ii) 依赖 v0 编译期已知且非负）
+    if (ivStep != 1) {
+        return nullptr;
+    }
+    auto * ivInitConst = dynamic_cast<ConstInteger *>(ivInit);
+    if (!ivInitConst || ivInitConst->getVal() < 0 ||
+        ivInitConst->getVal() >= std::numeric_limits<int32_t>::max()) {
+        return nullptr;
+    }
+
+    // preheader 以无条件跳转入 header（未被版本化过；版本化后的 preheader
+    // 是 condbr 终结，天然拒绝对同一循环二次版本化）
+    auto * preBr = dynamic_cast<BranchInst *>(preheader->getTerminator());
+    if (!preBr || preBr->getTarget() != header) {
+        return nullptr;
+    }
+
+    // header 终结：condbr(icmp IV < Bound)，真分支入环、假分支出环
+    // （与 GuardedTailCollapse 相同的规范非旋转计数循环形态），Bound 循环不变
+    auto * headerBr = dynamic_cast<CondBranchInst *>(header->getTerminator());
+    if (!headerBr) {
+        return nullptr;
+    }
+    auto * exitCmp = dynamic_cast<ICmpInst *>(headerBr->getCondition());
+    if (!exitCmp) {
+        return nullptr;
+    }
+    Value * bound = nullptr;
+    if (exitCmp->getOp() == IRInstOperator::IRINST_OP_LT_I && exitCmp->getLHS() == ivPhi) {
+        bound = exitCmp->getRHS();
+    } else if (exitCmp->getOp() == IRInstOperator::IRINST_OP_GT_I && exitCmp->getRHS() == ivPhi) {
+        bound = exitCmp->getLHS();
+    } else {
+        return nullptr;
+    }
+    if (isDefinedInLoop(bound, loopBody)) {
+        return nullptr;
+    }
+    BasicBlock * bodyEntry = headerBr->getTrueDest();
+    BasicBlock * exitBlock = headerBr->getFalseDest();
+    if (loopBody.find(bodyEntry) == loopBody.end() || loopBody.find(exitBlock) != loopBody.end()) {
+        return nullptr;
+    }
+
+    // 收益门控：仅版本化 ≤3 块的最内层小循环。种子 gep 每迭代都被寻址时
+    // 指针递推才有每迭代收益；大循环体（如含嵌套循环的外层行循环）克隆
+    // 只带来代码膨胀与寄存器压力，种子 gep 在其中每迭代仅省一条乘法级
+    // 的准备指令，得不偿失。≤3 块 + 唯一 latch 的形态下也天然排除嵌套子循环。
+    if (loopBody.size() > 3) {
+        return nullptr;
+    }
+
+    // 唯一出环边 header→exitBlock：论证 (ii) 要求每次迭代都由头测门控，
+    // 且出口值合并只需处理一条克隆出口边；环内不得有其他回边（自环块）
+    for (auto * bb : loopBody) {
+        for (auto * succ : bb->getSuccessors()) {
+            if (loopBody.find(succ) == loopBody.end()) {
+                if (bb != header || succ != exitBlock) {
+                    return nullptr;
+                }
+                continue;
+            }
+            if (succ == bb && bb != header) {
+                return nullptr;
+            }
+            if (succ == header && bb != latch) {
+                return nullptr;
+            }
+        }
+    }
+
+    // 环内定义值的环外使用仅允许一种形态：exitBlock 内 phi 经 header 出口边引用。
+    // 克隆后为其补入克隆出口边的映射值即可保持出口值一致；其余逃逸一律放弃。
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            for (auto * use : inst->getUseList()) {
+                auto * userInst = dynamic_cast<Instruction *>(use->getUser());
+                if (!userInst || !userInst->getParentBlock()) {
+                    return nullptr;
+                }
+                if (loopBody.find(userInst->getParentBlock()) != loopBody.end()) {
+                    continue;
+                }
+                auto * exitPhi = dynamic_cast<PhiInst *>(userInst);
+                if (!exitPhi || exitPhi->getParentBlock() != exitBlock) {
+                    return nullptr;
+                }
+                for (int32_t k = 0; k < exitPhi->getIncomingCount(); ++k) {
+                    if (exitPhi->getIncomingValue(k) == inst && exitPhi->getIncomingBlock(k) != header) {
+                        return nullptr;
+                    }
+                }
+            }
+        }
+    }
+
+    // 全部指令可克隆：终结仅限 br/condbr，非终结须在克隆白名单内。
+    // 早前削减留下的 isDead 尸体（操作数已清空、待 sweep）直接跳过不克隆。
+    for (auto * bb : loopBody) {
+        for (auto * inst : bb->getInstructions()) {
+            if (inst->isDead()) {
+                continue;
+            }
+            if (inst->isTerminator()) {
+                if (dynamic_cast<BranchInst *>(inst) == nullptr &&
+                    dynamic_cast<CondBranchInst *>(inst) == nullptr) {
+                    return nullptr;
+                }
+                continue;
+            }
+            if (!isVersionCloneableInstruction(inst)) {
+                return nullptr;
+            }
+        }
+    }
+
+    Type * i1Type = exitCmp->getType();
+    Type * i32Type = ivPhi->getType();
+    Type * elemPtrType = seed->getType();
+    Value * base = seed->getBasePointer();
+
+    // ---- 检查构造：优先嵌套提升，一次覆盖全部行；否则逐行两级检查 ----
+    // 提升模式：检查整体位于外层循环之外，preheader 只剩一条对提升 i1 的
+    // 条件跳转，小行程行几乎零开销。
+    // 两级模式：preheader 付 2 条指令的行程门槛，kmax < kMinProfitableTrips
+    // 的小行程循环直接走精确慢路径（此时每迭代 +2 指令的代价上限本就与检查
+    // 成本同量级）；大行程才进入 checkBlock 支付含除法的无回绕检查。
+    Value * hoistedOk = tryBuildHoistedNestCheck(preheader, bound, initIdx, stepIdx, i1Type, i32Type);
+
+    Value * gateCond = hoistedOk;
+    BasicBlock * checkBlock = nullptr;
+    Value * fastOk = nullptr;
+    if (hoistedOk == nullptr) {
+        auto * zeroConst = mod->newConstInt32(0);
+        auto * intMaxConst = mod->newConstInt32(std::numeric_limits<int32_t>::max());
+        constexpr int32_t kMinProfitableTrips = 8;
+
+        auto * km = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, bound,
+                                   mod->newConstInt32(ivInitConst->getVal() + 1), i32Type);
+        insertBeforeTerminator(preheader, km);
+        auto * kmBig = new ICmpInst(func, IRInstOperator::IRINST_OP_GE_I, km,
+                                    mod->newConstInt32(kMinProfitableTrips), i1Type);
+        insertBeforeTerminator(preheader, kmBig);
+        gateCond = kmBig;
+
+        // checkBlock：kmax ≥ kMinProfitableTrips ≥ 1，无需再钳制除数；
+        // initIdx ≥ 0 ∧ stepIdx ≥ 0 合并为符号位测试 (initIdx | stepIdx) ≥ 0
+        checkBlock = func->newBasicBlock();
+        auto * room = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, intMaxConst, initIdx, i32Type);
+        checkBlock->addInstruction(room);
+        auto * quot = new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, room, km, i32Type);
+        checkBlock->addInstruction(quot);
+        auto * signOr = new BinaryInst(func, IRInstOperator::IRINST_OP_OR_I, initIdx, stepIdx, i32Type);
+        checkBlock->addInstruction(signOr);
+        auto * bothNonNeg = new ICmpInst(func, IRInstOperator::IRINST_OP_GE_I, signOr, zeroConst, i1Type);
+        checkBlock->addInstruction(bothNonNeg);
+        auto * stepFits = new ICmpInst(func, IRInstOperator::IRINST_OP_LE_I, stepIdx, quot, i1Type);
+        checkBlock->addInstruction(stepFits);
+        auto * nonNegZext = new ZExtInst(func, bothNonNeg, i32Type);
+        checkBlock->addInstruction(nonNegZext);
+        auto * fitsZext = new ZExtInst(func, stepFits, i32Type);
+        checkBlock->addInstruction(fitsZext);
+        auto * andAll = new BinaryInst(func, IRInstOperator::IRINST_OP_AND_I, nonNegZext, fitsZext, i32Type);
+        checkBlock->addInstruction(andAll);
+        auto * checkOk = new ICmpInst(func, IRInstOperator::IRINST_OP_NE_I, andAll, zeroConst, i1Type);
+        checkBlock->addInstruction(checkOk);
+        fastOk = checkOk;
+    }
+
+    // slowPre：选路的任一失败侧经此空块入原循环，维持 header 恒为
+    // 双前驱（slowPre + latch），下游循环规范化无需感知版本化
+    auto * slowPre = func->newBasicBlock();
+
+    // ---- 克隆循环体（两阶段：先外壳后重映射，仿 SmallFunctionInline） ----
+    std::vector<BasicBlock *> orderedLoopBlocks;
+    for (auto * bb : func->getBlocks()) {
+        if (loopBody.find(bb) != loopBody.end()) {
+            orderedLoopBlocks.push_back(bb);
+        }
+    }
+
+    auto * fastPre = func->newBasicBlock();
+    std::unordered_map<BasicBlock *, BasicBlock *> blockMap;
+    for (auto * bb : orderedLoopBlocks) {
+        blockMap[bb] = func->newBasicBlock();
+    }
+
+    std::unordered_map<Value *, Value *> valueMap;
+    auto mapValue = [&valueMap](Value * value) -> Value * {
+        auto it = valueMap.find(value);
+        return it == valueMap.end() ? value : it->second;
+    };
+    auto mapBlock = [&blockMap](BasicBlock * bb) -> BasicBlock * {
+        auto it = blockMap.find(bb);
+        return it == blockMap.end() ? bb : it->second;
+    };
+
+    std::vector<std::pair<Instruction *, Instruction *>> clonedInsts;
+    for (auto * bb : orderedLoopBlocks) {
+        BasicBlock * cloneBB = blockMap[bb];
+        for (auto * inst : bb->getInstructions()) {
+            if (inst->isDead() || inst->isTerminator()) {
+                continue;
+            }
+            Instruction * cloned = cloneVersionInstructionShell(inst, func);
+            cloneBB->addInstruction(cloned);
+            clonedInsts.push_back({inst, cloned});
+            if (inst->hasResultValue()) {
+                valueMap[inst] = cloned;
+            }
+        }
+    }
+
+    for (auto & [orig, cloned] : clonedInsts) {
+        if (auto * origPhi = dynamic_cast<PhiInst *>(orig)) {
+            auto * clonedPhi = static_cast<PhiInst *>(cloned);
+            for (int32_t i = 0; i < origPhi->getIncomingCount(); ++i) {
+                BasicBlock * inBlock = origPhi->getIncomingBlock(i);
+                clonedPhi->addIncoming(mapValue(origPhi->getIncomingValue(i)),
+                                       inBlock == preheader ? fastPre : mapBlock(inBlock));
+            }
+            continue;
+        }
+        for (int32_t i = 0; i < cloned->getOperandsNum(); ++i) {
+            cloned->setOperand(i, mapValue(cloned->getOperand(i)));
+        }
+    }
+
+    for (auto * bb : orderedLoopBlocks) {
+        BasicBlock * cloneBB = blockMap[bb];
+        Instruction * term = bb->getTerminator();
+        if (auto * br = dynamic_cast<BranchInst *>(term)) {
+            BasicBlock * target = mapBlock(br->getTarget());
+            auto * clonedBr = new BranchInst(func, target);
+            cloneBB->addInstruction(clonedBr);
+            cloneBB->linkSuccessor(target);
+            continue;
+        }
+        auto * condBr = static_cast<CondBranchInst *>(term);
+        BasicBlock * trueTarget = mapBlock(condBr->getTrueDest());
+        BasicBlock * falseTarget = mapBlock(condBr->getFalseDest());
+        auto * clonedCond = new CondBranchInst(func, mapValue(condBr->getCondition()), trueTarget, falseTarget);
+        cloneBB->addInstruction(clonedCond);
+        cloneBB->linkSuccessor(trueTarget);
+        if (falseTarget != trueTarget) {
+            cloneBB->linkSuccessor(falseTarget);
+        }
+    }
+
+    // ---- fastPre：物化 initPtr 并进入克隆头 ----
+    auto * initPtr = new GetElementPtrInst(func, base, initIdx, elemPtrType, seed->isArrayDecayGEP());
+    fastPre->addInstruction(initPtr);
+    auto * fastEntryBr = new BranchInst(func, blockMap[header]);
+    fastPre->addInstruction(fastEntryBr);
+    fastPre->linkSuccessor(blockMap[header]);
+
+    // ---- 克隆内种子 gep 替换为指针递推 ----
+    auto * clonedSeed = static_cast<GetElementPtrInst *>(valueMap.at(seed));
+    auto * ptrPhi = new PhiInst(func, elemPtrType);
+    insertPhiAtHeader(blockMap[header], ptrPhi);
+    auto * nextPtr = new GetElementPtrInst(func, ptrPhi, stepIdx, elemPtrType, false);
+    insertBeforeTerminator(blockMap[latch], nextPtr);
+    ptrPhi->addIncoming(initPtr, fastPre);
+    ptrPhi->addIncoming(nextPtr, blockMap[latch]);
+    clonedSeed->replaceAllUseWith(ptrPhi);
+    clonedSeed->clearOperands();
+    clonedSeed->setDead(true);
+
+    // ---- 出口块 phi 补入克隆出口边（值取映射；克隆头零迭代时两侧初值一致） ----
+    for (auto * inst : exitBlock->getInstructions()) {
+        auto * exitPhi = dynamic_cast<PhiInst *>(inst);
+        if (!exitPhi) {
+            break;
+        }
+        Value * fromHeader = nullptr;
+        for (int32_t i = 0; i < exitPhi->getIncomingCount(); ++i) {
+            if (exitPhi->getIncomingBlock(i) == header) {
+                fromHeader = exitPhi->getIncomingValue(i);
+                break;
+            }
+        }
+        if (fromHeader != nullptr) {
+            exitPhi->addIncoming(mapValue(fromHeader), blockMap[header]);
+        }
+    }
+
+    // ---- 选路接线 ----
+    // 两级模式：preheader --gate--> checkBlock --fastOk--> fastPre --> 克隆循环
+    //                    \--else--> slowPre <----else-----/
+    // 提升模式：preheader --hoistedOk--> fastPre，else--> slowPre（无 checkBlock）
+    // slowPre --> header（原循环，唯一环外前驱改为 slowPre）
+    BasicBlock * gateTrueDest = checkBlock != nullptr ? checkBlock : fastPre;
+    auto & preInsts = preheader->getInstructions();
+    preInsts.pop_back();
+    preBr->clearOperands();
+    delete preBr;
+    auto * gateBr = new CondBranchInst(func, gateCond, gateTrueDest, slowPre);
+    gateBr->setParentBlock(preheader);
+    preInsts.push_back(gateBr);
+    preheader->removeSuccessor(header);
+    header->removePredecessor(preheader);
+    preheader->linkSuccessor(gateTrueDest);
+    preheader->linkSuccessor(slowPre);
+
+    if (checkBlock != nullptr) {
+        auto * checkBr = new CondBranchInst(func, fastOk, fastPre, slowPre);
+        checkBlock->addInstruction(checkBr);
+        checkBlock->linkSuccessor(fastPre);
+        checkBlock->linkSuccessor(slowPre);
+    }
+
+    auto * slowBr = new BranchInst(func, header);
+    slowPre->addInstruction(slowBr);
+    slowPre->linkSuccessor(header);
+    for (auto * inst : header->getInstructions()) {
+        auto * phi = dynamic_cast<PhiInst *>(inst);
+        if (!phi) {
+            break;
+        }
+        phi->replaceIncomingBlock(preheader, slowPre);
+    }
+
+    return slowPre;
 }
 
 bool LoopStrengthReduce::sweepDeadInstructions() const
