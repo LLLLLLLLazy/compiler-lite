@@ -90,6 +90,9 @@ jobs:
       - name: Run LICM speculation regression tests
         run: MINIC_TEST_MODE=asm MINIC_TEST_TIMEOUT=10 MINIC_ASM_OPT_LEVEL=1 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-tests.sh licm_regression
 
+      - name: Run pure-function SCC regression tests
+        run: QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-pure-function-regression.sh
+
       - name: Run matmul interchange validation tests
         run: MINIC_RISCV64_TIMEOUT=120 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh matmul
 

@@ -1,0 +1,24 @@
+int values[2];
+
+int sum(int count)
+{
+    if (count <= 0) {
+        return 0;
+    }
+    return values[count - 1] + sum(count - 1);
+}
+
+void set_first(int target[], int value)
+{
+    target[0] = value;
+}
+
+int main()
+{
+    values[0] = 1;
+    values[1] = 2;
+    int before = sum(2);
+    set_first(values, 5);
+    int after = sum(2);
+    return after - before;
+}
