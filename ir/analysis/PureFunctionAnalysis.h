@@ -9,15 +9,10 @@
 #include <unordered_set>
 
 class Function;
+class GlobalVariable;
 class Instruction;
 class Module;
-
-enum class PureFunctionState {
-    Unknown,
-    Visiting,
-    Pure,
-    Impure,
-};
+class Value;
 
 class PureFunctionAnalysis {
 public:
@@ -36,10 +31,30 @@ public:
     bool isMemoryIndependent(Function * function);
 
 private:
-    bool isInstructionAllowed(Instruction * inst);
+    /// @brief 在首次查询时对模块调用图做完整 SCC 分析
+    void analyzeModule();
+
+    /// @brief 通过形参写集合不动点证明模块中的只读全局对象
+    void analyzeReadOnlyGlobals();
+
+    /// @brief 判断地址是否为局部对象、形参或全局对象
+    /// @param pointer 待读地址
+    /// @return true 表示该地址允许出现在纯函数中
+    bool isAllowedReadPointer(Value * pointer) const;
+
+    /// @brief 判断地址是否不依赖调用者可变内存
+    /// @param pointer 待读地址
+    /// @return true 表示地址来自本帧对象或已证明只读的全局对象
+    bool isMemoryIndependentPointer(Value * pointer) const;
+
+    /// @brief 判断非调用指令是否满足无调用者可见副作用要求
+    /// @param inst 待检查指令
+    /// @return true 表示该指令的写入仅限本帧局部对象，读取来源可证明
+    bool isLocallyPureInstruction(Instruction * inst) const;
 
     Module * mod = nullptr;
-    std::unordered_map<Function *, PureFunctionState> states;
+    bool analyzed = false;
+    std::unordered_map<Function *, bool> pure;
     std::unordered_map<Function *, bool> memoryIndependent;
-    std::unordered_set<Function *> memoryIndepVisiting;
+    std::unordered_set<GlobalVariable *> readOnlyGlobals;
 };
