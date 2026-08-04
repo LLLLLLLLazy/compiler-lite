@@ -94,6 +94,15 @@ private:
     bool isSafeLoadToHoist(Instruction * inst,
                            const std::unordered_set<BasicBlock *> & loopBody) const;
 
+    /// @brief 判断外提该 load 的推测执行是否安全
+    /// @param inst 待外提的 load 指令
+    /// @param preheader 目标 preheader 基本块
+    /// @param domTree 当前函数的支配树
+    /// @return true 表示存在同指针 load 支配 preheader，地址必然可解引用
+    bool hasDominatingSamePointerLoad(Instruction * inst,
+                                      BasicBlock * preheader,
+                                      const DominatorTree & domTree) const;
+
     /// @brief 判断候选指令是否需要额外满足退出点支配约束
     /// @param inst 待检查的指令
     /// @return true 表示该指令不可安全推测执行

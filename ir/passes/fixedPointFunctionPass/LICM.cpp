@@ -255,9 +255,13 @@ bool LICM::tryHoistLoop(BasicBlock * header,
                 }
 
                 if (loadInst != nullptr) {
-                    // load 不得越过零次循环或条件执行路径外提
-                    // 必须证明原位置支配真实循环出口
-                    if (!dominatesAllLoopExits(bb, loopBody, domTree)) {
+                    // load 不得越过零次循环或条件执行路径外提，
+                    // 除非能证明推测执行安全：同指针的另一条 load 支配
+                    // preheader，说明该地址在进入循环前必然已被解引用，
+                    // 外提后的 load 不会引入新的内存错误；值的正确性由
+                    // isSafeLoadToHoist 的循环内无改写检查保证
+                    if (!dominatesAllLoopExits(bb, loopBody, domTree) &&
+                        !hasDominatingSamePointerLoad(inst, preheader, domTree)) {
                         rejectedCandidates[inst] = "load rejected: not dominating all exits";
                         continue;
                     }
@@ -529,6 +533,45 @@ bool LICM::isSafeLoadToHoist(Instruction * inst,
     MemoryLocation location = normalizeMemoryLocation(pointer);
     if (location.isPrecise() && !doesPointerEscape(location.object)) {
         return !blocksMayClobberLoad(pointer, loopBody, mayClobberCall);
+    }
+
+    return false;
+}
+
+/// @brief 判断外提该 load 的推测执行是否安全
+/// @param inst 待外提的 load 指令
+/// @param preheader 目标 preheader 基本块
+/// @param domTree 当前函数的支配树
+/// @return true 表示存在同指针 load 支配 preheader，地址必然可解引用
+bool LICM::hasDominatingSamePointerLoad(Instruction * inst,
+                                        BasicBlock * preheader,
+                                        const DominatorTree & domTree) const
+{
+    auto * load = dynamic_cast<LoadInst *>(inst);
+    if (!load || !preheader) {
+        return false;
+    }
+
+    Value * pointer = load->getPointerOperand();
+    auto * pointerInst = dynamic_cast<Instruction *>(pointer);
+    if (!pointerInst) {
+        return false;
+    }
+
+    for (auto * use : pointerInst->getUseList()) {
+        auto * otherLoad = dynamic_cast<LoadInst *>(use->getUser());
+        if (!otherLoad || otherLoad == load || otherLoad->isDead()) {
+            continue;
+        }
+
+        if (otherLoad->getPointerOperand() != pointer) {
+            continue;
+        }
+
+        BasicBlock * otherBlock = otherLoad->getParentBlock();
+        if (otherBlock && domTree.dominates(otherBlock, preheader)) {
+            return true;
+        }
     }
 
     return false;
