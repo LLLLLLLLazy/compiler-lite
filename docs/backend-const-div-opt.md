@@ -85,7 +85,7 @@ flowchart TD
     Pow2Check -- "Yes" --> LoadSrc("加载被除数到lhs寄存器<br>loadOperand(lhs, inst, dstReg)")
     LoadSrc --> BorrowBias("借用bias临时寄存器<br>tempMgr.borrowExcluding()")
 
-    BorrowBias --> GenBias("生成bias: 符号掩码右移<br>sraiw bias, src, 31<br>srliw bias, bias, (32-shift)")
+    BorrowBias --> GenBias("生成bias: 符号掩码右移<br>shift==1: bias=符号位, 单条 srliw<br>shift>1: sraiw bias,src,31; srliw bias,bias,(32-shift)")
     GenBias --> GenAdd("加bias: 截断修正<br>addw dst, src, bias")
     GenAdd --> GenShift("算术右移: 得到商<br>sraiw dst, dst, shift")
 
@@ -121,6 +121,13 @@ addw   dst, x, bias        # dst = x + bias (截断修正)
 sraiw  dst, dst, 2         # dst = (x+bias) >> 2 = x/4
 ```
 
+**除以 2 特例**（shift==1，bias 即符号位，省一条 sraiw）：
+```asm
+srliw  bias, x, 31         # bias = (x<0) ? 1 : 0
+addw   dst, x, bias
+sraiw  dst, dst, 1
+```
+
 ## 2的幂次取模优化 (tryTranslateModBySmallPowerOfTwo)
 
 余数按 `x - (x / d) * d` 生成，复用除法的移位序列计算商，再乘回除数后相减。
@@ -139,12 +146,9 @@ flowchart TD
 
     NegDivCheck -- "Yes" --> NegQuotient("取反商: subw q, zero, q")
     NegDivCheck -- "No" --> GenProduct
-    NegQuotient --> GenProduct("乘回除数: slliw q, q, shift")
+    NegQuotient --> GenProduct("清低位得商×d<br>shift≤11: andi q,q,-(2^shift)<br>shift>11: sraiw+slliw 移位对")
 
-    GenProduct --> NegDivCheck2{{"除数为负?"}}
-    NegDivCheck2 -- "Yes" --> NegProduct("取反积: subw q, zero, q")
-    NegDivCheck2 -- "No" --> GenRem
-    NegProduct --> GenRem("求余: subw dst, src, q<br>rem = x - quotient * d")
+    GenProduct --> GenRem("求余: subw dst, src, q<br>rem = x - floor_biased(x)<br>(余数与除数符号无关，无需取反)")
 
     GenRem --> StoreResult("存储结果")
     StoreResult --> Success(["返回 true"])
@@ -389,10 +393,13 @@ flowchart TD
 
 | 除数类型 | 优化方法 | 生成指令 | 性能 |
 |----------|----------|----------|------|
-| 2的幂次 (2,4,8,16,...) | 移位+bias修正 | sraiw+srliw+addw+sraiw (4条) | 最快 |
+| 2 (shift=1) | 移位+bias(单条srliw) | srliw+addw+sraiw (3条) | 最快 |
+| 2的幂次 (4,8,16,...) | 移位+bias修正 | sraiw+srliw+addw+sraiw (4条) | 最快 |
 | 一般常量 (3,5,7,...) | Magic number乘法+移位 | li+mul+srai+addw/subw+sraiw+srliw+addw (7-8条) | 较快 |
 | 非常量 | 回退到硬件除法 | divw (1条，但周期长) | 最慢 |
 | ±1 | 特例处理 | mv 或 subw (1条) | 最快 |
 | INT_MIN | 特例处理 | li+subw+seqz (3条) | 快 |
+
+> **取模优化补充**：对于 2 的幂次取模，当 `shift <= 11` 时用 `andi q, q, -(2^shift)` 替代 `sraiw+slliw` 清低位；当 `shift == 1` 时 bias 仅需 `srliw src, 31`。余数符号与除数符号无关，无需取反修正。
 
 > **注意**：IR层的 `InstCombine` 和 `ConstProp` Pass 也会在指令选择之前折叠部分常量除法（如 `x/1 → x`，`x%1 → 0`），后端的常量除法优化处理的是IR层未能折叠的运行时常量除法场景。

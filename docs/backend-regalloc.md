@@ -10,20 +10,25 @@ flowchart TD
     BuiltinCheck -- "Yes" --> Return(["直接返回"])
     BuiltinCheck -- "No" --> BuildPool["构建可用物理寄存器池<br>buildRegisterPool(func)<br>t0-t2, a0-a7, s1-s11, t5-t6"]
 
-    BuildPool --> BuildFloatPool["构建可用浮点寄存器池<br>buildFloatRegisterPool(func): ft0-ft7, fa0-fa7, ft8-ft9 (18个caller-saved FPR)<br>ft10-ft11 保留作指令选择临时FPR<br>默认经 CalleeSavedFPREnabler 追加 fs0-fs11"]
+    BuildPool --> BuildFloatPool["构建可用浮点寄存器池<br>buildFloatRegisterPool(func): ft0-ft7, fa0-fa7, ft8-ft9 (18个caller-saved FPR)<br>ft10-ft11 保留作指令选择临时FPR<br>默认经 CalleeSavedFPREnabler 追加 fs0-fs11 → 共30个"]
     BuildFloatPool --> DomTree["构建支配树<br>DominatorTree(func)"]
     DomTree --> LoopInfo["循环分析<br>LoopInfo(func, domTree)"]
     LoopInfo --> SetDepth["设置基本块循环深度<br>bb->setLoopDepth()"]
 
     SetDepth --> LIA["活跃区间分析<br>LiveIntervalAnalysis(func, loopInfo)"]
     LIA --> LIARun["analysis.run()<br>computeLiveIntervals() +<br>buildInterferenceGraph()"]
-    LIARun --> RecordCall["记录CallInst指令编号<br>callInstNumbers"]
-    RecordCall --> BuildIndex["建立LiveInterval→索引映射 intervalToIndex<br>(随后默认执行寄存器合并 RegCoalescer)"]
+    LIARun --> RecordCall["记录CallInst指令编号<br>收集split候选点(循环内指令编号)"]
+    RecordCall --> BuildIndex["建立LiveInterval→索引映射 intervalToIndex<br>建立valueToInterval反向映射"]
+    BuildIndex --> PreciseSnapshot["快照精确def-use活跃段<br>供RegCoalescer做hole-aware干涉判断"]
 
-    BuildIndex --> RunGreedy["运行Greedy分配主循环<br>runGreedy(intervals, graph)"]
+    PreciseSnapshot --> Coalesce["RegCoalescer::run()<br>消除冗余copy: 合并不干涉的src/dst虚拟寄存器<br>(含回边携带空洞守卫、二元破坏性更新伪干涉识别)"]
+    Coalesce --> Remat["Rematerialization分析<br>isCheapRematerializable()判定<br>常量/GEP链/廉价add-shl链标记为可重物化"]
+
+    Remat --> RunGreedy["运行Greedy分配主循环<br>runGreedy(intervals, graph)<br>含LiveIntervalSplitter分裂"]
     RunGreedy --> Rebuild["重建分配映射表<br>rebuildAllocationMap(intervals)"]
     Rebuild --> SaveLive["保存活跃性快照<br>valueLiveRanges"]
-    SaveLive --> End(["结束: 寄存器分配完成"])
+    SaveLive --> CollectFPR["收集被使用的callee-saved FPR<br>CalleeSavedFPREnabler::collectUsedCalleeSavedFPRs()"]
+    CollectFPR --> End(["结束: 寄存器分配完成"])
 
     %%Node styles
     classDef default fill:#E2EAFE4F,stroke:#5A88F6AF
@@ -142,7 +147,13 @@ flowchart TD
     TryEvict --> EvictOk{{"驱逐成功?"}}
 
     EvictOk -- "Yes" --> MoreCheck
-    EvictOk -- "No" --> Spill2["(默认先 splitter->trySplit() 分裂)<br>分裂失败再 markSpilled(interval) 标记为溢出"]
+    EvictOk -- "No" --> TrySplit["splitter->trySplit()<br>在调用点/循环边界分裂区间<br>分裂成功则子区间重新入队"]
+    TrySplit --> SplitOk{{"分裂成功?"}}
+    SplitOk -- "Yes" --> MoreCheck
+    SplitOk -- "No" --> RematCheck{{"可重物化?<br>isCheapRematerializable()"}}
+    RematCheck -- "Yes" --> RematSpill["rematOnlySpill<br>不占栈槽,使用点现场重算"]
+    RematCheck -- "No" --> Spill2["markSpilled(interval)<br>标记为溢出,分配栈槽"]
+    RematSpill --> MoreCheck
     Spill2 --> MoreCheck
 
     MoreCheck -- "Yes" --> NextIter
@@ -156,11 +167,11 @@ flowchart TD
     %%Link styles
     linkStyle default stroke:#666666AF,stroke-width:2px
     linkStyle 4,8 stroke:#339933AF,stroke-width:2px
-    linkStyle 5,9,11 stroke:#DD3333AF,stroke-width:2px
+    linkStyle 5,9,11,13,15 stroke:#DD3333AF,stroke-width:2px
 
     %%Node classes
     class Start,End endNode
-    class ValidCheck,ForcedCheck,FreeOk,EvictOk,MoreCheck decisionNode
+    class ValidCheck,ForcedCheck,FreeOk,EvictOk,SplitOk,RematCheck,MoreCheck decisionNode
 ```
 
 ## tryAssignFreeReg 详细流程
@@ -280,6 +291,54 @@ flowchart TD
 | callee-saved | fs2-fs11 | 18-27 | 保存寄存器 (默认 `--ra-callee-saved-fpr` 开启时纳入分配) |
 
 > **注意**：GPR和FPR都使用0-31编号，编号相同不代表同一物理资源。干涉集合必须通过 `getInterferingRegsForClass()` 按类别过滤。
+
+> **默认配置**：callee-saved FPR (`--ra-callee-saved-fpr`)、寄存器合并 (`--ra-coalesce`) 和活跃区间分裂 (`--ra-split`) 均默认开启。可通过 `--ra-no-callee-saved-fpr`、`--ra-no-coalesce`、`--ra-no-split` 关闭。
+
+## 寄存器合并 (RegCoalescer)
+
+在 Greedy 分配主循环之前执行，消除 IR 中的冗余 copy 指令。当 copy 的源和目标虚拟寄存器不干涉时，将两者合并为同一虚拟寄存器，消除该 copy。
+
+### 合并条件 (canCoalesce)
+
+1. **类型兼容**：src 和 dst 类型一致
+2. **不干涉**：两个区间在干涉图中无边，或仅在 copy 位置有"伪干涉"（copy 本身定义 dst、最后使用 src，这一拍的表面重叠可忽略）
+3. **精确 interfer 判断**：使用保守循环扩展前的 `preciseSegments` 做 hole-aware 判断
+
+### 伪干涉放行
+
+- **二元破坏性更新**：`%x = add %x, %y` 形式的指令，在定义点 src 和 dst 重叠一拍，可安全合并
+- **循环累加器合并**：循环回边上 `phi` 对应的 copy，借助精确区间识别回边携带空洞放行
+
+### 回边携带空洞守卫 (spansCarriedHole)
+
+当 src/dst 的一个成员（合并类可能已包含多个原始值）在循环回边处因携带值而产生活跃空洞，且另一方以"外来"方式插入该空洞时，判定为真干涉、拒绝合并。逐原始成员判定，避免误判。
+
+**源码位置**: `backend/riscv64/RegCoalescer.cpp`
+
+## 重物化 (Rematerialization)
+
+当寄存器压力导致需要 spill 时，对廉价可重算的值不分配栈槽，而是在每个使用点现场重算。
+
+### 可重物化判定 (isCheapRematerializable)
+
+使用不依赖具体寄存器分配结果的静态判定：
+
+1. **常量**：`ConstInteger`、`ConstFloat` — 一条 `li` 即可
+2. **全局/栈对象地址**：`GlobalVariable`、`AllocaInst` — 一条地址加载
+3. **纯常量下标 GEP 链** (`isConstOffsetChainFromMaterializableRoot`)：以全局/栈地址为根、每次偏移均为常量的 GEP 链 — 整链折叠为 `根地址 + 总偏移`，重物化仅需 `lea`+`addi`
+4. **廉价 add/shl 链**：由上述可重物化值组成的运算链（递归深度限制）
+
+### Remat-only Spill
+
+溢出的可重物化值标记为 `rematOnlySpill`：不分配栈槽（不生成 spill store），各使用点由指令选择阶段自行物化常量或地址。节省了栈空间和 store 指令，代价是可能重复计算。
+
+**源码位置**: `backend/riscv64/Rematerialization.cpp`
+
+## 溢出策略 (HeuristicSpillStrategy)
+
+默认的 `HeuristicSpillStrategy` 根据活跃区间的溢出权重决定溢出/驱逐优先级。权重受循环深度指数加权（`10^loopDepth`），使循环内值的溢出代价远高于循环外值。
+
+**源码位置**: `backend/riscv64/HeuristicSpillStrategy.cpp`
 
 ## 相关文档
 

@@ -67,25 +67,27 @@ flowchart TD
 flowchart TD
     Start(["genCodeSection(func)"]) --> RegAlloc["1. 寄存器分配<br>registerAllocation(func)"]
 
-    RegAlloc --> CreateILoc["2. 创建ILocRiscV64<br>设置寄存器分配映射/保存寄存器/栈帧大小"]
+    RegAlloc --> CreateILoc["2. 创建ILocRiscV64<br>设置寄存器分配映射/保存寄存器/栈帧大小<br>设置shrinkWrapRA标志"]
 
-    CreateILoc --> InstSelect["3. 指令选择<br>InstSelectorRiscV64::run()<br>IR指令 → RISC-V64汇编指令"]
+    CreateILoc --> InstSelect["3. 指令选择<br>InstSelectorRiscV64::run()<br>prologue → emitFormalParamMoves → IR指令翻译<br>(含源码行注释/icmp-select融合/常量0→zero折叠/slti+seqz)"]
 
     InstSelect --> ScratchCheck{{"4. 存在ScratchValue?"}}
     ScratchCheck -- "Yes" --> ScratchAlloc["ScratchAllocator::allocate()<br>为ScratchValue分配物理寄存器"]
-    ScratchAlloc --> ScratchProcess["处理spilled scratch<br>分配栈槽/更新allocationMap"]
+    ScratchAlloc --> ScratchProcess["处理spilled scratch<br>分配栈槽/更新allocationMap/更新frameSize"]
     ScratchProcess --> Patchup["ILocRiscV64::patchScratchRegs()<br>替换机器指令中的scratch寄存器编号"]
     Patchup --> CleanLabel
 
-    ScratchCheck -- "No" --> CleanLabel["5. Peephole优化<br>RiscV64Peephole::run(iloc, optLevel, enableCoalesce)<br>FMA融合/强度消减/仿射地址递推/栈load-store转发/<br>move传播/删除自移动·重复指令·无效跳转/折叠零减比较 等"]
+    ScratchCheck -- "No" --> CleanLabel["5. Peephole优化<br>RiscV64Peephole::run(iloc, optLevel, enableCoalesce)<br>地址递推/常量乘法折叠/栈load-store转发/<br>move传播/copy消除/死定义/无效跳转消除/<br>跳转穿透/分支反转/循环不变量slli外提 等"]
 
-    CleanLabel --> Peephole["6. 删除未引用的基本块标签<br>deleteUnusedLabel()"]
+    CleanLabel --> UnusedLabel["6. 删除未引用的基本块标签<br>deleteUnusedLabel()"]
 
-    Peephole --> Output["7. 输出函数头部<br>.align/.global/.type/函数名"]
+    UnusedLabel --> CollectStats["7. 收集最终汇编统计<br>iloc.collectFinalStats() → raReports_"]
+
+    CollectStats --> Output["8. 输出函数头部<br>.align/.global/.type/函数名"]
     Output --> DebugCheck{{"调试模式?"}}
-    DebugCheck -- "Yes" --> DebugOut["输出IR值→寄存器/栈位置映射"]
+    DebugCheck -- "Yes" --> DebugOut["输出IR值→寄存器/栈位置映射<br>及RA stats注释"]
     DebugOut --> AsmOut
-    DebugCheck -- "No" --> AsmOut["8. 输出汇编指令序列<br>ILocRiscV64::outPut(fp)"]
+    DebugCheck -- "No" --> AsmOut["9. 输出汇编指令序列<br>ILocRiscV64::outPut(fp)"]
     AsmOut --> End(["结束: 函数代码生成完成"])
 
     %%Node styles
@@ -110,17 +112,19 @@ flowchart TD
 flowchart TD
     Start(["registerAllocation(func)"]) --> BuiltinCheck{{"内建函数?"}}
     BuiltinCheck -- "Yes" --> Return(["直接返回"])
-    BuiltinCheck -- "No" --> Greedy["GreedyRegAllocator::allocate(func)<br>Greedy寄存器分配"]
+    BuiltinCheck -- "No" --> Greedy["GreedyRegAllocator::allocate(func)<br>构建GPR/FPR/VR寄存器池 → 支配树+循环分析<br>→ 活跃区间分析 → 精确段快照<br>→ RegCoalescer(消除copy) → Remat分析<br>→ Greedy分配主循环(tryFree/tryEvict/trySplit/spill)"]
 
     Greedy --> AdjustCall["adjustFuncCallInsts(func)<br>调整函数调用指令"]
     AdjustCall --> AdjustParam["adjustFormalParamInsts(func)<br>调整形参指令"]
     AdjustParam --> SavedRegs["computeSavedRegs(...)<br>计算callee-saved寄存器列表<br>(ra若有调用 / s1-s11按需; s0/fp 不保存)<br>条件性叶子默认对ra做shrink-wrapping(调用点保存)"]
     SavedRegs --> StackAlloc["stackAlloc(func)<br>栈空间分配"]
+    SavedRegs --> CollectFPR["收集被使用的callee-saved FPR<br>greedyAllocator.getUsedCalleeSavedFPRs()"]
 
     StackAlloc --> ParamLoop["遍历形参<br>按RISC-V ABI分配寄存器(a0-a7/fa0-fa7)<br>超出部分分配栈槽"]
     ParamLoop --> InstLoop["遍历所有指令<br>为AllocaInst和有结果值指令创建分配信息"]
     InstLoop --> SpillLoop["为强制栈分配/未分配/溢出变量<br>分配栈槽(assignStackSlot)"]
-    SpillLoop --> FrameCalc["计算栈帧总大小<br>savedFrameBytes + localBytes + outgoingBytes (16字节对齐)<br>无帧指针: 栈槽统一重写为 sp 相对偏移"]
+    SpillLoop --> CoalesceBackfill["刷新coalesced alias分配信息<br>refreshCoalescedAliasAllocations()"]
+    CoalesceBackfill --> FrameCalc["计算栈帧总大小<br>savedFrameBytes + localBytes + outgoingBytes (16字节对齐)<br>无帧指针: 栈槽统一重写为 sp 相对偏移"]
     FrameCalc --> End(["结束: 寄存器分配完成"])
 
     %%Node styles
@@ -163,8 +167,12 @@ flowchart TD
 
 | 文档 | 内容 |
 |------|------|
-| [指令选择与代码输出](backend-instselect.md) | IR指令翻译分派、操作数加载/存储、Scratch分配 |
-| [寄存器分配详细流程](backend-regalloc.md) | Greedy分配器、活跃区间分析、干涉图构建 |
+| [指令选择与代码输出](backend-instselect.md) | IR指令翻译分派、操作数加载/存储、Scratch分配、近期ISel优化 |
+| [寄存器分配详细流程](backend-regalloc.md) | Greedy分配器、活跃区间分析、干涉图构建、RegCoalescer、Rematerialization |
 | [活跃性分析流程](liveness-analysis-flowchart.md) | 活跃区间计算、数据流方程、下游消费 |
+| [ABI参数与全局分配寄存器](backend-abi-regalloc.md) | a0-a7双角色、形参搬运、调用点实参传递、栈帧布局 |
+| [函数形参的寄存器分配](backend-param-regalloc.md) | RA层与ABI层分离、入口搬运、循环打破 |
+| [栈帧布局](backend-stackframe.md) | sp相对寻址、callee-saved保存策略、shrink-wrapping、叶子帧省略 |
 | [常量除法优化](backend-const-div-opt.md) | 2的幂次移位、Magic Number算法、强度消减 |
 | [浮点寄存器分配](backend-fpregalloc.md) | FPR池构建、类别区分、临时FPR借用、并行移动解析 |
+| [寄存器分配评测框架](backend-regalloc-eval.md) | 正确性/静态质量/动态性能三层评测 |

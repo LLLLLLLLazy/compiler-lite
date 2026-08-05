@@ -156,7 +156,7 @@ flowchart TD
 flowchart TD
     Start(["控制流指令"]) --> OpCheck{{"操作码?"}}
     OpCheck -- "BR" --> T_br["translate_br()<br>→ j label<br>无条件跳转"]
-    OpCheck -- "COND_BR" --> T_condbr["translate_cond_br()<br>→ bne cond, zero, true_label; j false_label<br>(紧邻的比较可融合为 blt/bge/beq/bne)"]
+    OpCheck -- "COND_BR" --> T_condbr["translate_cond_br()<br>→ bne cond, zero, true_label; j false_label<br>(紧邻的比较可融合为 blt/bge/beq/bne)<br>(icmp可折叠进select条件: 省一次cmp)"]
     OpCheck -- "RET" --> T_ret["translate_ret()<br>→ 返回值移到 a0(整数) / fa0(浮点)<br>→ 内联 emitEpilogue() 恢复寄存器并 ret"]
     OpCheck -- "CALL" --> T_call["translate_call()<br>→ mv a_i, arg_i<br>→ call funcname<br>→ mv dst, a0"]
 
@@ -308,16 +308,16 @@ flowchart TD
 | `ALLOCA` | AllocaInst | (栈地址计算) | 计算FP+offset，无实际指令 |
 | `LOAD` | LoadInst | `lw`/`fld` | 整数用lw，浮点用fld |
 | `STORE` | StoreInst | `sw`/`fsd` | 整数用sw，浮点用fsd |
-| `ADD_I` | BinaryInst | `addw` | 整数加法(32位) |
-| `SUB_I` | BinaryInst | `subw` | 整数减法(32位) |
-| `MUL_I` | BinaryInst | `slliw`/`mulw` | 乘以2的幂→左移，否则mulw |
+| `ADD_I` | BinaryInst | `addw`(常量0操作数折叠至`zero`寄存器) | 整数加法(32位) |
+| `SUB_I` | BinaryInst | `subw`(常量0操作数折叠至`zero`寄存器) | 整数减法(32位) |
+| `MUL_I` | BinaryInst | `slliw`/`mulw`(常量0操作数折叠至`zero`寄存器) | 乘以2的幂→左移，否则mulw |
 | `DIV_I` | BinaryInst | `sraiw`/`mul`+`srai`/`divw` | 2的幂→移位+bias，常量→magic number，否则divw |
 | `MOD_I` | BinaryInst | `sraiw`+`subw`/`remw` | 2的幂→移位求余，常量→magic求余，否则remw |
 | `ADD_F` | BinaryInst | `fadd.s` | 浮点加法 |
 | `SUB_F` | BinaryInst | `fsub.s` | 浮点减法 |
 | `MUL_F` | BinaryInst | `fmul.s` | 浮点乘法 |
 | `DIV_F` | BinaryInst | `fdiv.s` | 浮点除法 |
-| `LT_I/GT_I/...` | ICmpInst | `slt`(GT交换操作数; LE/GE再`xori`; EQ/NE用`subw`+`seqz`/`snez`) | 整数比较，结果0/1 |
+| `LT_I/GT_I/...` | ICmpInst | `slt`(GT交换操作数; LE/GE再`xori`; EQ/NE用`subw`+`seqz`/`snez`)<br>常量操作数优先选用 `slti`/`seqz`/`snez` 立即数形式 | 整数比较，结果0/1 |
 | `LT_F/GT_F/...` | FCmpInst | `flt.s`/`fle.s`/`feq.s`(GT/GE交换操作数; NE加`xori`) | 浮点比较，结果0/1 |
 | `BR` | BranchInst | `j` | 无条件跳转 |
 | `COND_BR` | CondBranchInst | `bne`+`j`(可融合比较为`blt`/`bge`/`beq`/`bne`) | 条件跳转 |
@@ -330,11 +330,21 @@ flowchart TD
 | `SITOFP` | SIToFPInst | `fcvt.s.w` | 整数转浮点 |
 | `FPTOSI` | FPToSIInst | `fcvt.w.s` | 浮点转整数 |
 
+## 近期指令选择优化
+
+| 优化 | 说明 | 效果 |
+|------|------|------|
+| 常量0→`zero`寄存器折叠 | `addw rd, rs, 0` → 直接使用 `zero`(x0)，省去 `li` | 消除零常量物化 |
+| `slti`/`seqz`/`snez` 立即数 | icmp 常量操作数优先选用含立即数形式的比较指令 | 减少 `li`+`slt` 两条指令 |
+| icmp→select 条件折叠 | 单用途 icmp 结果折叠进 select 条件分支，省去比较 | 消除冗余 cmp |
+| 源码行注释 | 汇编按语句输出 `# line N: 源文件` 注释 | 可读性/调试 |
+| 紧邻比较融合 | `icmp` 紧邻 `cond_br` 时融合为 `blt`/`bge`/`beq`/`bne` | 消除 cmp+br 间 move |
+
 ## 相关文档
 
 | 文档 | 内容 |
 |------|------|
 | [后端整体流程](backend-overview.md) | 编译流水线、函数级代码生成、栈帧布局 |
-| [寄存器分配详细流程](backend-regalloc.md) | Greedy分配器、活跃区间分析、干涉图构建 |
+| [寄存器分配详细流程](backend-regalloc.md) | Greedy分配器、活跃区间分析、干涉图构建、RegCoalescer |
 | [常量除法优化](backend-const-div-opt.md) | 2的幂次移位、Magic Number算法、强度消减详细流程 |
 | [浮点寄存器分配](backend-fpregalloc.md) | FPR池构建、浮点操作数加载/存储、临时FPR借用 |
