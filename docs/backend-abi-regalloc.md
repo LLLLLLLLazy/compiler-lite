@@ -6,7 +6,7 @@ a0-a7 是"可分配的 caller-saved 寄存器"。平时参与全局寄存器分�
 
 当前后端把 IR `Value*` 当作虚拟寄存器建模。函数形参、普通指令结果、`CallInst` 返回值都先以虚拟寄存器身份参与活跃区间分析和 Greedy 分配，后端不会在 IR 阶段把形参永久绑定到 a0-a7。a0-a7/fa0-fa7 只是 ABI 边界上的传入、传出位置。
 
-栈帧方面只有 `sp` (x2) 是真实栈指针；后端另固定使用 `s0/fp` (x8) 作为帧指针。`sp` 在 prologue/epilogue 中移动，`s0` 建好后通常保持不变，用于稳定访问形参栈槽、局部变量和 spill。
+栈帧方面只有 `sp` (x2) 是真实栈指针，**当前不使用帧指针**（`requiresFramePointer()` 恒返回 `false`）。`sp` 在 prologue/epilogue 中移动，所有栈访问（形参栈槽、局部变量、spill、outgoing 参数区）统一使用 `sp` 相对偏移寻址。代码中保留 `RISCV64_FP_REG_NO` (x8) 常量仅作为旧 sp 的逻辑引用，最终都会重写为 sp 相对偏移。
 
 **源码位置**: `backend/riscv64/PlatformRiscV64.h:15-16`
 
@@ -46,7 +46,7 @@ std::vector<int> GreedyRegAllocator::buildRegisterPool(Function * func) const
 | sp | x2 | 栈指针 |
 | gp | x3 | 全局指针 |
 | tp | x4 | 线程指针 |
-| s0/fp | x8 | 帧指针，后端固定使用 |
+| s0/fp | x8 | 帧指针寄存器（当前不启用，不保存不设置） |
 | t3-t4 | x28-x29 | 保留为scratch寄存器 |
 
 因此 allocator 会正常把虚拟寄存器（包括形参）分配到 a0-a7。

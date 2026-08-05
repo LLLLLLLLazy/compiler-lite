@@ -301,11 +301,10 @@ int foo(int a) { bar(); return a; }
 - 分配器将 a 分配到 s1
 
 ```asm
-# prologue
+# prologue (无帧指针，全部 sp 相对寻址)
 addi  sp, sp, -16
-sd    ra, 8(sp)
-sd    s0, 0(sp)       # 注意：s1 不在 savedRegs 中？不，s1 被使用了
-addi  s0, sp, 16
+sd    ra, 8(sp)        # 保存 ra (函数内有调用)
+sd    s1, 0(sp)        # 保存 s1 (被分配器使用)
 
 # emitFormalParamMoves
 mv    s1, a0           # a: a0 → s1
@@ -313,7 +312,10 @@ mv    s1, a0           # a: a0 → s1
 # 函数体
 call  bar
 mv    a0, s1           # 返回 a
-# epilogue
+ld    s1, 0(sp)        # 恢复 s1
+ld    ra, 8(sp)        # 恢复 ra
+addi  sp, sp, 16
+ret
 ```
 
 ### 场景 C：循环搬运
@@ -338,11 +340,11 @@ mv    a1, t0           # 原 a0(在 t0) → a1
 int foo(int a, int b, int c, ...) { /* 寄存器压力极大，a 被 spill */ }
 ```
 
-- a 从 a0 传入，被 spill 到栈槽 -32(s0)
+- a 从 a0 传入，被 spill 到栈槽（sp 相对偏移）
 
 ```asm
 # emitFormalParamMoves
-sw    a0, -32(s0)      # a: a0 → 栈槽
+sw    a0, offset(sp)     # a: a0 → 栈槽 (sp 相对寻址)
 ```
 
 ### 场景 E：栈传形参
@@ -351,11 +353,11 @@ sw    a0, -32(s0)      # a: a0 → 栈槽
 int foo(int a1, int a2, ..., int a9) { /* a9 是第 9 个参数 */ }
 ```
 
-- a9 由 caller 放在 +0(s0)，分配器可能分到 s2
+- a9 由 caller 放在栈帧顶部（`frameSize(sp)`），分配器可能分到 s2
 
 ```asm
 # emitFormalParamMoves
-lw    s2, 0(s0)        # a9: 从 caller 栈帧加载到 s2
+lw    s2, frameSize(sp)  # a9: 从 caller 栈帧加载到 s2
 ```
 
 ---

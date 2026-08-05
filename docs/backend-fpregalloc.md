@@ -2,7 +2,7 @@
 
 ## 总览
 
-浮点寄存器分配与整数寄存器共享统一的Greedy分配框架，通过 `isFloatInterval()` 区分GPR/FPR类别，分别使用独立的寄存器池和干涉集合。`buildFloatRegisterPool()` 提供 18 个 caller-saved FPR（ft0-ft7、fa0-fa7、ft8-ft9；ft10-ft11 保留作指令选择临时 FPR）；默认（`--ra-callee-saved-fpr`，由 `CalleeSavedFPREnabler` 实现）再追加 fs0-fs11，共 30 个可分配 FPR，跨调用的 float 可分配到 callee-saved fs* 并在 prologue/epilogue 中保存/恢复。仅当用 `--ra-no-callee-saved-fpr` 关闭时，跨调用的 float 值才必须溢出到栈上。
+浮点寄存器分配与整数寄存器共享统一的Greedy分配框架，通过 `isFloatInterval()` 区分GPR/FPR类别，分别使用独立的寄存器池和干涉集合。`buildFloatRegisterPool()` 提供 18 个 caller-saved FPR（ft0-ft7、fa0-fa7、ft8-ft9；ft10-ft11 保留作指令选择临时 FPR）。**默认启用** `--ra-callee-saved-fpr`（由 `CalleeSavedFPREnabler` 实现），再追加 fs0-fs11 → 共 30 个可分配 FPR。跨调用的 float 可分配到 callee-saved fs* 并在 prologue/epilogue 中保存/恢复。仅当用 `--ra-no-callee-saved-fpr` 关闭时，跨调用的 float 值才必须溢出到栈上。
 
 ```mermaid
 flowchart TD
