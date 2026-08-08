@@ -477,7 +477,8 @@ bool LoopStrengthReduce::run()
         if (!localChanged) {
             break;
         }
-        // 强度削减仅新增/改写指令而不改动 CFG，因此只失效依赖具体指令的标量演化
+        // 普通强度削减只改写值；循环版本化会自行失效 CFG 分析。这里统一清除
+        // 依赖具体指令的值分析，供下一轮从当前 IR 重新识别候选。
         cache.invalidateValueAnalyses();
     }
 
@@ -1217,7 +1218,8 @@ BasicBlock * LoopStrengthReduce::tryVersionInvariantStrideLoop(BasicBlock * head
                                                                Value * initIdx,
                                                                Value * stepIdx)
 {
-    if (std::getenv("MINIC_DISABLE_LSR_VERSIONING") != nullptr) {
+    if (std::getenv("MINIC_DISABLE_LSR_VERSIONING") != nullptr ||
+        versionedLoopHeaders.find(header) != versionedLoopHeaders.end()) {
         return nullptr;
     }
 
@@ -1232,8 +1234,9 @@ BasicBlock * LoopStrengthReduce::tryVersionInvariantStrideLoop(BasicBlock * head
         return nullptr;
     }
 
-    // preheader 以无条件跳转入 header（未被版本化过；版本化后的 preheader
-    // 是 condbr 终结，天然拒绝对同一循环二次版本化）
+    // preheader 以无条件跳转入 header。版本化会为原循环和克隆分别创建新的
+    // 无条件 preheader，因此不能仅凭 CFG 形态识别重复版本化；上面的显式集合
+    // 负责保证同一逻辑循环在本轮 LSR 中最多克隆一次。
     auto * preBr = dynamic_cast<BranchInst *>(preheader->getTerminator());
     if (!preBr || preBr->getTarget() != header) {
         return nullptr;
@@ -1543,6 +1546,11 @@ BasicBlock * LoopStrengthReduce::tryVersionInvariantStrideLoop(BasicBlock * head
         }
         phi->replaceIncomingBlock(preheader, slowPre);
     }
+
+    // 两个循环仍可能包含其他动态步长 GEP。允许后续把它们改写为精确的 i32
+    // 下标递推，但禁止再次构造快慢副本，避免 N 个候选产生近似 2^N 份循环。
+    versionedLoopHeaders.insert(header);
+    versionedLoopHeaders.insert(blockMap.at(header));
 
     return slowPre;
 }
