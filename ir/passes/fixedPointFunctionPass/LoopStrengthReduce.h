@@ -73,4 +73,7 @@ private:
 
     Function * func = nullptr;
     Module * mod = nullptr;
+    /// @brief 本轮 LSR 中已经完成版本化的原循环头与快路径克隆头。
+    ///        后续动态步长 GEP 仍做精确 i32 递推，但不再复制同一逻辑循环。
+    std::unordered_set<BasicBlock *> versionedLoopHeaders;
 };
