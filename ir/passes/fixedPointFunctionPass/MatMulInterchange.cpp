@@ -32,6 +32,7 @@
 #include "PhiInst.h"
 #include "PointerType.h"
 #include "ScalarEvolution.h"
+#include "SelectInst.h"
 #include "StoreInst.h"
 #include "Use.h"
 #include "Value.h"
@@ -276,6 +277,40 @@ struct ElemAccess {
     bool needMaterializeBase = false;         // gep(decay) 形态需要在 preheader 物化 base
 };
 
+/// @brief 条件归约信息 — 处理 if(cond) acc += X*Y 模式
+struct CondReduceInfo {
+    bool active = false;
+    BinaryInst * condMod = nullptr;   // srem %2 / andi 1
+    ICmpInst * condCmp = nullptr;     // icmp eq/ne 0
+    CondBranchInst * condBr = nullptr;
+    BasicBlock * condTrueBlock = nullptr;
+    BasicBlock * condMergeBlock = nullptr;
+    // true 块中归约的第二个乘加
+    LoadInst * trueLoadX = nullptr;   // k 步长 1 的 X 型 load
+    LoadInst * trueLoadY = nullptr;   // k 步长 rowWidth 的 Y 型 load
+    BinaryInst * trueMul = nullptr;
+    BinaryInst * trueAcc = nullptr;
+    bool trueMulXFirst = true;
+    Value * trueSumInit = nullptr;    // sumPhi 在 preheader 中的初值
+    // 条件检查用 Y 基址（与主 Y 可能不同）
+    Value * yCondBaseAtZero = nullptr;
+    bool yCondUsesColumn = false;
+    PointerRoot rootYCond;
+    // 条件归约的第二把 X 游标 (如 b[i][k], 步长=1)
+    PhiInst * secondXCursorPhi = nullptr;
+    GetElementPtrInst * secondXAdvanceGEP = nullptr;
+    Value * secondXBaseAtZero = nullptr;
+    // 条件归约的第二组 Y phi (如 a[k][j], 与主 Y 来自不同数组)
+    PhiInst * secondYRowPhi = nullptr;
+    GetElementPtrInst * secondYRowAdvance = nullptr;
+    Value * secondYRowInit = nullptr;
+    PhiInst * secondYColumnPhi = nullptr;
+    GetElementPtrInst * secondYColumnAdvance = nullptr;
+    Value * secondYColumnInit = nullptr;
+    Value * secondYBaseAtZero = nullptr;
+    bool secondYUsesColumn = false;
+};
+
 /// @brief 匹配到的 (j,k) 列访问归约嵌套
 struct MatMulPattern {
     CanonicalLoop jLoop;
@@ -318,6 +353,9 @@ struct MatMulPattern {
     PointerRoot rootZ;
     bool inPlace = false;   // Z 与 Y 同根，需要临时行缓冲
     bool needGuard = false; // 运行期 j 上界需 guard Nj<=W 的双版本
+
+    /// @brief 条件归约 — 处理 if(a[i][k]*b[k][j]%2==0) temp+=b[i][k]*a[k][j] 模式
+    CondReduceInfo cond;
 };
 
 struct OuterInPlaceContext {
@@ -676,7 +714,19 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
     if (debug) {
         std::cerr << "[MatMul] Checking loop header: " << jHeader->getName()
                   << ", hasConstInit=" << pat.jLoop.hasConstInitialValue
-                  << ", initVal=" << pat.jLoop.initialIntValue << std::endl;
+                  << ", initVal=" << pat.jLoop.initialIntValue
+                  << ", hasConstBound=" << pat.jLoop.hasConstBoundValue
+                  << ", j.body=" << pat.jLoop.body
+                  << ", j.exit=" << pat.jLoop.exit
+                  << ", j.latch=" << pat.jLoop.latch << std::endl;
+        // 转储 j.body 的指令以手查 CFG
+        if (pat.jLoop.body) {
+            std::cerr << "  j.body (" << pat.jLoop.body->getName() << ") insts: ";
+            for (auto * inst : pat.jLoop.body->getInstructions()) {
+                std::cerr << static_cast<int>(inst->getOp()) << " ";
+            }
+            std::cerr << std::endl;
+        }
     }
 
     // guard 回落版本不再二次版本化
@@ -822,34 +872,59 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
                     return false;
                 }
                 if (pat.yRowPhi) {
-                    if (debug) std::cerr << "  -> Failed: multiple Y row phi" << std::endl;
-                    return false;
+                    // 条件归约允许第二个 Y row phi
+                    if (pat.cond.secondYRowPhi) {
+                        if (debug) std::cerr << "  -> Failed: multiple Y row phi" << std::endl;
+                        return false;
+                    }
+                    pat.cond.secondYRowPhi = phi;
+                    pat.cond.secondYRowAdvance = advance;
+                    pat.cond.secondYRowInit = init;
+                    if (debug) std::cerr << "      -> Identified as second Y row phi (conditional)" << std::endl;
+                } else {
+                    pat.yRowPhi = phi;
+                    pat.yRowAdvance = advance;
+                    pat.yRowInit = init;
+                    if (debug) std::cerr << "      -> Identified as Y row phi" << std::endl;
                 }
-                pat.yRowPhi = phi;
-                pat.yRowAdvance = advance;
-                pat.yRowInit = init;
-                if (debug) std::cerr << "      -> Identified as Y row phi" << std::endl;
             } else {
                 if (step->getVal() == 1) {
                     if (pat.x.cursorPhi) {
-                        if (debug) std::cerr << "  -> Failed: multiple X cursor phi" << std::endl;
-                        return false;
+                        // 条件归约模式允许第二个单位步长指针 phi (如 b[i][k])
+                        if (pat.cond.secondXCursorPhi) {
+                            if (debug) std::cerr << "  -> Failed: >2 X cursor phi" << std::endl;
+                            return false;
+                        }
+                        pat.cond.secondXCursorPhi = phi;
+                        pat.cond.secondXAdvanceGEP = advance;
+                        pat.cond.secondXBaseAtZero = init;
+                        if (debug) std::cerr << "      -> Identified as second X cursor phi (conditional)" << std::endl;
+                    } else {
+                        pat.x.cursorPhi = phi;
+                        pat.x.advanceGEP = advance;
+                        pat.x.baseAtZero = init;
+                        if (debug) std::cerr << "      -> Identified as X cursor phi" << std::endl;
                     }
-                    pat.x.cursorPhi = phi;
-                    pat.x.advanceGEP = advance;
-                    pat.x.baseAtZero = init;
-                    if (debug) std::cerr << "      -> Identified as X cursor phi" << std::endl;
                 } else {
                     if (pat.yColumnPhi) {
-                        if (debug) std::cerr << "  -> Failed: multiple Y column phi" << std::endl;
-                        return false;
+                        // 条件归约允许第二个 Y column phi (如 a[k][j])
+                        if (pat.cond.secondYColumnPhi) {
+                            if (debug) std::cerr << "  -> Failed: >2 Y column phi" << std::endl;
+                            return false;
+                        }
+                        pat.cond.secondYColumnPhi = phi;
+                        pat.cond.secondYColumnAdvance = advance;
+                        pat.cond.secondYColumnInit = init;
+                        if (debug) std::cerr << "      -> Identified as second Y column phi (conditional), rowWidth="
+                                              << step->getVal() << std::endl;
+                    } else {
+                        pat.yColumnPhi = phi;
+                        pat.yColumnAdvance = advance;
+                        pat.yColumnInit = init;
+                        pat.rowWidth = step->getVal();
+                        if (debug) std::cerr << "      -> Identified as Y column phi, rowWidth="
+                                              << pat.rowWidth << std::endl;
                     }
-                    pat.yColumnPhi = phi;
-                    pat.yColumnAdvance = advance;
-                    pat.yColumnInit = init;
-                    pat.rowWidth = step->getVal();
-                    if (debug) std::cerr << "      -> Identified as Y column phi, rowWidth="
-                                          << pat.rowWidth << std::endl;
                 }
             }
             continue;
@@ -901,56 +976,133 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
         return false;
     }
     pat.acc = dynamic_cast<BinaryInst *>(sumBackedgeValue);
-    if (!pat.sumInit || !pat.acc) {
-        if (debug) {
-            std::cerr << "  -> Failed: sumInit or acc not found (from kLatch)"
-                      << ", sumInit=" << pat.sumInit
-                      << ", sumBackedgeValue=" << sumBackedgeValue
-                      << ", sumInitBlock=" << sumInitBlock
-                      << ", sumBackedgeBlock=" << pat.sumBackedgeBlock;
-            if (auto * inst = dynamic_cast<Instruction *>(sumBackedgeValue)) {
-                std::cerr << ", backedgeOp=" << static_cast<int>(inst->getOp())
-                          << ", backedgeParent=" << inst->getParentBlock();
-            }
-            std::cerr << std::endl;
-            for (int32_t i = 0; i < pat.sumPhi->getIncomingCount(); ++i) {
-                BasicBlock * block = pat.sumPhi->getIncomingBlock(i);
-                Value * value = pat.sumPhi->getIncomingValue(i);
-                std::cerr << "     incoming[" << i << "] value=" << value
-                          << ", block=" << block
-                          << ", blockInKLoop=" << (kBodySet.find(block) != kBodySet.end());
-                if (auto * inst = dynamic_cast<Instruction *>(value)) {
-                    std::cerr << ", op=" << static_cast<int>(inst->getOp())
-                              << ", parent=" << inst->getParentBlock();
-                }
-                std::cerr << std::endl;
-            }
-        }
-        return false;
-    }
-    pat.reductionBlock = pat.acc->getParentBlock();
-    if (!pat.sumBackedgeBlock || !pat.reductionBlock || kBodySet.find(pat.reductionBlock) == kBodySet.end()) {
-        return false;
-    }
-
-    const IRInstOperator accOp = pat.acc->getOp();
     const bool isFloat = pat.elemType->isFloatType();
-    if (accOp != (isFloat ? IRInstOperator::IRINST_OP_ADD_F : IRInstOperator::IRINST_OP_ADD_I)) {
+
+    // ---- 条件归约检测：sum 回边为 phi 时，尝试匹配 if(cond) acc+=X*Y 模式 ----
+    auto * sumBackedgePhi = !pat.acc ? dynamic_cast<PhiInst *>(sumBackedgeValue) : nullptr;
+    if (sumBackedgePhi && sumBackedgePhi->getIncomingCount() == 2) {
+        // 条件归约: k.latch 中有 phi(updated, unchanged)
+        // true 入边来自条件 true 块，另一入边是未更新的 sumPhi
+        Value * trueUpdate = nullptr;
+        BasicBlock * trueBlock = nullptr;
+        for (int32_t i = 0; i < sumBackedgePhi->getIncomingCount(); ++i) {
+            Value * incoming = sumBackedgePhi->getIncomingValue(i);
+            BasicBlock * block = sumBackedgePhi->getIncomingBlock(i);
+            if (incoming == pat.sumPhi ||
+                (dynamic_cast<PhiInst *>(incoming) && incoming != sumBackedgePhi)) {
+                continue;
+            }
+            trueUpdate = incoming;
+            trueBlock = block;
+        }
+        if (!trueUpdate || !trueBlock) {
+            if (debug) std::cerr << "  -> Failed: conditional true path not found" << std::endl;
+            return false;
+        }
+        auto * trueAcc = dynamic_cast<BinaryInst *>(trueUpdate);
+        if (!trueAcc || trueAcc->getOp() != (isFloat ? IRInstOperator::IRINST_OP_ADD_F
+                                                     : IRInstOperator::IRINST_OP_ADD_I)) {
+            if (debug) std::cerr << "  -> Failed: conditional trueAcc not BinaryInst add" << std::endl;
+            return false;
+        }
+
+        // k.body 的 terminator 必须是 cond_br → trueBlock
+        auto * condBr = dynamic_cast<CondBranchInst *>(kBody->getTerminator());
+        if (!condBr || (condBr->getTrueDest() != trueBlock && condBr->getFalseDest() != trueBlock)) {
+            if (debug) std::cerr << "  -> Failed: k.body term not cond_br to trueBlock" << std::endl;
+            return false;
+        }
+        auto * condCmp = dynamic_cast<ICmpInst *>(condBr->getCondition());
+        if (!condCmp) {
+            if (debug) std::cerr << "  -> Failed: cond br condition not icmp" << std::endl;
+            return false;
+        }
+        auto * condMod = dynamic_cast<BinaryInst *>(condCmp->getLHS());
+        if (!condMod || condMod->getOp() != IRInstOperator::IRINST_OP_MOD_I) {
+            if (debug) std::cerr << "  -> Failed: cond not mod" << std::endl;
+            return false;
+        }
+        auto * condMul = dynamic_cast<BinaryInst *>(condMod->getLHS());
+        if (!condMul || condMul->getOp() != (isFloat ? IRInstOperator::IRINST_OP_MUL_F
+                                                     : IRInstOperator::IRINST_OP_MUL_I)) {
+            if (debug) std::cerr << "  -> Failed: cond mul not mul" << std::endl;
+            return false;
+        }
+
+        // 从 trueAcc 提取 mul: (sumPhi + (X2 * Y2)) 或 ((X2 * Y2) + sumPhi)
+        BinaryInst * trueMul = nullptr;
+        if (trueAcc->getLHS() == pat.sumPhi) {
+            trueMul = dynamic_cast<BinaryInst *>(trueAcc->getRHS());
+        } else if (trueAcc->getRHS() == pat.sumPhi) {
+            trueMul = dynamic_cast<BinaryInst *>(trueAcc->getLHS());
+        }
+        if (!trueMul || trueMul->getOp() != (isFloat ? IRInstOperator::IRINST_OP_MUL_F
+                                                     : IRInstOperator::IRINST_OP_MUL_I)) {
+            if (debug) std::cerr << "  -> Failed: trueMul not found" << std::endl;
+            return false;
+        }
+
+        // 条件归约的 "主 mul" 用条件乘法（用于 Y 列游标匹配），true 块信息另行保存
+        pat.mul = condMul;
+        pat.cond.active = true;
+        pat.cond.condMod = condMod;
+        pat.cond.condCmp = condCmp;
+        pat.cond.condBr = condBr;
+        pat.cond.condTrueBlock = trueBlock;
+        pat.cond.condMergeBlock = pat.sumBackedgeBlock;
+        pat.cond.trueMul = trueMul;
+        pat.cond.trueAcc = trueAcc;
+        pat.cond.trueSumInit = pat.sumInit;
+        pat.cond.trueMulXFirst = false;
+        pat.cond.trueSumInit = pat.sumInit;
+        // 提取 true 块中的两个 load 操作数
+        pat.cond.trueLoadX = dynamic_cast<LoadInst *>(trueMul->getLHS());
+        pat.cond.trueLoadY = dynamic_cast<LoadInst *>(trueMul->getRHS());
+        if (!pat.cond.trueLoadX || !pat.cond.trueLoadY) {
+            if (debug) std::cerr << "  -> Failed: true block loads not found" << std::endl;
+            return false;
+        }
+        pat.reductionBlock = trueBlock;
+        pat.accSumFirst = false; // 条件路径不直接使用 acc
+
+        if (debug) std::cerr << "      -> Conditional matmul detected, trueBlock="
+                           << trueBlock->getName() << std::endl;
+    }
+
+    if (!pat.sumInit) {
+        if (debug) std::cerr << "  -> Failed: sumInit not found" << std::endl;
         return false;
     }
 
-    if (pat.acc->getLHS() == pat.sumPhi) {
-        pat.mul = dynamic_cast<BinaryInst *>(pat.acc->getRHS());
-        pat.accSumFirst = true;
-    } else if (pat.acc->getRHS() == pat.sumPhi) {
-        pat.mul = dynamic_cast<BinaryInst *>(pat.acc->getLHS());
-        pat.accSumFirst = false;
-    } else {
+    if (!pat.cond.active && !pat.acc) {
+        if (debug) std::cerr << "  -> Failed: acc not found" << std::endl;
         return false;
     }
 
-    if (!pat.mul || pat.mul->getOp() != (isFloat ? IRInstOperator::IRINST_OP_MUL_F : IRInstOperator::IRINST_OP_MUL_I)) {
-        return false;
+    if (!pat.cond.active) {
+        pat.reductionBlock = pat.acc->getParentBlock();
+        if (!pat.sumBackedgeBlock || !pat.reductionBlock || kBodySet.find(pat.reductionBlock) == kBodySet.end()) {
+            return false;
+        }
+
+        const IRInstOperator accOp = pat.acc->getOp();
+        if (accOp != (isFloat ? IRInstOperator::IRINST_OP_ADD_F : IRInstOperator::IRINST_OP_ADD_I)) {
+            return false;
+        }
+
+        if (pat.acc->getLHS() == pat.sumPhi) {
+            pat.mul = dynamic_cast<BinaryInst *>(pat.acc->getRHS());
+            pat.accSumFirst = true;
+        } else if (pat.acc->getRHS() == pat.sumPhi) {
+            pat.mul = dynamic_cast<BinaryInst *>(pat.acc->getLHS());
+            pat.accSumFirst = false;
+        } else {
+            return false;
+        }
+
+        if (!pat.mul || pat.mul->getOp() != (isFloat ? IRInstOperator::IRINST_OP_MUL_F : IRInstOperator::IRINST_OP_MUL_I)) {
+            return false;
+        }
     }
 
     // ---- 识别两个 load 并区分 X / Y ----
@@ -994,8 +1146,11 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
     }
 
     if (pat.loadX->getType() != pat.elemType || pat.loadY->getType() != pat.elemType) {
+        if (debug) std::cerr << "  -> Failed: load type mismatch" << std::endl;
         return false;
     }
+
+    if (debug && pat.cond.active) std::cerr << "  -> Loads classified OK, checking X addr..." << std::endl;
 
     // X 地址：游标 phi 直接寻址，或 gep(base, kIV)
     Value * xPtr = pat.loadX->getPointerOperand();
@@ -1031,8 +1186,30 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
             continue;
         }
 
+        if (debug) {
+            std::cerr << "    j.header phi at " << phi
+                      << ", isPointer=" << phi->getType()->isPointerType()
+                      << ", yColumnInit=" << pat.yColumnInit
+                      << ", condActive=" << pat.cond.active << std::endl;
+        }
+
         ElemAccess access;
         if (!matchUnitCursor(phi, pat.jLoop.preheader, jLatch, access)) {
+            if (debug) {
+                std::cerr << "    -> Failed: j.header non-IV phi not unit cursor";
+                if (!phi->getType()->isPointerType()) {
+                    std::cerr << " (not pointer type)";
+                }
+                Value * init = getPhiIncomingFrom(phi, pat.jLoop.preheader);
+                Value * backedge = getPhiIncomingFrom(phi, jLatch);
+                std::cerr << ", init=" << init
+                          << ", backedge=" << backedge;
+                if (auto * gep = dynamic_cast<GetElementPtrInst *>(backedge)) {
+                    std::cerr << " (gep, isDecay=" << gep->isArrayDecayGEP()
+                              << ", base=" << gep->getBasePointer() << ")";
+                }
+                std::cerr << std::endl;
+            }
             return false;
         }
 
@@ -1050,13 +1227,24 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
 
     if (pat.yUsesColumnCursor && !pat.yBaseAtZero) {
         auto * initGEP = dynamic_cast<GetElementPtrInst *>(pat.yColumnInit);
-        if (initGEP && initGEP->getIndexOperand() == pat.jLoop.induction &&
-            isInvariantOutside(initGEP->getBasePointer(), jBodySet)) {
-            pat.yBaseAtZero = initGEP->getBasePointer();
-            pat.yBaseNeedMaterialize = initGEP->isArrayDecayGEP();
-        } else if (isInvariantOutside(pat.yColumnInit, jBodySet)) {
+        // LSR 场景：yColumnInit = gep(base, jInduction), base 在 k.preheader 中定义
+        bool matchedGEP = false;
+        if (initGEP && initGEP->getIndexOperand() == pat.jLoop.induction) {
+            auto * baseInst = dynamic_cast<Instruction *>(initGEP->getBasePointer());
+            // base 可能在 j 循环体内（forward block / k.preheader），只要不在 k 循环内即可
+            bool baseAvail = isInvariantOutside(initGEP->getBasePointer(), jBodySet) ||
+                             (baseInst && kBodySet.find(baseInst->getParentBlock()) == kBodySet.end());
+            if (baseAvail) {
+                pat.yBaseAtZero = initGEP->getBasePointer();
+                pat.yBaseNeedMaterialize = initGEP->isArrayDecayGEP();
+                matchedGEP = true;
+            }
+        }
+        if (!matchedGEP && isInvariantOutside(pat.yColumnInit, jBodySet)) {
             pat.yBaseAtZero = pat.yColumnInit;
-        } else {
+        }
+        if (!pat.yBaseAtZero) {
+            if (debug) std::cerr << "  -> Failed: cannot determine yBaseAtZero" << std::endl;
             return false;
         }
     }
@@ -1065,9 +1253,12 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
         const auto * yBaseRowType = dynamic_cast<const ArrayType *>(pointeeOf(pat.yBaseAtZero->getType()));
         if (!yBaseRowType || yBaseRowType->getElementType() != pat.elemType ||
             yBaseRowType->getNumElements() != pat.rowWidth) {
+            if (debug) std::cerr << "  -> Failed: yBaseMaterialize check" << std::endl;
             return false;
         }
     }
+
+    if (debug && pat.cond.active) std::cerr << "  -> j.header phi OK, checking j.latch..." << std::endl;
 
     // ---- j.latch：store + j 步进 + 可选 Z 寻址 ----
     pat.store = nullptr;
@@ -1080,6 +1271,11 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
         }
     }
     if (!pat.store || pat.store->getValueOperand() != pat.sumPhi) {
+        if (debug) {
+            std::cerr << "  -> Failed: store mismatch, store=" << pat.store
+                      << " storeVal=" << (pat.store ? pat.store->getValueOperand() : nullptr)
+                      << " sumPhi=" << pat.sumPhi << std::endl;
+        }
         return false;
     }
 
@@ -1103,9 +1299,11 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
     }
 
     if (!isElemPointer(pat.z.cursorPhi ? pat.z.cursorPhi->getType() : pat.z.indexGEP->getType(), pat.elemType)) {
+        if (debug) std::cerr << "  -> Failed: Z elemType mismatch" << std::endl;
         return false;
     }
     pat.elemPtrType = pat.z.cursorPhi ? pat.z.cursorPhi->getType() : pat.z.indexGEP->getType();
+    if (debug && pat.cond.active) std::cerr << "  -> j.latch OK, checking whitelist..." << std::endl;
     if (pat.x.cursorPhi && pat.x.cursorPhi->getType() != pat.elemPtrType) {
         return false;
     }
@@ -1164,6 +1362,38 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
         allow(kLatch->getTerminator());
     }
 
+    // ---- 条件归约：白名单扩展 ----
+    if (pat.cond.active) {
+        // k.body 中的条件指令
+        allow(pat.cond.condMod);
+        allow(pat.cond.condCmp);
+        allow(pat.cond.condBr);
+        // 第二组 X/Y 游标步进
+        allow(pat.cond.secondXAdvanceGEP);
+        allow(pat.cond.secondYRowAdvance);
+        allow(pat.cond.secondYColumnAdvance);
+        // true 块中的归约指令
+        allow(pat.cond.trueLoadX);
+        allow(pat.cond.trueLoadY);
+        allow(pat.cond.trueMul);
+        allow(pat.cond.trueAcc);
+        if (pat.cond.condTrueBlock) {
+            allow(pat.cond.condTrueBlock->getTerminator());
+        }
+        // 归约块里还需要的 store/phi
+        allow(dynamic_cast<Instruction *>(pat.sumInit));
+        // k.latch 中的 sum 归并 phi
+        if (pat.cond.condMergeBlock) {
+            for (auto * inst : pat.cond.condMergeBlock->getInstructions()) {
+                if (auto * phi = dynamic_cast<PhiInst *>(inst)) {
+                    allow(phi);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
     // j.latch
     allow(pat.store);
     allow(pat.z.advanceGEP);
@@ -1180,12 +1410,19 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
     }
     if (pat.forwardBlock) {
         nestBlocks.push_back(pat.forwardBlock);
-        allow(pat.forwardBlock->getTerminator());
+        // GEP 等 setup 指令也需要放行
+        for (auto * inst : pat.forwardBlock->getInstructions()) {
+            allow(inst);
+        }
     }
 
     for (auto * bb : nestBlocks) {
         for (auto * inst : bb->getInstructions()) {
             if (allowed.find(inst) == allowed.end()) {
+                if (debug) {
+                    std::cerr << "  -> Failed: whitelist - inst op=" << static_cast<int>(inst->getOp())
+                              << " in block " << bb << " not allowed" << std::endl;
+                }
                 return false;
             }
         }
@@ -1198,6 +1435,10 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
             for (auto * use : inst->getUseList()) {
                 auto * user = dynamic_cast<Instruction *>(use->getUser());
                 if (!user || nestSet.find(user->getParentBlock()) == nestSet.end()) {
+                    if (debug) {
+                        std::cerr << "  -> Failed: external use - inst op=" << static_cast<int>(inst->getOp())
+                                  << " in block " << bb << " used outside nest" << std::endl;
+                    }
                     return false;
                 }
             }
@@ -1282,6 +1523,8 @@ bool matchPattern(ScalarEvolution & scev, LoopInfo & loopInfo, BasicBlock * jHea
         }
     }
 
+    if (debug) std::cerr << "[MatMul] PATTERN MATCHED, conditional=" << pat.cond.active
+                         << " inPlace=" << pat.inPlace << std::endl;
     return true;
 }
 
@@ -2132,6 +2375,8 @@ bool rewriteInPlaceConstantTailBlocked(Function * func, Module * mod, MatMulPatt
 /// @brief 按匹配结果生成 ikj 形态的新嵌套并接管 CFG
 void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
 {
+    const bool debug = std::getenv("MINIC_DEBUG_MATMUL") != nullptr;
+    if (debug) std::cerr << "[MatMul] rewritePattern called, conditional=" << pat.cond.active << std::endl;
     BasicBlock * jPre = pat.jLoop.preheader;
     BasicBlock * oldJHeader = pat.jLoop.header;
     BasicBlock * jExit = pat.jLoop.exit;
@@ -2234,6 +2479,10 @@ void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
     auto * kXCur = new PhiInst(func, pat.elemPtrType);
     Type * yScanPtrType = pat.yUsesColumnCursor ? pat.elemPtrType : pat.yRowPhi->getType();
     auto * kYRow = new PhiInst(func, yScanPtrType);
+    PhiInst * kYRowAcc = nullptr; // 条件归约第二把 Y row (a[k][j])
+    if (pat.cond.active) {
+        kYRowAcc = new PhiInst(func, pat.elemPtrType);
+    }
     auto * kCmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, kIV, ubk, cmpType);
     auto * kBr = new CondBranchInst(func, kCmp, kBody, kExitTarget);
     kIV->addIncoming(pat.kLoop.initialValue, j1Header);
@@ -2242,11 +2491,29 @@ void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
     kHeader->addInstruction(kIV);
     kHeader->addInstruction(kXCur);
     kHeader->addInstruction(kYRow);
+    if (kYRowAcc) {
+        // 第二把 Y row 的基址: 需要从 secondYColumnPhi 推导 &a[0]
+        Value * secondYRowInit = yBase; // fallback
+        if (pat.cond.secondYColumnInit) {
+            auto * initGEP = dynamic_cast<GetElementPtrInst *>(pat.cond.secondYColumnInit);
+            if (initGEP && initGEP->getIndexOperand() == pat.jLoop.induction) {
+                secondYRowInit = initGEP->getBasePointer();
+            }
+        }
+        kYRowAcc->addIncoming(secondYRowInit, j1Header);
+        kHeader->addInstruction(kYRowAcc);
+    }
     kHeader->addInstruction(kCmp);
     kHeader->addInstruction(kBr);
     kHeader->linkSuccessor(kBody);
     kHeader->linkSuccessor(kExitTarget);
 
+    // ---- 条件归约：加载第二把 X 游标 (b[i][k]) ----
+    LoadInst * xTrueLoad = nullptr;
+    if (pat.cond.active) {
+        xTrueLoad = new LoadInst(func, kXCur, pat.elemType); // will be overwritten below
+    }
+    // ---- K body：x = X[k] ----
     auto * xLoad = new LoadInst(func, kXCur, pat.elemType);
     Value * yElemBase = kYRow;
     if (!pat.yUsesColumnCursor) {
@@ -2254,6 +2521,19 @@ void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
     }
     auto * kBodyBr = new BranchInst(func, j2Header);
     kBody->addInstruction(xLoad);
+    if (pat.cond.active && pat.cond.secondXCursorPhi) {
+        // 第二把 X 游标需要额外的 phi 来在 k 循环内步进
+        // 简单起见直接在 kBody 里从 secondXBaseAtZero + kIV 计算
+        // 但更稳健的做法：在 rewritePattern 入口物化一个指针 phi
+        // 临时方案：用 gep(secondXBase, kIV)
+        if (pat.cond.secondXBaseAtZero) {
+            auto * trueXGEP = new GetElementPtrInst(func, pat.cond.secondXBaseAtZero,
+                                                     kIV, pat.elemPtrType, false);
+            kBody->addInstruction(trueXGEP);
+            xTrueLoad = new LoadInst(func, trueXGEP, pat.elemType);
+        }
+        kBody->addInstruction(xTrueLoad);
+    }
     if (auto * yElemBaseInst = dynamic_cast<Instruction *>(yElemBase)) {
         if (yElemBaseInst != kYRow) {
             kBody->addInstruction(yElemBaseInst);
@@ -2266,6 +2546,10 @@ void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
     auto * j2IV = new PhiInst(func, idxType);
     auto * j2Y = new PhiInst(func, pat.elemPtrType);
     auto * j2Acc = new PhiInst(func, pat.elemPtrType);
+    PhiInst * j2YTrue = nullptr; // 条件归约的第二把 Y 游标
+    if (pat.cond.active) {
+        j2YTrue = new PhiInst(func, pat.elemPtrType);
+    }
     auto * j2Cmp = new ICmpInst(func, IRInstOperator::IRINST_OP_LT_I, j2IV, ubj, cmpType);
     auto * j2Br = new CondBranchInst(func, j2Cmp, j2Body, kLatch);
     j2IV->addIncoming(zero, kBody);
@@ -2273,6 +2557,11 @@ void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
     j2Acc->addIncoming(accBase, kBody);
     j2Header->addInstruction(j2IV);
     j2Header->addInstruction(j2Y);
+    if (j2YTrue) {
+        // 条件归约：第二把 Y 从 kYRowAcc 取起点（&a[k][0]，已在 k header 维护）
+        j2YTrue->addIncoming(kYRowAcc, kBody);
+        j2Header->addInstruction(j2YTrue);
+    }
     j2Header->addInstruction(j2Acc);
     j2Header->addInstruction(j2Cmp);
     j2Header->addInstruction(j2Br);
@@ -2281,22 +2570,57 @@ void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
 
     auto * yLoad = new LoadInst(func, j2Y, pat.elemType);
     auto * accLoad = new LoadInst(func, j2Acc, pat.elemType);
-    auto * mulInst = pat.mulXFirst ? new BinaryInst(func, mulOp, xLoad, yLoad, pat.elemType)
-                                   : new BinaryInst(func, mulOp, yLoad, xLoad, pat.elemType);
-    auto * addInst = pat.accSumFirst ? new BinaryInst(func, addOp, accLoad, mulInst, pat.elemType)
-                                     : new BinaryInst(func, addOp, mulInst, accLoad, pat.elemType);
+
+    Value * productForAcc;
+    if (pat.cond.active) {
+        // 条件归约：cond = (xLoad * yLoad) % 2 == 0, then select
+        auto * condMulInst = pat.mulXFirst
+            ? new BinaryInst(func, mulOp, xLoad, yLoad, pat.elemType)
+            : new BinaryInst(func, mulOp, yLoad, xLoad, pat.elemType);
+        auto * modTwo = mod->newConstInt32(2);
+        auto * modZero = mod->newConstInt32(0);
+        auto * condModInst = new BinaryInst(func, IRInstOperator::IRINST_OP_MOD_I, condMulInst, modTwo, pat.elemType);
+        auto * condCmpInst = new ICmpInst(func, IRInstOperator::IRINST_OP_EQ_I, condModInst, modZero, cmpType);
+        // true 块：xTrueLoad * yTrueLoad
+        auto * yTrueLoad = new LoadInst(func, j2YTrue, pat.elemType);
+        auto * trueMulInst = new BinaryInst(func, mulOp, xTrueLoad, yTrueLoad, pat.elemType);
+        auto * zeroVal = mod->newConstInt32(0);
+        auto * selectInst = new SelectInst(func, condCmpInst, trueMulInst, zeroVal, pat.elemType);
+        // 把 cond 计算和 select 加到 j2Body
+        j2Body->addInstruction(yLoad);
+        j2Body->addInstruction(condMulInst);
+        j2Body->addInstruction(condModInst);
+        j2Body->addInstruction(condCmpInst);
+        j2Body->addInstruction(yTrueLoad);
+        j2Body->addInstruction(trueMulInst);
+        j2Body->addInstruction(selectInst);
+        productForAcc = selectInst;
+    } else {
+        auto * mulInst = pat.mulXFirst ? new BinaryInst(func, mulOp, xLoad, yLoad, pat.elemType)
+                                       : new BinaryInst(func, mulOp, yLoad, xLoad, pat.elemType);
+        j2Body->addInstruction(yLoad);
+        j2Body->addInstruction(mulInst);
+        productForAcc = mulInst;
+    }
+
+    auto * addInst = pat.accSumFirst ? new BinaryInst(func, addOp, accLoad, productForAcc, pat.elemType)
+                                     : new BinaryInst(func, addOp, productForAcc, accLoad, pat.elemType);
     auto * accStore = new StoreInst(func, addInst, j2Acc);
     auto * j2YNext = new GetElementPtrInst(func, j2Y, one, pat.elemPtrType, false);
     auto * j2AccNext = new GetElementPtrInst(func, j2Acc, one, pat.elemPtrType, false);
     auto * j2Next = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, j2IV, one, idxType);
     auto * j2BodyBr = new BranchInst(func, j2Header);
-    j2Body->addInstruction(yLoad);
     j2Body->addInstruction(accLoad);
-    j2Body->addInstruction(mulInst);
     j2Body->addInstruction(addInst);
     j2Body->addInstruction(accStore);
     j2Body->addInstruction(j2YNext);
     j2Body->addInstruction(j2AccNext);
+    // 条件归约：第二把 Y 步进
+    if (j2YTrue) {
+        auto * j2YTrueNext = new GetElementPtrInst(func, j2YTrue, one, pat.elemPtrType, false);
+        j2Body->addInstruction(j2YTrueNext);
+        j2YTrue->addIncoming(j2YTrueNext, j2Body);
+    }
     j2Body->addInstruction(j2Next);
     j2Body->addInstruction(j2BodyBr);
     j2Body->linkSuccessor(j2Header);
@@ -2312,11 +2636,22 @@ void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
     kLatch->addInstruction(kNext);
     kLatch->addInstruction(kXNext);
     kLatch->addInstruction(kYNext);
+    // 条件归约：第二把 Y row 步进
+    GetElementPtrInst * kYAccNext = nullptr;
+    if (kYRowAcc) {
+        auto * kYAccStep = pat.yUsesColumnCursor ? mod->newConstInteger(one->getType(), pat.rowWidth) : one;
+        kYAccNext = new GetElementPtrInst(func, kYRowAcc, kYAccStep,
+                                           pat.yUsesColumnCursor ? pat.elemPtrType : yScanPtrType, false);
+        kLatch->addInstruction(kYAccNext);
+    }
     kLatch->addInstruction(kLatchBr);
     kLatch->linkSuccessor(kHeader);
     kIV->addIncoming(kNext, kLatch);
     kXCur->addIncoming(kXNext, kLatch);
     kYRow->addIncoming(kYNext, kLatch);
+    if (kYRowAcc) {
+        kYRowAcc->addIncoming(kYAccNext, kLatch);
+    }
 
     // ---- J3（原地情形）：Z[j] = acc[j] ----
     if (pat.inPlace) {
@@ -2369,6 +2704,18 @@ bool MatMulInterchange::run()
     const bool debug = std::getenv("MINIC_DEBUG_MATMUL") != nullptr;
     if (debug) {
         std::cerr << "[MatMul] Running on function: " << func->getName() << std::endl;
+        // 转储全部基本块以辅助调试
+        for (auto * bb : func->getBlocks()) {
+            std::cerr << "  BLOCK " << bb << " (" << bb->getName() << ") preds=";
+            for (auto * p : bb->getPredecessors()) std::cerr << p << " ";
+            std::cerr << "succs=";
+            for (auto * s : bb->getSuccessors()) std::cerr << s << " ";
+            std::cerr << "\n    insts:";
+            for (auto * inst : bb->getInstructions()) {
+                std::cerr << " " << static_cast<int>(inst->getOp());
+            }
+            std::cerr << std::endl;
+        }
     }
     bool changed = false;
     auto & cache = func->getAnalysisCache();
