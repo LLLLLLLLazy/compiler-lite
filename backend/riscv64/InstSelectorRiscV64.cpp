@@ -28,6 +28,7 @@
 #include "BranchInst.h"
 #include "CallInst.h"
 #include "ConstFloat.h"
+#include "Values/FormalParam.h"
 #include "ConstInteger.h"
 #include "CondBranchInst.h"
 #include "CopyInst.h"
@@ -83,6 +84,27 @@ AbiArgLoc classifyAbiArg(Type * type, int & intRegCount, int & floatRegCount, in
 	}
 
 	return {AbiArgLocKind::Stack, stackCount++};
+}
+
+/// @brief 计算形参在 ABI 中的整数寄存器编号（a0-a7）
+/// @param func 所在函数
+/// @param param 待查询形参
+/// @return 整数参数寄存器编号；浮点或第 9 个及以后的整数参数返回 -1
+int abiIntParamReg(Function * func, FormalParam * param)
+{
+	if (func == nullptr || param == nullptr || param->getType()->isFloatType()) {
+		return -1;
+	}
+	int intRegCount = 0;
+	int floatRegCount = 0;
+	int stackCount = 0;
+	for (auto * p : func->getParams()) {
+		AbiArgLoc loc = classifyAbiArg(p->getType(), intRegCount, floatRegCount, stackCount);
+		if (p == param) {
+			return loc.kind == AbiArgLocKind::IntReg ? RISCV64_A0_REG_NO + loc.index : -1;
+		}
+	}
+	return -1;
 }
 
 bool isVariadicFloatArg(const CallInst * call, int argIndex, Type * argType)
@@ -678,13 +700,18 @@ std::vector<BasicBlock *> computeOptimalBlockOrder(Function * func)
 /// 3. 遍历每个基本块，输出标签并翻译指令
 void InstSelectorRiscV64::run()
 {
-	// 生成函数prologue：分配栈帧，保存callee-saved寄存器
-	{
-		auto tmp = tempMgr.borrow(nullptr);
-		iloc.allocStack(func, tmp.reg());
+	// 入口 shrink-wrapping 模式下，prologue（帧分配+保存）与形参搬运
+	// 延迟到 prologue 插入块（第一个非提前路径块）生成；提前返回路径
+	// 不建立栈帧、不保存 callee-saved，直接 ret
+	if (!shrinkWrapEntry_) {
+		// 生成函数prologue：分配栈帧，保存callee-saved寄存器
+		{
+			auto tmp = tempMgr.borrow(nullptr);
+			iloc.allocStack(func, tmp.reg());
+		}
+		// 将形参从a0-a7移动到分配的寄存器/栈槽
+		emitFormalParamMoves();
 	}
-	// 将形参从a0-a7移动到分配的寄存器/栈槽
-	emitFormalParamMoves();
 
 	// 计算优化的基本块布局顺序，最小化无条件跳转
 	orderedBlocks_ = computeOptimalBlockOrder(func);
@@ -693,11 +720,23 @@ void InstSelectorRiscV64::run()
 	for (size_t i = 0; i < orderedBlocks_.size(); ++i) {
 		auto * bb = orderedBlocks_[i];
 		currentBlockIndex_ = i;
+		currentBlock_ = bb;
+
+		// 入口 shrink-wrapping：提前路径上的临时借用排除 a0-a7，
+		// 保护尚未被形参搬运消费的原始入参寄存器
+		tempMgr.setExcludeArgRegs(shrinkWrapEntry_ && shrinkWrapBlocks_.count(bb) > 0);
 
 		// 重要：即使基本块为空，也必须输出标签，因为可能有其他块跳转到这里
 		// 只有入口块可以省略标签（不会被跳转）
 		if (i > 0 || !bb->getInstructions().empty()) {
 			iloc.label(blockLabel(bb));
+		}
+
+		// 完整版 shrink-wrapping：在每个 prologue 边界块处生成帧分配、保存与形参搬运
+		if (shrinkWrapEntry_ && shrinkWrapPrologueBlocks_.count(bb) > 0) {
+			auto tmp = tempMgr.borrow(nullptr);
+			iloc.allocStack(func, tmp.reg());
+			emitFormalParamMoves();
 		}
 
 		// 每个基本块重新开始注释上下文，块首指令即使与上块同行也会注释
@@ -2219,7 +2258,6 @@ void InstSelectorRiscV64::translate_br(Instruction * inst)
 		// 优化：如果目标是下一个基本块，则不需要生成跳转
 		bool targetIsNext = (currentBlockIndex_ + 1 < orderedBlocks_.size() &&
 		                     orderedBlocks_[currentBlockIndex_ + 1] == target);
-
 		if (!targetIsNext) {
 			iloc.jump(blockLabel(target));
 		}
@@ -2548,6 +2586,12 @@ void InstSelectorRiscV64::translate_ret(Instruction * inst)
 			}
 			releaseOperand(value);
 		}
+	}
+
+	// 完整版 shrink-wrapping：提前返回路径无栈帧、未保存任何寄存器，直接返回
+	if (shrinkWrapEntry_ && shrinkWrapRetTargets_.count(currentBlock_) > 0) {
+		iloc.inst("ret", "");
+		return;
 	}
 
 	// 生成函数epilogue：恢复callee-saved寄存器，恢复栈指针，返回
@@ -3584,6 +3628,13 @@ void InstSelectorRiscV64::emitCallSiteRestoreRA(Instruction * inst)
 /// @return 物理寄存器编号，若未分配则返回-1
 int InstSelectorRiscV64::getResultReg(Value * val) const
 {
+	// 入口 shrink-wrapping：提前路径上定义的值强制使用 scratch 寄存器
+	// （其 RA 分配可能是 a0-a7——会覆盖尚未搬运的原始入参，或 callee-saved——
+	// 提前路径不保存恢复）
+	if (shrinkWrapEntry_ && currentBlock_ != nullptr &&
+	    shrinkWrapBlocks_.count(currentBlock_) > 0) {
+		return -1;
+	}
 	auto * inst = dynamic_cast<Instruction *>(val);
 	RegAllocInfo info = getAllocInfo(val, inst);
 	if (info.hasReg()) {
@@ -3985,6 +4036,19 @@ InstSelectorRiscV64::loadOperand(Value * val, Instruction * inst, int excludeReg
 		return OperandReg(0);
 	}
 
+	// 入口 shrink-wrapping：提前路径上形参直接读原始 a0-a7。
+	// 此时 prologue 与形参搬运尚未执行，aN 仍持有入参值，且提前路径
+	// 不保存 callee-saved（形参若被分配到 s 寄存器将读到调用者旧值）
+	if (shrinkWrapEntry_ && currentBlock_ != nullptr &&
+	    shrinkWrapBlocks_.count(currentBlock_) > 0) {
+		if (auto * fp = dynamic_cast<FormalParam *>(val)) {
+			int reg = abiIntParamReg(func, fp);
+			if (reg >= 0) {
+				return OperandReg(reg);
+			}
+		}
+	}
+
 	RegAllocInfo info = getAllocInfo(val, inst);
 	if (info.hasReg()) {
 		return OperandReg(info.regId);
@@ -4054,6 +4118,7 @@ void InstSelectorRiscV64::storeResult(Value * val, int srcReg, Instruction * ins
 	if (val == nullptr) {
 		return;
 	}
+
 	RegAllocInfo info = getAllocInfo(val, inst);
 	if (allocator.isRematOnlySpill(val)) {
 		return;

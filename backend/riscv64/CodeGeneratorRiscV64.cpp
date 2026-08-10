@@ -27,17 +27,25 @@
 #include "ArrayType.h"
 #include "BasicBlock.h"
 #include "CallInst.h"
+#include "CondBranchInst.h"
 #include "ConditionalLeafAnalysis.h"
 #include "Function.h"
+#include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "ILocRiscV64.h"
 #include "InstSelectorRiscV64.h"
 #include "Instruction.h"
+#include "LoadInst.h"
 #include "LocalTempManager.h"
 #include "PlatformRiscV64.h"
+#include "ReturnInst.h"
 #include "RiscV64Peephole.h"
 #include "ScratchAllocator.h"
+#include "StoreInst.h"
 #include "Value.h"
+#include "Values/ConstFloat.h"
+#include "Values/ConstInteger.h"
+#include "Values/FormalParam.h"
 
 namespace {
 
@@ -286,6 +294,412 @@ void writeJsonIntArray(std::ostream & out, const std::vector<int> & values)
 		out << values[i];
 	}
 	out << "]";
+}
+/// @brief shrink-wrapping 分析结果（完整版：任意位置提前返回）
+struct ShrinkWrapInfo {
+	bool ok = false;
+	std::vector<BasicBlock *> retTargets;      ///< 提前返回块（裸 ret，不恢复）
+	std::vector<BasicBlock *> prologueBlocks;  ///< 非提前路径入口（各自插入 prologue）
+	std::vector<BasicBlock *> earlyBlocks;     ///< 提前区域（不建栈帧、不保存 callee-saved）
+};
+
+/// @brief 沿 GEP 链回溯指针的底层 alloca
+/// @param ptr 指针值
+/// @return 底层 alloca；若根不是 alloca 则返回 nullptr
+AllocaInst * getRootAlloca(Value * ptr)
+{
+	Value * cur = ptr;
+	std::unordered_set<Value *> seen;
+	while (cur != nullptr && seen.insert(cur).second) {
+		if (auto * alloca = dynamic_cast<AllocaInst *>(cur)) {
+			return alloca;
+		}
+		if (auto * gep = dynamic_cast<GetElementPtrInst *>(cur)) {
+			cur = gep->getBasePointer();
+			continue;
+		}
+		return nullptr;
+	}
+	return nullptr;
+}
+
+/// @brief 判断块是否恰好是一条 `ret void`
+bool isPureVoidRetBlock(BasicBlock * bb)
+{
+	if (bb == nullptr) {
+		return false;
+	}
+	const auto & insts = bb->getInstructions();
+	if (insts.size() != 1) {
+		return false;
+	}
+	auto * ret = dynamic_cast<ReturnInst *>(insts.front());
+	return ret != nullptr && ret->getReturnValue() == nullptr;
+}
+
+/// @brief 检查提前路径整体可「不建栈帧、不保存 callee-saved」执行
+///
+/// 逐指令要求：
+/// - 无 call（破坏 ra）、无 load/store（需要栈帧）；
+/// - def 的值不分配 callee-saved（不保存恢复）、无栈槽（不建帧）；
+/// - def 的值在提前区域外的 use 只允许终结指令（分支折叠消费）；
+///   提前区域内非终结 use 且值分配 a0-a7 → 拒绝（物化覆盖原始入参）；
+/// - 操作数只允许：前 8 个整数形参（读原始 aN）、常量、全局地址、
+///   提前区域内定义的指令。
+///
+/// @return true 表示通过
+bool checkEarlyPathInstructions(
+	const std::unordered_set<BasicBlock *> & region,
+	BasicBlock * retTarget,
+	const std::unordered_map<Value *, RegAllocInfo> & allocMap,
+	const std::unordered_set<int> & savedSet,
+	const std::unordered_map<FormalParam *, int> & intParamReg)
+{
+	for (auto * b : region) {
+		for (auto * inst : b->getInstructions()) {
+			if (dynamic_cast<ReturnInst *>(inst) != nullptr) {
+				if (b != retTarget) {
+					return false; // 提前路径上不允许其他返回
+				}
+				continue; // retTarget 的 ret void 已由 isPureVoidRetBlock 保证
+			}
+			if (dynamic_cast<CallInst *>(inst) != nullptr) {
+				return false; // call 破坏 ra 且需要栈上传参
+			}
+			if (auto * load = dynamic_cast<LoadInst *>(inst)) {
+				// 读栈上 alloca 需要帧；全局/参数指针的读不依赖帧
+				if (getRootAlloca(load->getPointerOperand()) != nullptr) {
+					return false;
+				}
+				continue;
+			}
+			if (auto * store = dynamic_cast<StoreInst *>(inst)) {
+				if (getRootAlloca(store->getPointerOperand()) != nullptr) {
+					return false;
+				}
+				continue;
+			}
+			if (inst->isTerminator()) {
+				continue; // 分支/条件分支为纯控制流
+			}
+
+			// def 检查
+			if (inst->hasResultValue()) {
+				auto it = allocMap.find(inst);
+				if (it != allocMap.end() && it->second.hasStackSlot) {
+					return false;
+				}
+				if (it != allocMap.end() && it->second.hasReg() &&
+				    savedSet.count(it->second.regId) > 0) {
+					return false;
+				}
+				bool allocArgReg = it != allocMap.end() && it->second.hasReg() &&
+				                   it->second.regId >= RISCV64_A0_REG_NO &&
+				                   it->second.regId < RISCV64_A0_REG_NO + 8;
+				for (auto * u : inst->getUseList()) {
+					auto * userInst = dynamic_cast<Instruction *>(u->getUser());
+					if (userInst == nullptr) {
+						return false;
+					}
+					BasicBlock * ub = userInst->getParentBlock();
+					if (region.count(ub) > 0) {
+						if (allocArgReg && !userInst->isTerminator()) {
+							return false;
+						}
+						continue;
+					}
+					if (!userInst->isTerminator()) {
+						return false;
+					}
+				}
+			}
+
+			// 操作数检查
+			for (auto * op : inst->getOperandsValue()) {
+				if (dynamic_cast<ConstInteger *>(op) != nullptr ||
+				    dynamic_cast<ConstFloat *>(op) != nullptr ||
+				    dynamic_cast<GlobalVariable *>(op) != nullptr) {
+					continue;
+				}
+				if (auto * fp = dynamic_cast<FormalParam *>(op)) {
+					if (intParamReg.find(fp) == intParamReg.end()) {
+						return false;
+					}
+					continue;
+				}
+				if (auto * opInst = dynamic_cast<Instruction *>(op)) {
+					if (region.count(opInst->getParentBlock()) == 0) {
+						return false;
+					}
+					continue;
+				}
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+/// @brief 检查从入口到 useBlock 的所有路径上，是否有指令 def 分配了 aN
+///
+/// 提前区域不经过参数搬运，形参 use 只能读入口时的原始 aN；
+/// 若路径上有 RA 分配的 aN 写者，读到的将是被覆盖的值。
+bool paramRegClobberedBefore(
+	BasicBlock * useBlock,
+	int argReg,
+	const std::unordered_set<BasicBlock *> & fwd,
+	const std::unordered_map<Value *, RegAllocInfo> & allocMap)
+{
+	// 从 useBlock 反向可达 ∩ 入口正向可达 = 入口到 useBlock 的所有路径块
+	std::unordered_set<BasicBlock *> bwd;
+	{
+		std::unordered_set<BasicBlock *> seen;
+		std::vector<BasicBlock *> wl;
+		wl.push_back(useBlock);
+		seen.insert(useBlock);
+		while (!wl.empty()) {
+			BasicBlock * b = wl.back();
+			wl.pop_back();
+			bwd.insert(b);
+			for (auto * p : b->getPredecessors()) {
+				if (p != nullptr && seen.insert(p).second) {
+					wl.push_back(p);
+				}
+			}
+		}
+	}
+	for (auto * b : fwd) {
+		if (bwd.count(b) == 0) {
+			continue;
+		}
+		for (auto * inst : b->getInstructions()) {
+			if (!inst->hasResultValue()) {
+				continue;
+			}
+			auto it = allocMap.find(inst);
+			if (it != allocMap.end() && it->second.hasReg() &&
+			    it->second.regId == argReg) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+/// @brief 完整版 shrink-wrapping 分析
+///
+/// 找出函数中所有「纯 ret void」块，合并其提前路径为可跳过区域：
+/// 区域内的块整体可「不建栈帧、不保存 callee-saved」执行（无 call、
+/// 无栈访问、def 不分配 callee-saved/栈槽、形参读原始 aN 且 aN 存活）。
+/// prologue（帧分配+保存+参数搬运）下沉到区域的每个边界块（非提前
+/// 路径入口）；区域内的 ret 块裸 ret。
+///
+/// 安全约束：
+/// - 区域前驱封闭：进入区域的路径只能从函数入口开始；
+/// - 区域边界互不可达（避免重复执行 prologue）；
+/// - 不可跳过候选（路径含 call 等的 ret）不得与区域相交；
+/// - 区域内形参 use 的 aN 在入口到 use 的路径上无 RA 分配写者。
+ShrinkWrapInfo analyzeShrinkWrap(
+	Function * func,
+	const std::unordered_map<Value *, RegAllocInfo> & allocMap,
+	const std::vector<int> & savedRegs)
+{
+	ShrinkWrapInfo info;
+	if (func == nullptr || func->isBuiltin() || func->getBlocks().empty()) {
+		return info;
+	}
+
+	BasicBlock * entry = func->getBlocks().front();
+
+	// 从入口可达的块集（fwd）
+	std::unordered_set<BasicBlock *> fwd;
+	{
+		std::unordered_set<BasicBlock *> seen;
+		std::vector<BasicBlock *> wl;
+		wl.push_back(entry);
+		seen.insert(entry);
+		while (!wl.empty()) {
+			BasicBlock * b = wl.back();
+			wl.pop_back();
+			fwd.insert(b);
+			for (auto * s : b->getSuccessors()) {
+				if (s != nullptr && seen.insert(s).second) {
+					wl.push_back(s);
+				}
+			}
+		}
+	}
+
+	// 所有纯 ret void 块（可提前返回的候选）
+	std::vector<BasicBlock *> retCandidates;
+	for (auto * b : fwd) {
+		if (isPureVoidRetBlock(b)) {
+			retCandidates.push_back(b);
+		}
+	}
+	if (retCandidates.empty()) {
+		return info;
+	}
+
+	// callee-saved 集合
+	std::unordered_set<int> savedSet(savedRegs.begin(), savedRegs.end());
+
+	// 形参 ABI 整数寄存器位置（前 8 个整数参数 → a0-a7）
+	std::unordered_map<FormalParam *, int> intParamReg;
+	{
+		int intIdx = 0;
+		for (auto * param : func->getParams()) {
+			if (!param->getType()->isFloatType()) {
+				if (intIdx < 8) {
+					intParamReg[param] = RISCV64_A0_REG_NO + intIdx;
+				}
+				++intIdx;
+			}
+		}
+	}
+
+	// 逐候选：计算提前路径区域并做可跳过检查
+	std::unordered_set<BasicBlock *> merged;
+	std::vector<BasicBlock *> okRetTargets;
+	std::vector<std::unordered_set<BasicBlock *>> badRegions; // 不可跳过候选的区域
+	for (auto * candidate : retCandidates) {
+		std::unordered_set<BasicBlock *> bwd;
+		{
+			std::unordered_set<BasicBlock *> seen;
+			std::vector<BasicBlock *> wl;
+			wl.push_back(candidate);
+			seen.insert(candidate);
+			while (!wl.empty()) {
+				BasicBlock * b = wl.back();
+				wl.pop_back();
+				bwd.insert(b);
+				for (auto * p : b->getPredecessors()) {
+					if (p != nullptr && seen.insert(p).second) {
+						wl.push_back(p);
+					}
+				}
+			}
+		}
+		std::unordered_set<BasicBlock *> region;
+		for (auto * b : fwd) {
+			if (bwd.count(b) > 0) {
+				region.insert(b);
+			}
+		}
+
+		// 形参 aN 存活：区域内每个形参 use 的 aN 在入口到 use 的路径上无写者
+		bool paramsOk = true;
+		for (auto * b : region) {
+			for (auto * inst : b->getInstructions()) {
+				for (auto * op : inst->getOperandsValue()) {
+					auto * fp = dynamic_cast<FormalParam *>(op);
+					if (fp == nullptr) {
+						continue;
+					}
+					auto it = intParamReg.find(fp);
+					if (it == intParamReg.end()) {
+						paramsOk = false;
+						break;
+					}
+					if (b != entry && paramRegClobberedBefore(b, it->second, fwd, allocMap)) {
+						paramsOk = false;
+						break;
+					}
+				}
+				if (!paramsOk) {
+					break;
+				}
+			}
+			if (!paramsOk) {
+				break;
+			}
+		}
+
+		if (!paramsOk || !checkEarlyPathInstructions(region, candidate, allocMap, savedSet, intParamReg)) {
+			badRegions.push_back(region);
+			continue;
+		}
+
+		okRetTargets.push_back(candidate);
+		for (auto * b : region) {
+			merged.insert(b);
+		}
+	}
+	if (merged.empty()) {
+		return info;
+	}
+
+	// 交叉检查：不可跳过候选（路径含 call/栈访问等）的返回路径若完全
+	// 落在可跳过区域内（不经过任何边界建帧点），其 epilogue 将恢复
+	// 从未保存的寄存器 → 拒绝。只要路径上有块在区域外（必然经过边界
+	// 建帧），返回点正常恢复，与区域共存安全。
+	for (const auto & bad : badRegions) {
+		bool allInside = true;
+		for (auto * b : bad) {
+			if (merged.count(b) == 0) {
+				allInside = false;
+				break;
+			}
+		}
+		if (allInside) {
+			return info;
+		}
+	}
+
+	// 前驱封闭：区域内块（除入口）的所有前驱必须在区域内
+	for (auto * b : merged) {
+		if (b == entry) {
+			continue;
+		}
+		for (auto * p : b->getPredecessors()) {
+			if (p != nullptr && merged.count(p) == 0) {
+				return info;
+			}
+		}
+	}
+
+	// 边界：区域内块的后继中不在区域内的块（prologue 插入点）
+	std::vector<BasicBlock *> boundaries;
+	for (auto * b : merged) {
+		for (auto * s : b->getSuccessors()) {
+			if (s != nullptr && merged.count(s) == 0 &&
+			    std::find(boundaries.begin(), boundaries.end(), s) == boundaries.end()) {
+				boundaries.push_back(s);
+			}
+		}
+	}
+	if (boundaries.empty()) {
+		return info; // 无续行路径（函数整体只有提前返回）
+	}
+
+	// 边界互不可达：避免同一次执行重复插入 prologue（sp 重复调整）
+	for (auto * b1 : boundaries) {
+		std::unordered_set<BasicBlock *> seen;
+		std::vector<BasicBlock *> wl;
+		wl.push_back(b1);
+		seen.insert(b1);
+		while (!wl.empty()) {
+			BasicBlock * b = wl.back();
+			wl.pop_back();
+			for (auto * s : b->getSuccessors()) {
+				if (s == nullptr || !seen.insert(s).second) {
+					continue;
+				}
+				for (auto * b2 : boundaries) {
+					if (b2 != b1 && b2 == s) {
+						return info;
+					}
+				}
+				wl.push_back(s);
+			}
+		}
+	}
+
+	info.ok = true;
+	info.retTargets = okRetTargets;
+	info.prologueBlocks = boundaries;
+	info.earlyBlocks.assign(merged.begin(), merged.end());
+	return info;
 }
 
 } // namespace
@@ -769,6 +1183,10 @@ void CodeGeneratorRiscV64::genCodeSection(Function * func)
 	InstSelectorRiscV64 instSelector(func, iloc, greedyAllocator);
 	instSelector.setShowLinearIR(showLinearIR);
 	instSelector.setEliminatedCopies(greedyAllocator.getEliminatedCopies());
+	instSelector.setShrinkWrapEntry(currentShrinkWrapEntry);
+	instSelector.setShrinkWrapRetTargets(currentShrinkWrapRetTargets);
+	instSelector.setShrinkWrapPrologueBlocks(currentShrinkWrapPrologueBlocks);
+	instSelector.setShrinkWrapBlocks(currentShrinkWrapBlocks);
 	instSelector.run();
 
 	// Scratch寄存器分配：为ScratchValue分配物理寄存器
@@ -966,6 +1384,25 @@ void CodeGeneratorRiscV64::registerAllocation(Function * func)
 	                                    currentShrinkWrapRA);
 	// 收集被使用的callee-saved FPR
 	currentSavedFPRs = greedyAllocator.getUsedCalleeSavedFPRs();
+
+	// 完整版 shrink-wrapping：任意位置提前返回路径不建栈帧、不保存
+	// callee-saved。若模式成立，由新机制接管 ra 的保存（下沉到非提前
+	// 路径入口），关闭既有的「调用点保存 ra」机制
+	currentShrinkWrapEntry = false;
+	currentShrinkWrapRetTargets.clear();
+	currentShrinkWrapPrologueBlocks.clear();
+	currentShrinkWrapBlocks.clear();
+	{
+		auto info = analyzeShrinkWrap(func, greedyAllocator.getAllocationMap(),
+		                              currentSavedRegs);
+		if (info.ok) {
+			currentShrinkWrapEntry = true;
+			currentShrinkWrapRetTargets = info.retTargets;
+			currentShrinkWrapPrologueBlocks = info.prologueBlocks;
+			currentShrinkWrapBlocks = info.earlyBlocks;
+			currentShrinkWrapRA = false;
+		}
+	}
 	// 为未分配寄存器和溢出的变量分配栈槽
 	stackAlloc(func, useFramePointer);
 	// 栈分配完成后，将coalesced alias的分配信息回填到代表值，

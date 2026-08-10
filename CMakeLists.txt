@@ -255,6 +255,8 @@ set(IR_SRCS
 	ir/passes/functionPass/PureCallMemoize.cpp
 	ir/passes/fixedPointFunctionPass/InstCombine.h
 	ir/passes/fixedPointFunctionPass/InstCombine.cpp
+	ir/passes/fixedPointFunctionPass/PartialDeadStoreElim.h
+	ir/passes/fixedPointFunctionPass/PartialDeadStoreElim.cpp
 	ir/passes/fixedPointFunctionPass/GuardedTailCollapse.h
 	ir/passes/fixedPointFunctionPass/GuardedTailCollapse.cpp
 	ir/passes/fixedPointFunctionPass/GVN.h

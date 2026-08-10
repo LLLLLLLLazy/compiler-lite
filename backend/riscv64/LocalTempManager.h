@@ -109,6 +109,13 @@ public:
 	/// @brief 设置ILoc引用（用于获取机器指令计数）
 	void setILoc(ILocRiscV64 * _iloc) { iloc = _iloc; }
 
+	/// @brief 设置是否排除参数寄存器（a0-a7）的借用
+	/// @param exclude 置位后 borrow 不再分配 a0-a7
+	///
+	/// 用于入口 shrink-wrapping：提前返回路径上 prologue 与形参搬运尚未
+	/// 执行，a0-a7 仍持有原始入参，临时运算不得覆盖它们
+	void setExcludeArgRegs(bool exclude) { excludeArgRegs_ = exclude; }
+
 	/// @brief 获取所有创建的scratch值
 	std::vector<ScratchValue> & getScratchValues() { return scratchValues; }
 	const std::vector<ScratchValue> & getScratchValues() const { return scratchValues; }
@@ -138,6 +145,9 @@ private:
 
 	/// @brief 当前被借出的寄存器集合
 	std::unordered_set<int> borrowed;
+
+	/// @brief 是否排除 a0-a7 的借用（入口 shrink-wrapping 模式）
+	bool excludeArgRegs_ = false;
 
 	/// @brief 全局寄存器分配映射
 	const std::unordered_map<Value *, RegAllocInfo> & allocMap;
