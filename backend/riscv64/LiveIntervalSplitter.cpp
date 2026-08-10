@@ -162,10 +162,13 @@ SplitInfo LiveIntervalSplitter::doSplit(LiveInterval * interval, int splitPos, i
 	}
 
 	// 分配 Segment
+	// 注意：right 段覆盖到区间末尾而非 regionEnd。regionEnd 截断会把循环
+	// 后的 use 分到 tail 段（栈槽读取），但循环内 right 寄存器值在循环
+	// 执行期间可能与栈槽不一致（循环边界/指令号边界错位），tail 读到旧值
+	// 产生错误。循环内无 def 时 right 值在循环前后保持不变，覆盖到末尾安全。
 	for (const auto & seg : interval->getSegments()) {
 		left->addSegment(seg.start, std::min(seg.end, splitPos));
-		right->addSegment(std::max(seg.start, splitPos), std::min(seg.end, regionEnd));
-		tail->addSegment(std::max(seg.start, regionEnd), seg.end);
+		right->addSegment(std::max(seg.start, splitPos), seg.end);
 	}
 
 	// 分配 usePositions
@@ -176,10 +179,8 @@ SplitInfo LiveIntervalSplitter::doSplit(LiveInterval * interval, int splitPos, i
 		int depth = i < useLoopDepths.size() ? useLoopDepths[i] : interval->maxLoopDepth;
 		if (pos < splitPos) {
 			left->addUsePosition(pos, depth);
-		} else if (pos < regionEnd) {
-			right->addUsePosition(pos, depth);
 		} else {
-			tail->addUsePosition(pos, depth);
+			right->addUsePosition(pos, depth);
 		}
 	}
 
