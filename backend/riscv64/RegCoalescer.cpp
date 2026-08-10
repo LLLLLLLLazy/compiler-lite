@@ -383,7 +383,10 @@ void RegCoalescer::mergeIntervals(Value * src, Value * dst,
 	for (const auto & seg : from->getSegments()) {
 		to->addSegment(seg.start, seg.end);
 	}
-	// 将 from 的 usePositions 合入 to
+	// 将 from 的 defPositions/usePositions 合入 to
+	for (int pos : from->getDefPositions()) {
+		to->addDefPosition(pos);
+	}
 	for (int pos : from->getUsePositions()) {
 		to->addUsePosition(pos);
 	}

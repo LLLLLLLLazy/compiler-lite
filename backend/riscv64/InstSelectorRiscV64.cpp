@@ -773,8 +773,10 @@ void InstSelectorRiscV64::emitSplitTransfersBefore(Instruction * inst)
 			continue;
 		}
 
-		RegAllocInfo from = allocator.getAllocationInfoAt(transfer.value, instNum - 1);
-		RegAllocInfo to = allocator.getAllocationInfoAt(transfer.value, instNum);
+		const int fromPos = transfer.fromPosition >= 0 ? transfer.fromPosition : instNum - 1;
+		const int toPos = transfer.toPosition >= 0 ? transfer.toPosition : instNum;
+		RegAllocInfo from = allocator.getAllocationInfoAt(transfer.value, fromPos);
+		RegAllocInfo to = allocator.getAllocationInfoAt(transfer.value, toPos);
 		if (!sameRegAllocInfo(from, to)) {
 			auto stackIt = allocator.getAllocationMap().find(transfer.value);
 			RegAllocInfo stack = stackIt != allocator.getAllocationMap().end() ? stackIt->second : RegAllocInfo{};

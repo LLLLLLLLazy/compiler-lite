@@ -35,6 +35,43 @@
 #include "Use.h"
 #include "Value.h"
 
+namespace {
+
+bool isInLoopBody(const std::unordered_set<BasicBlock *> * body, BasicBlock * bb)
+{
+	return body != nullptr && bb != nullptr && body->find(bb) != body->end();
+}
+
+int firstInstructionNumber(BasicBlock * bb, const std::map<Instruction *, int> & instNumbering)
+{
+	if (bb == nullptr) {
+		return -1;
+	}
+	for (auto * inst : bb->getInstructions()) {
+		auto it = instNumbering.find(inst);
+		if (it != instNumbering.end()) {
+			return it->second;
+		}
+	}
+	return -1;
+}
+
+int lastInstructionNumber(BasicBlock * bb, const std::map<Instruction *, int> & instNumbering)
+{
+	if (bb == nullptr) {
+		return -1;
+	}
+	for (auto it = bb->getInstructions().rbegin(); it != bb->getInstructions().rend(); ++it) {
+		auto numIt = instNumbering.find(*it);
+		if (numIt != instNumbering.end()) {
+			return numIt->second;
+		}
+	}
+	return -1;
+}
+
+} // namespace
+
 /// @brief 构造函数，初始化溢出决策策略
 /// @param strategy 溢出决策策略，若为nullptr则使用默认的HeuristicSpillStrategy
 /// @param enableCalleeSavedFPR 是否启用 callee-saved FPR
@@ -94,6 +131,8 @@ void GreedyRegAllocator::allocate(Function * func)
 	instNumbering.clear();
 	valueLiveRanges.clear();
 	valueUsePositions.clear();
+	loopRegionEnds.clear();
+	loopEntryTransferPositions.clear();
 	frameSize = 0;
 	outgoingArgBytes = 0;
 	availableRegs.clear();
@@ -140,15 +179,57 @@ void GreedyRegAllocator::allocate(Function * func)
 
 	std::unordered_set<int> splitCandidateSet;
 	for (auto * bb : func->getBlocks()) {
-		if (bb == nullptr || bb->getLoopDepth() <= 0) {
+		if (bb == nullptr || !loopInfo.isLoopHeader(bb)) {
 			continue;
 		}
-		for (auto * inst : bb->getInstructions()) {
-			auto numIt = instNumbering.find(inst);
-			if (numIt != instNumbering.end()) {
-				splitCandidateSet.insert(numIt->second);
+
+		const auto * loopBody = loopInfo.getLoopBody(bb);
+		if (loopBody == nullptr) {
+			continue;
+		}
+
+		int headerPos = firstInstructionNumber(bb, instNumbering);
+		if (headerPos < 0) {
+			continue;
+		}
+
+		BasicBlock * preheader = nullptr;
+		bool hasUniquePreheader = true;
+		for (auto * pred : bb->getPredecessors()) {
+			if (isInLoopBody(loopBody, pred)) {
+				continue;
+			}
+			if (preheader != nullptr) {
+				hasUniquePreheader = false;
 				break;
 			}
+			preheader = pred;
+		}
+		if (!hasUniquePreheader || preheader == nullptr || preheader->getSuccessors().size() != 1 ||
+		    preheader->getSuccessors().front() != bb) {
+			continue;
+		}
+		int entryTransferPos = lastInstructionNumber(preheader, instNumbering);
+		if (entryTransferPos < 0) {
+			continue;
+		}
+
+		int loopEnd = -1;
+		for (auto * bodyBB : *loopBody) {
+			if (bodyBB == nullptr) {
+				continue;
+			}
+			for (auto * inst : bodyBB->getInstructions()) {
+				auto numIt = instNumbering.find(inst);
+				if (numIt != instNumbering.end()) {
+					loopEnd = std::max(loopEnd, numIt->second + 1);
+				}
+			}
+		}
+		if (loopEnd > headerPos) {
+			splitCandidateSet.insert(headerPos);
+			loopRegionEnds[headerPos] = loopEnd;
+			loopEntryTransferPositions[headerPos] = entryTransferPos;
 		}
 	}
 	splitCandidateNumbers.assign(splitCandidateSet.begin(), splitCandidateSet.end());
@@ -464,11 +545,17 @@ void GreedyRegAllocator::runGreedy(std::vector<LiveInterval *> & intervals, Inte
 		// [活跃区间分裂] 尝试分裂
 		if (splitter_) {
 			auto splitResult = splitter_->trySplit(interval, intervals, graph,
-				callInstNumbers, splitCandidateNumbers, intervalToIndex);
+				callInstNumbers, splitCandidateNumbers, loopRegionEnds, intervalToIndex);
 			if (splitResult.has_value()) {
-				// 分裂成功，原区间失效，将子区间加入工作列表
+				// 循环区域 split 的安全子集采用“循环外栈槽、循环内寄存器”：
+				// 入口边界只需要 stack->reg reload，避免多出口循环缺 exit store 的问题。
 				finalized.insert(interval);
-				enqueue(splitResult->left);
+				if (splitResult->forceLeftStack) {
+					markSpilled(splitResult->left);
+					finalized.insert(splitResult->left);
+				} else {
+					enqueue(splitResult->left);
+				}
 				enqueue(splitResult->right);
 				needReSort = true;
 				continue;
@@ -1067,6 +1154,18 @@ bool GreedyRegAllocator::canOmitSpillSlotForRemat(Value * value) const
 		return false;
 	}
 
+	// Partially split values may have a register-resident region that is populated
+	// by a stack->reg transfer at the split boundary. Such values still need a
+	// canonical stack slot even if every direct use could be rematerialized.
+	auto segIt = allocationSegments.find(value);
+	if (segIt != allocationSegments.end()) {
+		for (const auto & segment : segIt->second) {
+			if (segment.info.hasAnyReg()) {
+				return false;
+			}
+		}
+	}
+
 	for (Use * use : value->getUseList()) {
 		auto * inst = use != nullptr ? dynamic_cast<Instruction *>(use->getUser()) : nullptr;
 		if (inst == nullptr) {
@@ -1167,18 +1266,9 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 		});
 
 		bool hasSpilledSegment = false;
-		bool hasLocationChange = false;
-		bool hasBaselineLocation = false;
-		RegAllocInfo baselineLocation;
 		for (const auto & segment : segments) {
 			if (!segment.info.hasAnyReg()) {
 				hasSpilledSegment = true;
-			}
-			if (!hasBaselineLocation) {
-				baselineLocation = segment.info;
-				hasBaselineLocation = true;
-			} else if (!sameRegAllocInfo(baselineLocation, segment.info)) {
-				hasLocationChange = true;
 			}
 		}
 
@@ -1189,17 +1279,28 @@ void GreedyRegAllocator::rebuildAllocationMap(const std::vector<LiveInterval *> 
 			allocationMap[value] = segments.front().info;
 		}
 
-		bool hasBoundaryTransfer = false;
+		bool hasUnsafeLocationChange = false;
+		bool hasRegisterRegisterBoundary = false;
 		for (std::size_t i = 1; i < segments.size(); ++i) {
 			const auto & prev = segments[i - 1];
 			const auto & curr = segments[i];
-			if (prev.end == curr.start && !sameRegAllocInfo(prev.info, curr.info)) {
-				// 分裂点两侧位置不同，指令选择阶段需要在该编号处补搬运。
+			if (sameRegAllocInfo(prev.info, curr.info)) {
+				continue;
+			}
+			if (prev.end == curr.start) {
+				// P1-1 的安全子集允许相邻 split 边界上的 stack<->reg 搬运；
+				// 纯寄存器换位仍需要 CFG edge copy，继续回退到 canonical stack。
+				if (prev.info.hasAnyReg() && curr.info.hasAnyReg()) {
+					hasRegisterRegisterBoundary = true;
+					continue;
+				}
 				splitTransfers.push_back({value, curr.start});
-				hasBoundaryTransfer = true;
+			} else {
+				// 非相邻 CFG 段之间无法仅靠线性 split transfer 保证每条边都有正确值。
+				hasUnsafeLocationChange = true;
 			}
 		}
-		if (hasBoundaryTransfer || hasLocationChange) {
+		if (hasUnsafeLocationChange || hasRegisterRegisterBoundary) {
 			// Split copies are only inserted at linear adjacent boundaries. If the
 			// same Value has different locations across CFG-separated segments
 			// (including partial spill), use one canonical stack slot so every

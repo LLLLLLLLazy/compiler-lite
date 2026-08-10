@@ -77,10 +77,10 @@ void LiveInterval::addSegment(int segStart, int segEnd)
 	}
 }
 
-/// @brief 添加一个使用点
-void LiveInterval::addUsePosition(int pos)
+
+void LiveInterval::addDefPosition(int pos)
 {
-	addUsePosition(pos, 0);
+	defPositions.push_back(pos);
 }
 
 void LiveInterval::addUsePosition(int pos, int loopDepth)
