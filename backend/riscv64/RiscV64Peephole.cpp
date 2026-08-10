@@ -1878,6 +1878,276 @@ bool foldMaterializationMoves(InstList & code)
 	return changed;
 }
 
+/// @brief 合并连续零值 sw 为 sd，减少栈数组清零的指令数
+///
+/// 匹配两种模式：
+///   sw zero, 0(reg)
+///   sw zero, 4(reg)           → sd zero, 0(reg)
+///
+/// 以及指针链形式（addi 衔接的相邻 sw zero）：
+///   sw zero, 0(rA)
+///   addi rB, rA, 4
+///   sw zero, 0(rB)            → sd zero, 0(rA) 并修复后续 addi rX,rB,4 → addi rX,rA,8
+///
+/// 仅当链内定义的寄存器在链外无其他用途时才执行合并，
+/// 避免破坏仍在活跃的链指针。
+bool foldConsecutiveZeroStores(InstList & code)
+{
+	bool changed = false;
+
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * inst = *it;
+		if (!isLiveInst(inst)) {
+			continue;
+		}
+
+		// ── 模式 1: sw zero, 0(reg) 紧接 sw zero, 4(reg) ──
+		if (inst->opcode == "sw" && inst->result == "zero") {
+			int off1;
+			std::string base1;
+			if (!parseMemoryOperand(inst->arg1, off1, base1) || off1 != 0) {
+				continue;
+			}
+
+			auto next = nextMachineInst(code, it);
+			if (next == code.end() || isControlBoundary(*next)) {
+				continue;
+			}
+			auto * nextInst = *next;
+
+			// 模式 1a: sw zero,0(r) + sw zero,4(r) → sd zero,0(r)
+			if (nextInst->opcode == "sw" && nextInst->result == "zero") {
+				int off2;
+				std::string base2;
+				if (parseMemoryOperand(nextInst->arg1, off2, base2) && off2 == 4 && base2 == base1) {
+					inst->opcode = "sd";
+					// sd 的 arg1 保持 "0(reg)" 不变
+					nextInst->setDead();
+					changed = true;
+					continue;
+				}
+			}
+
+			// 模式 1b: sw zero,0(rA) + addi rB,rA,4 + sw zero,0(rB) → sd zero,0(rA)
+			if (nextInst->opcode != "addi" || nextInst->arg1 != base1 || nextInst->arg2 != "4" ||
+			    nextInst->result.empty()) {
+				continue;
+			}
+
+			std::string rB = nextInst->result;
+			auto next2 = nextMachineInst(code, next);
+			if (next2 == code.end() || isControlBoundary(*next2)) {
+				continue;
+			}
+			auto * sw2 = *next2;
+			if (sw2->opcode != "sw" || sw2->result != "zero") {
+				continue;
+			}
+
+			int off3;
+			std::string base3;
+			if (!parseMemoryOperand(sw2->arg1, off3, base3) || off3 != 0 || base3 != rB) {
+				continue;
+			}
+
+			// 检查 rB 在链外无其他使用：若下一条指令是 addi rX,rB,imm，
+			// 我们可以修复它，否则 rB 的额外引用意味着我们无法安全删除 addi。
+			auto afterSw2 = nextMachineInst(code, next2);
+			bool rB_safe = true;
+			if (afterSw2 != code.end() && !isControlBoundary(*afterSw2)) {
+				auto * postInst = *afterSw2;
+				if (instructionMentionsRegister(postInst, rB)) {
+					// 唯一的合法引用：addi rX, rB, imm（将被修复）
+					if (postInst->opcode != "addi" || postInst->arg1 != rB) {
+						rB_safe = false;
+					}
+				}
+			}
+			if (rB_safe && afterSw2 != code.end()) {
+				for (auto scan = nextLive(code, afterSw2); scan != code.end(); scan = nextLive(code, scan)) {
+					auto * sinst = *scan;
+					if (isControlBoundary(sinst)) {
+						break;
+					}
+					if (definesResultOperand(sinst) && sinst->result == rB) {
+						break;
+					}
+					// 跳过已经检查过的 fixup addi
+					if (scan == afterSw2 && sinst->opcode == "addi" && sinst->arg1 == rB) {
+						continue;
+					}
+					if (instructionMentionsRegister(sinst, rB)) {
+						rB_safe = false;
+						break;
+					}
+				}
+			}
+			if (!rB_safe) {
+				continue;
+			}
+
+			// 执行合并
+			inst->opcode = "sd";    // sw zero,0(rA) → sd zero,0(rA)
+			nextInst->setDead();    // addi rB,rA,4
+			sw2->setDead();         // sw zero,0(rB)
+			changed = true;
+
+			// 修复后续 addi rX, rB, 4 → addi rX, rA, 8
+			if (afterSw2 != code.end() && !isControlBoundary(*afterSw2)) {
+				auto * fixup = *afterSw2;
+				if (fixup->opcode == "addi" && fixup->arg1 == rB) {
+					fixup->arg1 = base1;
+					int fixupImm = 0;
+					if (parseIntImmediate(fixup->arg2, fixupImm)) {
+						fixup->arg2 = std::to_string(fixupImm + 4);
+					}
+				}
+			}
+			continue;
+		}
+
+		// ── 模式 2: 链起点 addi reg, sp/s0, off → 后续收集为 sd/sp 相对存储 ──
+		// 匹配 addi reg, frameReg, imm 后紧跟 sw zero, 0(reg)
+		if (inst->opcode != "addi" || inst->result.empty() || inst->arg1.empty() || inst->arg2.empty()) {
+			continue;
+		}
+		if (!isStackBaseRegister(inst->arg1)) {
+			continue;
+		}
+
+		std::string frameReg = inst->arg1;
+		std::string curReg = inst->result;
+		int baseOffset = 0;
+		if (!parseIntImmediate(inst->arg2, baseOffset)) {
+			continue;
+		}
+
+		auto swIt = nextMachineInst(code, it);
+		if (swIt == code.end() || isControlBoundary(*swIt)) {
+			continue;
+		}
+		auto * firstSw = *swIt;
+		if (firstSw->opcode != "sw" || firstSw->result != "zero") {
+			continue;
+		}
+		int swOff;
+		std::string swBase;
+		if (!parseMemoryOperand(firstSw->arg1, swOff, swBase) || swOff != 0 || swBase != curReg) {
+			continue;
+		}
+
+		// 链已确认，收集所有被清零的偏移
+		std::vector<int> offsets;
+		std::vector<InstIt> chainNodes;
+		offsets.push_back(baseOffset);
+		chainNodes.push_back(it);
+		chainNodes.push_back(swIt);
+
+		auto scan = nextMachineInst(code, swIt);
+		int curOffset = baseOffset;
+		std::string prevReg = curReg;
+
+		while (scan != code.end() && !isControlBoundary(*scan)) {
+			auto * cinst = *scan;
+
+			// 子模式 A: addi nextReg, prevReg, 4 + sw zero, 0(nextReg)
+			if (cinst->opcode == "addi" && cinst->arg1 == prevReg && cinst->arg2 == "4" &&
+			    !cinst->result.empty()) {
+				auto scan2 = nextMachineInst(code, scan);
+				if (scan2 == code.end() || isControlBoundary(*scan2)) {
+					break;
+				}
+				auto * csw = *scan2;
+				int cswOff;
+				std::string cswBase;
+				if (csw->opcode == "sw" && csw->result == "zero" &&
+				    parseMemoryOperand(csw->arg1, cswOff, cswBase) &&
+				    cswOff == 0 && cswBase == cinst->result) {
+					curOffset += 4;
+					offsets.push_back(curOffset);
+					chainNodes.push_back(scan);
+					chainNodes.push_back(scan2);
+					prevReg = cinst->result;
+					scan = nextMachineInst(code, scan2);
+					continue;
+				}
+			}
+
+			// 子模式 B: sw zero, 4(prevReg) — 同一寄存器，相邻偏移
+			if (cinst->opcode == "sw" && cinst->result == "zero") {
+				int cswOff;
+				std::string cswBase;
+				if (parseMemoryOperand(cinst->arg1, cswOff, cswBase) && cswOff == 4 && cswBase == prevReg) {
+					curOffset += 4;
+					offsets.push_back(curOffset);
+					chainNodes.push_back(scan);
+					scan = nextMachineInst(code, scan);
+					continue;
+				}
+			}
+
+			break;
+		}
+
+		if (offsets.size() < 2) {
+			continue;
+		}
+
+		// 安全检查：链内 addi 定义的寄存器在链外不能被引用
+		bool chainSafe = true;
+		auto afterChain = nextMachineInst(code, chainNodes.back());
+		for (size_t ci = 0; ci < chainNodes.size(); ++ci) {
+			auto * cn = *chainNodes[ci];
+			if (cn->opcode != "addi" || cn->result.empty()) {
+				continue;
+			}
+			std::string defReg = cn->result;
+			for (auto check = afterChain; check != code.end(); check = nextLive(code, check)) {
+				auto * ck = *check;
+				if (isControlBoundary(ck)) {
+					break;
+				}
+				if (definesResultOperand(ck) && ck->result == defReg) {
+					break;
+				}
+				if (instructionMentionsRegister(ck, defReg)) {
+					chainSafe = false;
+					break;
+				}
+			}
+			if (!chainSafe) {
+				break;
+			}
+		}
+		if (!chainSafe) {
+			continue;
+		}
+
+		// 删除链中所有旧指令
+		for (auto & cn : chainNodes) {
+			(*cn)->setDead();
+		}
+
+		// 生成 sd/sw 相对存储，插入到链起点位置
+		auto insertPos = chainNodes.front();
+		for (size_t i = 0; i < offsets.size(); i += 2) {
+			if (i + 1 < offsets.size()) {
+				// 成对使用 sd
+				std::string mem = std::to_string(offsets[i]) + "(" + frameReg + ")";
+				code.insert(insertPos, new RiscV64Inst("sd", "zero", mem));
+			} else {
+				// 奇数尾元素使用 sw
+				std::string mem = std::to_string(offsets[i]) + "(" + frameReg + ")";
+				code.insert(insertPos, new RiscV64Inst("sw", "zero", mem));
+			}
+		}
+
+		changed = true;
+	}
+
+	return changed;
+}
+
 /// @brief 折叠零值材料化后的整数 store
 ///
 /// 匹配：
@@ -3684,6 +3954,8 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		localChanged = foldMaterializationMoves(code) || localChanged;
 		// 折叠零值 store，减少局部数组清零中的 li 0 序列
 		localChanged = foldZeroStores(code) || localChanged;
+		// 合并连续零值 sw 为 sd：将链式 addi+sw 替换为 sd 双字零存储
+		localChanged = foldConsecutiveZeroStores(code) || localChanged;
 		// 转发同块内 32/64 位GPR栈槽 store-load，消除地址临时值绕栈往返
 		localChanged = forwardStackStoreLoads(code) || localChanged;
 		// 消除同一直线区间内对同一栈槽的重复 GPR reload
