@@ -20,10 +20,13 @@ class Value;
 
 /// @brief 活跃区间分裂信息
 struct SplitInfo {
-	LiveInterval * left;      ///< 分裂后的左子区间 [start, splitPos)
-	LiveInterval * right;     ///< 分裂后的右子区间 [splitPos, end)
-	int splitPos;             ///< 分裂点指令编号
-	LiveInterval * original;  ///< 原始区间（已被替换）
+	LiveInterval * left = nullptr;  ///< 循环外左侧区间 [start, splitPos)
+	LiveInterval * right = nullptr; ///< 循环区域区间 [splitPos, regionEnd)
+	LiveInterval * tail = nullptr;  ///< 循环外右侧区间 [regionEnd, end)，可为空
+	int splitPos = -1;             ///< 循环区域起点指令编号
+	int regionEnd = -1;            ///< 循环区域结束指令编号（开区间）
+	LiveInterval * original = nullptr; ///< 原始区间（已被替换）
+	bool forceLeftStack = false; ///< 循环区域分裂：循环外侧固定走 canonical 栈槽
 };
 
 /// @brief 活跃区间分裂器
@@ -49,6 +52,7 @@ public:
 		InterferenceGraph *& graph,
 		const std::vector<int> & callInstNumbers,
 		const std::vector<int> & extraSplitCandidates,
+		const std::unordered_map<int, int> & loopRegionEnds,
 		std::unordered_map<LiveInterval *, int> & intervalToIndex);
 
 	/// @brief 获取所有分裂记录
@@ -65,10 +69,11 @@ private:
 	/// 策略：选择区间内的调用点；无调用点则不分裂
 	int chooseSplitPos(LiveInterval * interval,
 	                   const std::vector<int> & callInstNumbers,
-	                   const std::vector<int> & extraSplitCandidates);
+	                   const std::vector<int> & extraSplitCandidates,
+	                   const std::unordered_map<int, int> & loopRegionEnds);
 
-	/// @brief 执行分裂：将 interval 拆分为 [start, splitPos) 和 [splitPos, end)
-	SplitInfo doSplit(LiveInterval * interval, int splitPos,
+	/// @brief 执行分裂：将 interval 拆分为循环外左段、循环区域段、可选循环外右段
+	SplitInfo doSplit(LiveInterval * interval, int splitPos, int regionEnd,
 	                  std::vector<LiveInterval *> & intervals,
 	                  std::unordered_map<LiveInterval *, int> & intervalToIndex);
 
