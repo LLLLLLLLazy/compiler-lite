@@ -19,6 +19,7 @@
 #include "fixedPointFunctionPass/DeadInstElim.h"
 #include "fixedPointFunctionPass/GVN.h"
 #include "fixedPointFunctionPass/InstCombine.h"
+#include "fixedPointFunctionPass/PartialDeadStoreElim.h"
 #include "fixedPointFunctionPass/LICM.h"
 #include "fixedPointFunctionPass/LoopConstantPromotion.h"
 #include "fixedPointFunctionPass/GuardedTailCollapse.h"
@@ -352,6 +353,13 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
     });
     registerFixedPointFunctionPass("InstCombine", [this](Function * func) {
         InstCombine pass(func, module);
+        return pass.run();
+    });
+    // 部分死 store 消除：将「先做栈数组初始化、再判断提前返回」的检查上提
+    // 到入口，提前返回路径不再执行死 store。依赖此前 LocalMemoryOpt /
+    // ConstProp / InstCombine 已把 || 短路条件收敛为纯参数表达式（phi 形态）
+    registerFixedPointFunctionPass("PartialDeadStoreElim", [](Function * func) {
+        PartialDeadStoreElim pass(func);
         return pass.run();
     });
     // 子组4 清理：再做一次纯调用 CSE 与常量传播，然后消除不可达块与死指令并简化 CFG

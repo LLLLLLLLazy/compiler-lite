@@ -102,6 +102,18 @@ private:
 	/// @brief 当前函数是否对 ra 使用 shrink-wrapping
 	bool currentShrinkWrapRA = false;
 
+	/// @brief 完整版 shrink-wrapping：提前返回路径不建栈帧、不保存 callee-saved
+	bool currentShrinkWrapEntry = false;
+
+	/// @brief 提前返回目标块集（提前路径直接 ret，不生成 epilogue）
+	std::vector<BasicBlock *> currentShrinkWrapRetTargets;
+
+	/// @brief prologue（帧分配+保存+参数搬运）下沉插入的边界块集
+	std::vector<BasicBlock *> currentShrinkWrapPrologueBlocks;
+
+	/// @brief 提前路径块集（不访问栈、不使用 callee-saved）
+	std::vector<BasicBlock *> currentShrinkWrapBlocks;
+
 	/// @brief 当前代码生成器启用的RA配置
 	bool enableRVV_ = true;            ///< 是否输出 RVV 目标汇编
 	bool enableCalleeSavedFPR_ = false;  ///< 是否启用callee-saved FPR分配
