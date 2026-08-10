@@ -53,6 +53,7 @@ public:
 		const std::vector<int> & callInstNumbers,
 		const std::vector<int> & extraSplitCandidates,
 		const std::unordered_map<int, int> & loopRegionEnds,
+		const std::unordered_map<int, int> & loopEntryTransferPositions,
 		std::unordered_map<LiveInterval *, int> & intervalToIndex);
 
 	/// @brief 获取所有分裂记录
@@ -74,6 +75,7 @@ private:
 
 	/// @brief 执行分裂：将 interval 拆分为循环外左段、循环区域段、可选循环外右段
 	SplitInfo doSplit(LiveInterval * interval, int splitPos, int regionEnd,
+	                  int entryTransferPos,
 	                  std::vector<LiveInterval *> & intervals,
 	                  std::unordered_map<LiveInterval *, int> & intervalToIndex);
 
