@@ -213,6 +213,13 @@ void GreedyRegAllocator::allocate(Function * func)
 		if (entryTransferPos < 0) {
 			continue;
 		}
+		// 真 preheader 必须在 header 之前执行（指令号 < headerPos）。若循环有
+		// 其他非 body 前驱（如循环后块跳回 header 的多入口循环），被误当
+		// preheader 的块执行在 header 之后，从该入口进入循环时没有入口
+		// reload，right 段寄存器值未初始化 → 拒绝此类循环
+		if (entryTransferPos >= headerPos) {
+			continue;
+		}
 
 		int loopEnd = -1;
 		for (auto * bodyBB : *loopBody) {
@@ -545,7 +552,8 @@ void GreedyRegAllocator::runGreedy(std::vector<LiveInterval *> & intervals, Inte
 		// [活跃区间分裂] 尝试分裂
 		if (splitter_) {
 			auto splitResult = splitter_->trySplit(interval, intervals, graph,
-				callInstNumbers, splitCandidateNumbers, loopRegionEnds, intervalToIndex);
+				callInstNumbers, splitCandidateNumbers, loopRegionEnds,
+				loopEntryTransferPositions, intervalToIndex);
 			if (splitResult.has_value()) {
 				// 循环区域 split 的安全子集采用“循环外栈槽、循环内寄存器”：
 				// 入口边界只需要 stack->reg reload，避免多出口循环缺 exit store 的问题。

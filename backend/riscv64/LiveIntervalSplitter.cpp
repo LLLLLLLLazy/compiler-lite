@@ -133,6 +133,7 @@ int LiveIntervalSplitter::chooseSplitPos(LiveInterval * interval,
 
 /// @brief 执行分裂
 SplitInfo LiveIntervalSplitter::doSplit(LiveInterval * interval, int splitPos, int regionEnd,
+                                        int entryTransferPos,
                                         std::vector<LiveInterval *> & intervals,
                                         std::unordered_map<LiveInterval *, int> & intervalToIndex)
 {
@@ -163,12 +164,14 @@ SplitInfo LiveIntervalSplitter::doSplit(LiveInterval * interval, int splitPos, i
 
 	// 分配 Segment
 	// 注意：right 段覆盖到区间末尾而非 regionEnd。regionEnd 截断会把循环
-	// 后的 use 分到 tail 段（栈槽读取），但循环内 right 寄存器值在循环
-	// 执行期间可能与栈槽不一致（循环边界/指令号边界错位），tail 读到旧值
-	// 产生错误。循环内无 def 时 right 值在循环前后保持不变，覆盖到末尾安全。
+	// right 段从 entryTransferPos（preheader 终结指令号）起：循环入口的
+	// stack->reg reload 是 IR 外指令，插在 header 首指令之前，RA 必须为该
+	// 位置预留寄存器，否则 reload 会覆盖其他活跃值。right 到 regionEnd 截断，
+	// 循环后（>= regionEnd）的 use 走 tail 栈槽（长距离/跨 call 安全）。
 	for (const auto & seg : interval->getSegments()) {
 		left->addSegment(seg.start, std::min(seg.end, splitPos));
-		right->addSegment(std::max(seg.start, splitPos), seg.end);
+		right->addSegment(std::max(seg.start, entryTransferPos), std::min(seg.end, regionEnd));
+		tail->addSegment(std::max(seg.start, regionEnd), seg.end);
 	}
 
 	// 分配 usePositions
@@ -179,8 +182,10 @@ SplitInfo LiveIntervalSplitter::doSplit(LiveInterval * interval, int splitPos, i
 		int depth = i < useLoopDepths.size() ? useLoopDepths[i] : interval->maxLoopDepth;
 		if (pos < splitPos) {
 			left->addUsePosition(pos, depth);
-		} else {
+		} else if (pos < regionEnd) {
 			right->addUsePosition(pos, depth);
+		} else {
+			tail->addUsePosition(pos, depth);
 		}
 	}
 
@@ -252,6 +257,7 @@ std::optional<SplitInfo> LiveIntervalSplitter::trySplit(
 	const std::vector<int> & callInstNumbers,
 	const std::vector<int> & extraSplitCandidates,
 	const std::unordered_map<int, int> & loopRegionEnds,
+	const std::unordered_map<int, int> & loopEntryTransferPositions,
 	std::unordered_map<LiveInterval *, int> & intervalToIndex)
 {
 	// 前置检查
@@ -292,7 +298,15 @@ std::optional<SplitInfo> LiveIntervalSplitter::trySplit(
 	int regionEnd = regionEndIt->second;
 
 	// 执行分裂
-	SplitInfo splitInfo = doSplit(interval, splitPos, regionEnd, intervals, intervalToIndex);
+	int entryTransferPos = -1;
+	{
+		auto etIt = loopEntryTransferPositions.find(splitPos);
+		if (etIt != loopEntryTransferPositions.end()) {
+			entryTransferPos = etIt->second;
+		}
+	}
+	SplitInfo splitInfo = doSplit(interval, splitPos, regionEnd, entryTransferPos,
+	                              intervals, intervalToIndex);
 	splitInfo.forceLeftStack = std::find(extraSplitCandidates.begin(), extraSplitCandidates.end(), splitPos) !=
 	                           extraSplitCandidates.end();
 	// 更新干涉图
