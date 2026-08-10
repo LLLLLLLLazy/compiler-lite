@@ -36,7 +36,12 @@ struct RegAllocSegment {
 /// @brief split 边界处需要搬运同一个 Value 的位置
 struct RegAllocSplitTransfer {
 	Value * value = nullptr;
+	/// @brief 实际插入搬运代码的 IR 指令号（在该指令前插入）
 	int position = 0;
+	/// @brief 查询源位置的位置；-1 表示使用 position-1
+	int fromPosition = -1;
+	/// @brief 查询目标位置的位置；-1 表示使用 position
+	int toPosition = -1;
 };
 
 /// @brief 寄存器分配统计
@@ -423,6 +428,9 @@ private:
 	/// @brief 当前函数中适合分裂的非调用点指令编号
 	std::vector<int> splitCandidateNumbers;
 
+	/// @brief 循环 header 指令号到可安全插入入口 reload 的 preheader terminator 指令号
+	std::unordered_map<int, int> loopEntryTransferPositions;
+
 	/// @brief Value 在哪些 call 返回后仍然存活
 	std::unordered_map<Value *, std::unordered_set<int>> liveAcrossCallPositions;
 
@@ -452,6 +460,9 @@ private:
 
 	/// @brief Callee-saved FPR 启用器
 	std::unique_ptr<CalleeSavedFPREnabler> fprEnabler_;
+
+	/// @brief 循环 header 指令号到该自然循环线性结束位置的映射
+	std::unordered_map<int, int> loopRegionEnds;
 
 	/// @brief 被使用的 callee-saved FPR 列表
 	std::vector<int> usedCalleeSavedFPRs_;

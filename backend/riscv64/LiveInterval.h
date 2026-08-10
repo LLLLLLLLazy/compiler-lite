@@ -46,7 +46,13 @@ public:
 	/// @brief 添加一个使用点（指令编号）
 	/// 使用点用于精确计算溢出权重
 	/// @param pos 指令编号
-	void addUsePosition(int pos);
+	void addUsePosition(int pos)
+	{
+		addUsePosition(pos, 0);
+	}
+
+	/// @brief 添加一个定义点（指令编号）
+	void addDefPosition(int pos);
 
 	/// @brief 添加一个带循环深度的使用点
 	void addUsePosition(int pos, int loopDepth);
@@ -109,6 +115,9 @@ public:
 	/// @return 子段列表引用
 	const std::list<Segment> & getSegments() const { return segments; }
 
+	/// @brief 获取定义点列表
+	const std::vector<int> & getDefPositions() const { return defPositions; }
+
 	/// @brief 获取使用点列表
 	/// @return 使用点列表引用
 	const std::vector<int> & getUsePositions() const { return usePositions; }
@@ -125,6 +134,9 @@ public:
 
 	/// 存活子段列表（可能不连续，如分支/循环中）
 	std::list<Segment> segments;
+
+	/// 定义点列表（指令编号）
+	std::vector<int> defPositions;
 
 	/// 使用点列表（指令编号）
 	std::vector<int> usePositions;

@@ -239,6 +239,7 @@ void LiveIntervalAnalysis::computeLiveIntervals()
 
 		valueDefs[value].push_back({instNum, bb});
 		LiveInterval * interval = getOrCreateInterval(value);
+		interval->addDefPosition(instNum);
 		interval->addSegment(instNum, instNum + 1);
 		interval->noteDefLoopDepth(loopDepthOf(bb));
 	};
