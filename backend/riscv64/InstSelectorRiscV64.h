@@ -385,6 +385,51 @@ private:
 	/// @brief 是否已在调用点保存ra（避免重复保存）
 	bool raSavedAtCallSite = false;
 
+public:
+	/// @brief 设置入口 shrink-wrapping 模式（提前返回路径不建栈帧）
+	void setShrinkWrapEntry(bool enable)
+	{
+		shrinkWrapEntry_ = enable;
+	}
+
+	/// @brief 设置提前返回目标块集
+	void setShrinkWrapRetTargets(const std::vector<BasicBlock *> & blocks)
+	{
+		shrinkWrapRetTargets_.clear();
+		shrinkWrapRetTargets_.insert(blocks.begin(), blocks.end());
+	}
+
+	/// @brief 设置 prologue 下沉插入边界块集
+	void setShrinkWrapPrologueBlocks(const std::vector<BasicBlock *> & blocks)
+	{
+		shrinkWrapPrologueBlocks_.clear();
+		shrinkWrapPrologueBlocks_.insert(blocks.begin(), blocks.end());
+	}
+
+	/// @brief 设置提前路径块集
+	void setShrinkWrapBlocks(const std::vector<BasicBlock *> & blocks)
+	{
+		shrinkWrapBlocks_.clear();
+		shrinkWrapBlocks_.insert(blocks.begin(), blocks.end());
+	}
+
+private:
+
+	/// @brief 完整版 shrink-wrapping：提前返回路径不建栈帧、不保存 callee-saved
+	bool shrinkWrapEntry_ = false;
+
+	/// @brief 提前返回目标块集（其 ret 不生成 epilogue）
+	std::unordered_set<BasicBlock *> shrinkWrapRetTargets_;
+
+	/// @brief prologue（帧分配+保存+参数搬运）下沉插入的边界块集
+	std::unordered_set<BasicBlock *> shrinkWrapPrologueBlocks_;
+
+	/// @brief 提前路径块集（形参操作数读原始 aN 寄存器）
+	std::unordered_set<BasicBlock *> shrinkWrapBlocks_;
+
+	/// @brief 当前正在翻译的基本块
+	BasicBlock * currentBlock_ = nullptr;
+
 	/// @brief 优化的基本块顺序，用于判断后继块是否紧邻
 	std::vector<BasicBlock *> orderedBlocks_;
 

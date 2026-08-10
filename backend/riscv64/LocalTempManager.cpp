@@ -210,6 +210,9 @@ int LocalTempManager::borrowImpl(Instruction * inst, int excludeReg, bool afterU
 		if (borrowed.find(reg) != borrowed.end()) {
 			continue;
 		}
+		if (excludeArgRegs_ && isArgumentReg(reg)) {
+			continue;
+		}
 		if (inst == nullptr && isArgumentReg(reg)) {
 			continue;
 		}
