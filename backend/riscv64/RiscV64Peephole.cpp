@@ -1982,24 +1982,13 @@ bool foldConsecutiveZeroStores(InstList & code)
 					}
 				}
 			}
-			if (rB_safe && afterSw2 != code.end()) {
-				for (auto scan = nextLive(code, afterSw2); scan != code.end(); scan = nextLive(code, scan)) {
-					auto * sinst = *scan;
-					if (isControlBoundary(sinst)) {
-						break;
-					}
-					if (definesResultOperand(sinst) && sinst->result == rB) {
-						break;
-					}
-					// 跳过已经检查过的 fixup addi
-					if (scan == afterSw2 && sinst->opcode == "addi" && sinst->arg1 == rB) {
-						continue;
-					}
-					if (instructionMentionsRegister(sinst, rB)) {
-						rB_safe = false;
-						break;
-					}
-				}
+			// rB 在链外(含跨控制边界)直到被重定义前仍有使用时不可删除 addi：
+			// 与 foldUnitStepIncrements 的修复同理，跨边界停止扫描会把
+			// 后续块中的地址基址使用漏掉，导致 s 寄存器在后续块被当作
+			// 已物化地址使用。fixup addi(rX,rB,imm) 自身从 afterSw2 之后
+			// 才开始扫描，天然被跳过。
+			if (rB_safe && registerUsedAfterIgnoringBoundary(code, afterSw2, rB)) {
+				rB_safe = false;
 			}
 			if (!rB_safe) {
 				continue;
@@ -2112,29 +2101,18 @@ bool foldConsecutiveZeroStores(InstList & code)
 			continue;
 		}
 
-		// 安全检查：链内 addi 定义的寄存器在链外不能被引用
+		// 安全检查：链内 addi 定义的寄存器在链外(含跨控制边界，直到被重定义)
+		// 不能被引用；跨边界停止扫描会漏掉后续块中的地址基址使用。
+		// registerUsedAfterIgnoringBoundary 从 start 的下一条开始扫描，
+		// 因此以链尾节点为起点，恰好覆盖链后第一条指令(旧实现同样检查它)。
 		bool chainSafe = true;
-		auto afterChain = nextMachineInst(code, chainNodes.back());
 		for (size_t ci = 0; ci < chainNodes.size(); ++ci) {
 			auto * cn = *chainNodes[ci];
 			if (cn->opcode != "addi" || cn->result.empty()) {
 				continue;
 			}
-			std::string defReg = cn->result;
-			for (auto check = afterChain; check != code.end(); check = nextLive(code, check)) {
-				auto * ck = *check;
-				if (isControlBoundary(ck)) {
-					break;
-				}
-				if (definesResultOperand(ck) && ck->result == defReg) {
-					break;
-				}
-				if (instructionMentionsRegister(ck, defReg)) {
-					chainSafe = false;
-					break;
-				}
-			}
-			if (!chainSafe) {
+			if (registerUsedAfterIgnoringBoundary(code, chainNodes.back(), cn->result)) {
+				chainSafe = false;
 				break;
 			}
 		}
@@ -3582,6 +3560,12 @@ bool reduceAffineAddressRecurrences(InstList & code)
 		for (auto it = bodyBegin; it != latchIt && it != code.end(); it = nextLive(code, it)) {
 			AffineAddressChain chain;
 			if (matchAffineAddressChain(code, it, latchIt, indexReg, chain)) {
+				// baseReg 必须循环不变量：若在循环体内被定义，指针初值插入循环头时
+				// 该寄存器持有的是前导块残留的旧值（如另一个 GEP 的结果），
+				// 首轮迭代会用错误基址访存。
+				if (registerDefinedInRange(bodyBegin, latchIt, chain.baseReg)) {
+					continue;
+				}
 				chains.push_back(std::move(chain));
 			}
 		}
