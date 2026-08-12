@@ -81,6 +81,25 @@ GlobalVariable * findGlobalByName(Module * mod, const std::string & name)
     return nullptr;
 }
 
+/// @brief 创建不与用户符号冲突的记忆化全局对象
+/// @param mod 所属模块
+/// @param type 全局对象类型
+/// @param baseName 首选名称
+/// @return 新建的合成全局对象，创建失败时返回 nullptr
+GlobalVariable * createUniqueMemoGlobal(Module * mod, Type * type, const std::string & baseName)
+{
+    if (!mod || !type || baseName.empty()) {
+        return nullptr;
+    }
+
+    std::string name = baseName;
+    int32_t suffix = 0;
+    while (findGlobalByName(mod, name) != nullptr || mod->findFunction(name) != nullptr) {
+        name = baseName + "_" + std::to_string(++suffix);
+    }
+    return mod->newSyntheticGlobalVariable(type, name);
+}
+
 } // namespace
 
 PureCallMemoize::PureCallMemoize(Function * _func, Module * _mod)
@@ -184,21 +203,14 @@ PureCallMemoize::MemoGlobals PureCallMemoize::createMemoGlobals(int32_t paramCou
     auto * i32Type = IntegerType::getTypeInt32();
     auto * tableType = ArrayType::get(i32Type, kHashCapacity);
 
-    auto getOrCreate = [this](Type * type, const std::string & name) {
-        if (auto * existing = findGlobalByName(mod, name)) {
-            return existing;
-        }
-        return mod->newSyntheticGlobalVariable(type, name);
-    };
-
-    globals.key0 = getOrCreate(tableType, "_memo_hash_key0_" + suffix);
+    globals.key0 = createUniqueMemoGlobal(mod, tableType, "_memo_hash_key0_" + suffix);
     if (paramCount == 2) {
-        globals.key1 = getOrCreate(tableType, "_memo_hash_key1_" + suffix);
+        globals.key1 = createUniqueMemoGlobal(mod, tableType, "_memo_hash_key1_" + suffix);
     }
-    globals.value = getOrCreate(tableType, "_memo_hash_value_" + suffix);
-    globals.epochTag = getOrCreate(tableType, "_memo_hash_epoch_" + suffix);
-    globals.currentEpoch = getOrCreate(i32Type, "_memo_epoch_" + suffix);
-    globals.recursionDepth = getOrCreate(i32Type, "_memo_depth_" + suffix);
+    globals.value = createUniqueMemoGlobal(mod, tableType, "_memo_hash_value_" + suffix);
+    globals.epochTag = createUniqueMemoGlobal(mod, tableType, "_memo_hash_epoch_" + suffix);
+    globals.currentEpoch = createUniqueMemoGlobal(mod, i32Type, "_memo_epoch_" + suffix);
+    globals.recursionDepth = createUniqueMemoGlobal(mod, i32Type, "_memo_depth_" + suffix);
     return globals;
 }
 
