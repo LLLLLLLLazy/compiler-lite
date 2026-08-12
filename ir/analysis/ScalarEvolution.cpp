@@ -5,6 +5,8 @@
 
 #include "ScalarEvolution.h"
 
+#include <cstdint>
+#include <cstring>
 #include <limits>
 
 #include "BasicBlock.h"
@@ -25,6 +27,16 @@
 namespace {
 
 using CompareKind = ScalarEvolution::CompareKind;
+
+/// @brief 按 i32 补码语义把无符号位模式还原为有符号常量
+/// @param bits 待还原的 32 位位模式
+/// @return 具有相同位模式的有符号整数
+int32_t integerFromBits(std::uint32_t bits)
+{
+	int32_t value = 0;
+	std::memcpy(&value, &bits, sizeof(value));
+	return value;
+}
 
 CompareKind getCompareKindFromOp(IRInstOperator op)
 {
@@ -395,7 +407,9 @@ const ScalarEvolution::Expr * ScalarEvolution::createAdd(Type * type,
     const bool lhsIsConstant = tryEvaluateConstantInt(lhs, lhsConstant);
     const bool rhsIsConstant = tryEvaluateConstantInt(rhs, rhsConstant);
     if (lhsIsConstant && rhsIsConstant) {
-        return createConstant(type, lhsConstant + rhsConstant);
+		return createConstant(type,
+		                      integerFromBits(static_cast<std::uint32_t>(lhsConstant)
+		                                      + static_cast<std::uint32_t>(rhsConstant)));
     }
     if (lhsIsConstant && lhsConstant == 0) {
         return rhs;
@@ -425,7 +439,9 @@ const ScalarEvolution::Expr * ScalarEvolution::createMultiply(Type * type,
     const bool lhsIsConstant = tryEvaluateConstantInt(lhs, lhsConstant);
     const bool rhsIsConstant = tryEvaluateConstantInt(rhs, rhsConstant);
     if (lhsIsConstant && rhsIsConstant) {
-        return createConstant(type, lhsConstant * rhsConstant);
+		return createConstant(type,
+		                      integerFromBits(static_cast<std::uint32_t>(lhsConstant)
+		                                      * static_cast<std::uint32_t>(rhsConstant)));
     }
     if ((lhsIsConstant && lhsConstant == 0) || (rhsIsConstant && rhsConstant == 0)) {
         return createConstant(type, 0);
@@ -760,7 +776,7 @@ bool ScalarEvolution::tryEvaluateConstantInt(const Expr * expr, int32_t & consta
         if (!tryEvaluateConstantInt(add->getLHS(), lhs) || !tryEvaluateConstantInt(add->getRHS(), rhs)) {
             return false;
         }
-        constant = lhs + rhs;
+		constant = integerFromBits(static_cast<std::uint32_t>(lhs) + static_cast<std::uint32_t>(rhs));
         return true;
     }
     case ExprKind::Multiply: {
@@ -770,7 +786,7 @@ bool ScalarEvolution::tryEvaluateConstantInt(const Expr * expr, int32_t & consta
         if (!tryEvaluateConstantInt(mul->getLHS(), lhs) || !tryEvaluateConstantInt(mul->getRHS(), rhs)) {
             return false;
         }
-        constant = lhs * rhs;
+		constant = integerFromBits(static_cast<std::uint32_t>(lhs) * static_cast<std::uint32_t>(rhs));
         return true;
     }
     case ExprKind::Unknown:
@@ -1006,6 +1022,14 @@ bool ScalarEvolution::computeTripCount(CompareKind compareKind,
     }
 
     if (iterations < 0 || iterations > std::numeric_limits<int32_t>::max()) {
+        return false;
+    }
+
+    // 有限迭代数要求退出测试所见的最终 IV 仍可由 i32 表示
+    // 若最后一次步进发生回绕，无限精度公式不能描述真实循环控制流
+    const int64_t finalValue = start + iterations * stride;
+    if (finalValue < std::numeric_limits<int32_t>::min() ||
+        finalValue > std::numeric_limits<int32_t>::max()) {
         return false;
     }
 

@@ -9,8 +9,9 @@
 
 #include "IRGenerator.h"
 
-#include <cstdint>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -41,6 +42,16 @@
 #include "FloatType.h"
 
 namespace {
+
+/// @brief 按 i32 补码语义把无符号位模式还原为有符号常量
+/// @param bits 待还原的 32 位位模式
+/// @return 具有相同位模式的有符号整数
+int32_t integerFromBits(std::uint32_t bits)
+{
+	int32_t value = 0;
+	std::memcpy(&value, &bits, sizeof(value));
+	return value;
+}
 
 ast_node * getDeclDimsNode(ast_node * declNode)
 {
@@ -95,7 +106,9 @@ std::vector<int32_t> packStringLiteralWords(const std::string & text)
     std::size_t wordCount = (bytes.size() + 3) / 4;
     std::vector<int32_t> words(wordCount, 0);
     for (std::size_t i = 0; i < bytes.size(); ++i) {
-        words[i / 4] |= static_cast<int32_t>(bytes[i]) << ((i % 4) * 8);
+		const auto byteBits = static_cast<std::uint32_t>(bytes[i]);
+		const auto wordBits = static_cast<std::uint32_t>(words[i / 4]);
+		words[i / 4] = integerFromBits(wordBits | (byteBits << ((i % 4) * 8)));
     }
 
     return words;
@@ -1653,7 +1666,7 @@ bool IRGenerator::evaluateConstIntExpr(ast_node * node, int32_t & result)
             if (!evaluateConstIntExpr(node->sons[0], operand)) {
                 return false;
             }
-            result = -operand;
+			result = integerFromBits(0U - static_cast<std::uint32_t>(operand));
             return true;
         }
 
@@ -1669,24 +1682,26 @@ bool IRGenerator::evaluateConstIntExpr(ast_node * node, int32_t & result)
                 return false;
             }
 
+			const auto lhsBits = static_cast<std::uint32_t>(lhs);
+			const auto rhsBits = static_cast<std::uint32_t>(rhs);
             switch (node->node_type) {
                 case ast_operator_type::AST_OP_ADD:
-                    result = lhs + rhs;
+					result = integerFromBits(lhsBits + rhsBits);
                     return true;
                 case ast_operator_type::AST_OP_SUB:
-                    result = lhs - rhs;
+					result = integerFromBits(lhsBits - rhsBits);
                     return true;
                 case ast_operator_type::AST_OP_MUL:
-                    result = lhs * rhs;
+					result = integerFromBits(lhsBits * rhsBits);
                     return true;
                 case ast_operator_type::AST_OP_DIV:
-                    if (rhs == 0) {
+					if (rhs == 0 || (lhs == std::numeric_limits<int32_t>::min() && rhs == -1)) {
                         return false;
                     }
                     result = lhs / rhs;
                     return true;
                 case ast_operator_type::AST_OP_MOD:
-                    if (rhs == 0) {
+					if (rhs == 0 || (lhs == std::numeric_limits<int32_t>::min() && rhs == -1)) {
                         return false;
                     }
                     result = lhs % rhs;

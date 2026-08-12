@@ -188,6 +188,25 @@ bool isFusionLegal(const std::vector<MemAccess> & acc1,
     return true;
 }
 
+/// @brief 验证循环仅能由头部计数条件跳向规范出口
+/// @param loopBody 循环自然体块集合
+/// @param header 循环头
+/// @param exit 规范出口块
+/// @return 不存在 break 等额外出环边时返回 true
+bool hasOnlyCanonicalExit(const std::unordered_set<BasicBlock *> & loopBody,
+	                      BasicBlock * header,
+	                      BasicBlock * exit)
+{
+	for (auto * bb : loopBody) {
+		for (auto * succ : bb->getSuccessors()) {
+			if (loopBody.find(succ) == loopBody.end() && (bb != header || succ != exit)) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 /// @brief 取归纳 phi 沿回边（来自 latch）的自增值
 Value * getBackedgeValue(PhiInst * induction, BasicBlock * latch)
 {
@@ -306,6 +325,9 @@ bool tryFuseLoops(Function * func,
     if (!body1 || !body2) {
         return false;
     }
+	if (!hasOnlyCanonicalExit(*body1, H1, Ex1) || !hasOnlyCanonicalExit(*body2, H2, Ex2)) {
+		return false;
+	}
     std::vector<MemAccess> acc1;
     std::vector<MemAccess> acc2;
     if (!collectBodyAccesses(*body1, H1, acc1) || !collectBodyAccesses(*body2, H2, acc2)) {
