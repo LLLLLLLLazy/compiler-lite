@@ -1352,16 +1352,26 @@ bool IRGenerator::collectGlobalArrayInitScalars(
     Type * type, const std::vector<ast_node *> & items, std::size_t begin, std::size_t end,
     std::vector<int32_t> & intValues, std::vector<float> & floatValues)
 {
+    /// @brief 按聚合对象的标量类型追加一个隐式零值
+    auto appendZero = [&intValues, &floatValues](Type * valueType) {
+        Type * scalarType = getArrayScalarType(valueType);
+        if (scalarType != nullptr && scalarType->isFloatType()) {
+            floatValues.push_back(0.0f);
+        } else {
+            intValues.push_back(0);
+        }
+    };
+
     auto * arrayType = dynamic_cast<ArrayType *>(type);
     if (arrayType == nullptr) {
         if (begin >= end) {
-            intValues.push_back(0);
+            appendZero(type);
             return true;
         }
         ast_node * item = items[begin];
         if (item->node_type == ast_operator_type::AST_OP_INIT_LIST) {
             if (item->sons.empty()) {
-                intValues.push_back(0);
+                appendZero(type);
                 return true;
             }
             item = item->sons[0];
@@ -1389,7 +1399,7 @@ bool IRGenerator::collectGlobalArrayInitScalars(
     for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
         if (cursor >= end) {
             for (std::size_t k = 0; k < subScalarCount; ++k) {
-                intValues.push_back(0);
+                appendZero(elemType);
             }
             continue;
         }
