@@ -157,6 +157,9 @@ suite_dir_from_key() {
 		matmul|matmul_performance)
 			echo "matmul_performance"
 			;;
+		custom|custom_function)
+			echo "custom_function"
+			;;
 		*)
 			return 1
 			;;
@@ -790,6 +793,7 @@ elif [[ "${suite_key}" == "all" ]]; then
 	run_suite "2026_function"
 	run_suite "2026_performance"
 	run_suite "matmul_performance"
+	run_suite "custom_function"
 else
 	suite_dir=$(suite_dir_from_key "${suite_key}") || \
 		fail_with_usage "Unknown suite: ${suite_key}"
