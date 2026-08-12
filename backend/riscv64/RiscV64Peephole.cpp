@@ -1538,6 +1538,25 @@ bool reduceMulByConst(InstList & code)
 	return changed;
 }
 
+/// @brief 检查 reg 在 start 之后是否仍被使用（跨过 call 等控制边界继续扫描）
+///
+/// registerUsedAfterBeforeRedefOrBoundary 遇控制边界即停止并视为无使用，
+/// 但此处 li/addw 刚定义的临时寄存器可能在 call 之后继续存活被使用，
+/// 折叠会使其定义丢失，因此必须跨边界检查到寄存器被重新定义或块尾。
+bool registerUsedAfterIgnoringBoundary(InstList & code, InstIt start, const std::string & reg)
+{
+	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (usesRegister(inst, reg) || instructionImplicitlyUsesRegister(inst, reg)) {
+			return true;
+		}
+		if (definesResultOperand(inst) && inst->result == reg) {
+			break;
+		}
+	}
+	return false;
+}
+
 bool foldUnitStepIncrements(InstList & code)
 {
 	bool changed = false;
@@ -1569,7 +1588,7 @@ bool foldUnitStepIncrements(InstList & code)
 		}
 
 		if (add->result == indexReg) {
-			if (registerUsedAfterBeforeRedefOrBoundary(code, addIt, li->result)) {
+			if (registerUsedAfterIgnoringBoundary(code, addIt, li->result)) {
 				continue;
 			}
 			li->setDead();
@@ -1581,7 +1600,7 @@ bool foldUnitStepIncrements(InstList & code)
 		if (!isLiveInst(mv) || mv->opcode != "mv" || mv->result != indexReg || mv->arg1 != add->result) {
 			continue;
 		}
-		if (registerUsedAfterBeforeRedefOrBoundary(code, mvIt, li->result)) {
+		if (registerUsedAfterIgnoringBoundary(code, mvIt, li->result)) {
 			continue;
 		}
 
