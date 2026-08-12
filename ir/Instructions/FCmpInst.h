@@ -1,6 +1,6 @@
 ///
 /// @file FCmpInst.h
-/// @brief 浮点比较指令（fcmp oeq / one / olt / ogt / ole / oge）
+/// @brief 浮点比较指令（fcmp oeq / une / olt / ogt / ole / oge）
 ///
 
 #pragma once

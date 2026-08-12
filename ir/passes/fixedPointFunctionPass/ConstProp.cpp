@@ -585,7 +585,7 @@ private:
                     break;
 
                 case IRInstOperator::IRINST_OP_NE_F:
-                    result = lhsOrdered && rhsOrdered && lhsValue != rhsValue;
+                    result = !lhsOrdered || !rhsOrdered || lhsValue != rhsValue;
                     break;
 
                 default:
