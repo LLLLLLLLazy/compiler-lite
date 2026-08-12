@@ -416,7 +416,8 @@ bool recognizeBitLoopSkeleton(BasicBlock * header, LoopInfo & loopInfo, BitLoopS
     shape.body = *loopBody;
     shape.body.insert(header);
 
-    // preheader：唯一的循环外前驱，且以无条件跳转结尾（改写后变为条件跳转，天然防止重复匹配）
+    // preheader：唯一的循环外前驱，且以无条件跳转结尾；改写后另将慢路径位权倍增
+    // 规范成左移，防止 CanonicalizeLoop 新建 preheader 后再次匹配同一循环
     BasicBlock * preheader = nullptr;
     BasicBlock * latch = nullptr;
     for (auto * pred : header->getPredecessors()) {
@@ -717,12 +718,12 @@ std::optional<int32_t> bitCoef(const BitLoopShape & shape, int32_t bitA, int32_t
     if (!v1 || !v2) {
         return std::nullopt;
     }
-    int32_t d1 = *v1 - RES_SENTINEL;
-    int32_t d2 = *v2 - RES_SENTINEL;
+	const int64_t d1 = static_cast<int64_t>(*v1) - RES_SENTINEL;
+	const int64_t d2 = static_cast<int64_t>(*v2) - RES_SENTINEL;
     if (d2 != 2 * d1 || (d1 != 0 && d1 != 1)) {
         return std::nullopt;
     }
-    return d1;
+	return static_cast<int32_t>(d1);
 }
 
 /// @brief 刻画器+综合器：抽象解释 res_next 求每位累加系数，综合为原生按位操作
@@ -811,6 +812,12 @@ bool rewriteBitLoop(Function * func, Module * mod, const BitLoopShape & shape)
     if (!oldBranch) {
         return false;
     }
+	auto & latchInsts = shape.latch->getInstructions();
+	auto * powNext = dynamic_cast<Instruction *>(phiIncomingFrom(shape.powPhi, shape.latch));
+	auto powNextPos = std::find(latchInsts.begin(), latchInsts.end(), powNext);
+	if (!powNext || powNextPos == latchInsts.end()) {
+		return false;
+	}
 
     // 守卫保证逐位模拟与原生按位运算严格等价：循环只计算低 width 位，原生 32 位
     // 指令计算全部 32 位，二者相等当且仅当各操作数第 width..31 位上 f 恒为 0，
@@ -914,6 +921,18 @@ bool rewriteBitLoop(Function * func, Module * mod, const BitLoopShape & shape)
             }
         }
     }
+
+	// 把慢路径的位权倍增规范成左移，避免后续 CanonicalizeLoop 新建 preheader 后重复匹配
+	auto * shiftPow = new BinaryInst(func,
+	                                 IRInstOperator::IRINST_OP_SHL_I,
+	                                 shape.powPhi,
+	                                 mod->newConstInt32(1),
+	                                 i32Type);
+	shiftPow->setParentBlock(shape.latch);
+	latchInsts.insert(powNextPos, shiftPow);
+	powNext->replaceAllUseWith(shiftPow);
+	powNext->clearOperands();
+	powNext->setDead(true);
 
     return true;
 }
