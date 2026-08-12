@@ -2009,6 +2009,7 @@ bool foldConsecutiveZeroStores(InstList & code)
 					}
 				}
 			}
+			// 通过 CFG 活跃性覆盖控制边界后的引用，避免删除仍被后继块使用的地址定义
 			if (rB_safe) {
 				const bool hasFixup = afterSw2 != code.end() && !isControlBoundary(*afterSw2) &&
 				                      (*afterSw2)->opcode == "addi" && (*afterSw2)->arg1 == rB;
@@ -2132,6 +2133,7 @@ bool foldConsecutiveZeroStores(InstList & code)
 		}
 
 		// 安全检查：链内 addi 定义的寄存器在链外不能被引用
+		// 通过 CFG 活跃性覆盖控制边界后的引用，避免漏掉后继块中的地址基址使用
 		bool chainSafe = true;
 		for (size_t ci = 0; ci < chainNodes.size(); ++ci) {
 			auto * cn = *chainNodes[ci];
@@ -3591,6 +3593,12 @@ bool reduceAffineAddressRecurrences(InstList & code)
 		for (auto it = bodyBegin; it != latchIt && it != code.end(); it = nextLive(code, it)) {
 			AffineAddressChain chain;
 			if (matchAffineAddressChain(code, it, latchIt, indexReg, chain)) {
+				// baseReg 必须循环不变量：若在循环体内被定义，指针初值插入循环头时
+				// 该寄存器持有的是前导块残留的旧值（如另一个 GEP 的结果），
+				// 首轮迭代会用错误基址访存
+				if (registerDefinedInRange(bodyBegin, latchIt, chain.baseReg)) {
+					continue;
+				}
 				chains.push_back(std::move(chain));
 			}
 		}
