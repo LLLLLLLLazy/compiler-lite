@@ -2678,6 +2678,23 @@ void rewritePattern(Function * func, Module * mod, MatMulPattern & pat)
 
     // ---- K body：x = X[k] ----
     auto * xLoad = new LoadInst(func, kXCur, pat.elemType);
+    LoadInst * xTrueLoad = nullptr;
+    if (pat.cond.active && pat.cond.secondXCursorPhi && pat.cond.secondXBaseAtZero) {
+        // 第二把 X 游标需要额外的 phi 来在 k 循环内步进
+        // 简单起见直接在 kBody 里从 secondXBaseAtZero + kIV 计算
+        // 但更稳健的做法：在 rewritePattern 入口物化一个指针 phi
+        // 临时方案：用 gep(secondXBase, kIV)
+        auto * trueXGEP = new GetElementPtrInst(func, pat.cond.secondXBaseAtZero,
+                                                 kIV, pat.elemPtrType, false);
+        kBody->addInstruction(trueXGEP);
+        xTrueLoad = new LoadInst(func, trueXGEP, pat.elemType);
+        kBody->addInstruction(xTrueLoad);
+    }
+    // 无第二把 X 游标（或 base 缺失）时，true 分支复用主 X 游标的载入值，
+    // 否则 trueMulInst 会引用一个从未插入任何块的孤儿 load，后端无法为其发射定义
+    if (pat.cond.active && xTrueLoad == nullptr) {
+        xTrueLoad = xLoad;
+    }
     Value * yElemBase = kYRow;
     if (!pat.yUsesColumnCursor) {
         yElemBase = new GetElementPtrInst(func, kYRow, zero, pat.elemPtrType, true);
