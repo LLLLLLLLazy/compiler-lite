@@ -1596,12 +1596,12 @@ void InstSelectorRiscV64::translate_fadd(Instruction * inst)
 /// @brief 翻译浮点减法
 void InstSelectorRiscV64::translate_fsub(Instruction * inst)
 {
-	// 一元取负 -x 在前端被降为 SUB_F(+0.0, x)。在 RISC-V 上 fsgnjn.s rd,x,x 即为浮点取负(fneg)，
-	// 一条指令完成且无需材料化 0.0 常量，与 GCC/Clang 对一元 minus 的降级一致。
-	// 仅匹配 +0.0(位模式全 0) 作为左操作数，避免影响 (-0.0)-x 之类的语义。
+	// 一元取负 -x 在前端被降为 SUB_F(-0.0, x)，以保留零值的符号
+	// RISC-V 的 fsgnjn.s rd,x,x 可直接完成浮点取负，无需物化 -0.0
+	// 仅匹配 -0.0 的位模式，避免影响普通浮点减法
 	if (auto * binary = dynamic_cast<BinaryInst *>(inst)) {
 		auto * lhsZero = dynamic_cast<ConstFloat *>(binary->getLHS());
-		if (lhsZero != nullptr && lhsZero->getBitPattern() == 0) {
+		if (lhsZero != nullptr && lhsZero->getBitPattern() == 0x80000000U) {
 			int dstReg = getFloatResultReg(inst);
 			bool dstTemp = false;
 			if (dstReg < 0) {

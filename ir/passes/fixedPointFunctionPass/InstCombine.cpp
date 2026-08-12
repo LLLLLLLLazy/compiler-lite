@@ -373,12 +373,6 @@ bool InstCombine::simplifyBinary(BinaryInst * inst)
             break;
 
         case IRInstOperator::IRINST_OP_ADD_F:
-            if (isPositiveFloatZero(lhs)) {
-                return replaceInstWithValue(inst, rhs);
-            }
-            if (isPositiveFloatZero(rhs)) {
-                return replaceInstWithValue(inst, lhs);
-            }
             break;
 
         case IRInstOperator::IRINST_OP_SUB_F:
