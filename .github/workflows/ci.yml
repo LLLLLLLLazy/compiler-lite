@@ -135,5 +135,8 @@ jobs:
       - name: Run 2026 RISCV64 asm full test suite (O1)
         run: MINIC_RISCV64_TIMEOUT=60 MINIC_FUNC_OPT_LEVEL=1 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh 2026
 
+      - name: Run custom-function RISCV64 asm test suite (O1)
+        run: MINIC_RISCV64_TIMEOUT=60 MINIC_FUNC_OPT_LEVEL=1 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh custom_function
+
       - name: Run 2026 RISCV64 asm performance test suite
         run: MINIC_RISCV64_TIMEOUT=120 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh 2026_performance
