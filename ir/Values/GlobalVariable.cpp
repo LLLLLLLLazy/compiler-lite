@@ -6,6 +6,7 @@
 #include "GlobalVariable.h"
 
 #include <algorithm>
+#include <cmath>
 
 /// @brief 构造全局变量对象
 /// @param _type 全局变量值类型
@@ -64,9 +65,10 @@ int32_t GlobalVariable::getInitIntValue() const
 /// @param value 初始化值
 void GlobalVariable::setInitFloatValue(float value)
 {
+    const bool isPositiveZero = value == 0.0f && !std::signbit(value);
     initFloatValue = value;
-    inBSSSection = (value == 0.0f);
-    initKind = (value == 0.0f) ? InitKind::Zero : InitKind::Float;
+    inBSSSection = isPositiveZero;
+    initKind = isPositiveZero ? InitKind::Zero : InitKind::Float;
 }
 
 /// @brief 获取浮点初始化值

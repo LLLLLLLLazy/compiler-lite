@@ -2260,7 +2260,7 @@ Value * IRGenerator::emitNeg(ast_node * node)
 
     if (operand->getType()->isFloatType()) {
         auto * inst = new BinaryInst(currentFunction(), IRInstOperator::IRINST_OP_SUB_F,
-                                     module->newConstFloat(0.0f), operand, FloatType::getTypeFloat());
+                                     module->newConstFloat(-0.0f), operand, FloatType::getTypeFloat());
         emitToBlock(inst);
         return inst;
     }
