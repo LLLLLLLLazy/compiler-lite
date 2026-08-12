@@ -33,8 +33,9 @@ void hashCombine(std::size_t & seed, std::size_t value)
 /// @brief 递归归一化指针值
 /// @param pointer 待处理指针
 /// @param location 输出位点
+/// @param hasUnknownOffset 沿途是否出现无法表示的指针偏移
 /// @return true 表示成功定位到底层对象
-bool collectMemoryLocation(Value * pointer, MemoryLocation & location)
+bool collectMemoryLocation(Value * pointer, MemoryLocation & location, bool & hasUnknownOffset)
 {
     if (pointer == nullptr) {
         return false;
@@ -44,6 +45,7 @@ bool collectMemoryLocation(Value * pointer, MemoryLocation & location)
         location.object = alloca;
         location.indices.clear();
         location.precise = !alloca->getAllocaType()->isArrayType();
+        hasUnknownOffset = false;
         return true;
     }
 
@@ -53,7 +55,7 @@ bool collectMemoryLocation(Value * pointer, MemoryLocation & location)
     }
 
     MemoryLocation baseLocation;
-    if (!collectMemoryLocation(gep->getBasePointer(), baseLocation)) {
+    if (!collectMemoryLocation(gep->getBasePointer(), baseLocation, hasUnknownOffset)) {
         return false;
     }
 
@@ -62,6 +64,7 @@ bool collectMemoryLocation(Value * pointer, MemoryLocation & location)
     auto * constIndex = dynamic_cast<ConstInteger *>(gep->getIndexOperand());
     if (gep->isArrayDecayGEP()) {
         if (constIndex == nullptr) {
+            hasUnknownOffset = true;
             location.precise = false;
             return true;
         }
@@ -69,11 +72,12 @@ bool collectMemoryLocation(Value * pointer, MemoryLocation & location)
         location.indices.push_back(constIndex->getVal());
         auto * resultPtrType = dynamic_cast<const PointerType *>(gep->getType());
         const Type * pointeeType = resultPtrType == nullptr ? nullptr : resultPtrType->getPointeeType();
-        location.precise = pointeeType != nullptr && !pointeeType->isArrayType();
+        location.precise = !hasUnknownOffset && pointeeType != nullptr && !pointeeType->isArrayType();
         return true;
     }
 
     if (constIndex == nullptr || constIndex->getVal() != 0) {
+        hasUnknownOffset = true;
         location.precise = false;
     }
 
@@ -150,7 +154,8 @@ std::size_t MemoryLocationHash::operator()(const MemoryLocation & location) cons
 MemoryLocation normalizeMemoryLocation(Value * pointer)
 {
     MemoryLocation location;
-    if (!collectMemoryLocation(pointer, location)) {
+    bool hasUnknownOffset = false;
+    if (!collectMemoryLocation(pointer, location, hasUnknownOffset)) {
         return {};
     }
     return location;
