@@ -646,6 +646,32 @@ bool registerLiveOutOfBlock(const MachineLiveness & info, RiscV64Inst * inst, co
 	return info.blocks[it->second].liveOut.find(reg) != info.blocks[it->second].liveOut.end();
 }
 
+/// @brief 检查寄存器是否在重定义前被使用或活跃越过当前块
+/// @param code 机器指令序列
+/// @param start 扫描起点指令
+/// @param reg 待检查的寄存器
+/// @param liveness 机器 CFG 活跃性信息
+/// @return true 表示删除该寄存器的定义不安全
+bool registerUsedAfterBeforeRedefOrLiveOut(InstList & code,
+	                                      InstIt start,
+	                                      const std::string & reg,
+	                                      const MachineLiveness & liveness)
+{
+	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (usesRegister(inst, reg) || instructionImplicitlyUsesRegister(inst, reg)) {
+			return true;
+		}
+		if (definesResultOperand(inst) && inst->result == reg) {
+			return false;
+		}
+		if (isControlBoundary(inst)) {
+			return registerLiveOutOfBlock(liveness, inst, reg);
+		}
+	}
+	return false;
+}
+
 /// @brief 判断寄存器是否可作为死定义清扫的候选
 ///
 /// 仅对调用者保存的临时/参数寄存器（t0-t6、a0-a7、ft0-ft11、fa0-fa7）做死定义消除。
@@ -1913,6 +1939,7 @@ bool foldMaterializationMoves(InstList & code)
 bool foldConsecutiveZeroStores(InstList & code)
 {
 	bool changed = false;
+	MachineLiveness liveness = buildMachineLiveness(code);
 
 	for (auto it = code.begin(); it != code.end(); ++it) {
 		auto * inst = *it;
@@ -1982,23 +2009,14 @@ bool foldConsecutiveZeroStores(InstList & code)
 					}
 				}
 			}
-			if (rB_safe && afterSw2 != code.end()) {
-				for (auto scan = nextLive(code, afterSw2); scan != code.end(); scan = nextLive(code, scan)) {
-					auto * sinst = *scan;
-					if (isControlBoundary(sinst)) {
-						break;
-					}
-					if (definesResultOperand(sinst) && sinst->result == rB) {
-						break;
-					}
-					// 跳过已经检查过的 fixup addi
-					if (scan == afterSw2 && sinst->opcode == "addi" && sinst->arg1 == rB) {
-						continue;
-					}
-					if (instructionMentionsRegister(sinst, rB)) {
-						rB_safe = false;
-						break;
-					}
+			if (rB_safe) {
+				const bool hasFixup = afterSw2 != code.end() && !isControlBoundary(*afterSw2) &&
+				                      (*afterSw2)->opcode == "addi" && (*afterSw2)->arg1 == rB;
+				const bool fixupRedefinesRB = hasFixup && (*afterSw2)->result == rB;
+				InstIt scanStart = hasFixup ? afterSw2 : next2;
+				if (!fixupRedefinesRB &&
+				    registerUsedAfterBeforeRedefOrLiveOut(code, scanStart, rB, liveness)) {
+					rB_safe = false;
 				}
 			}
 			if (!rB_safe) {
@@ -2022,6 +2040,7 @@ bool foldConsecutiveZeroStores(InstList & code)
 					}
 				}
 			}
+			liveness = buildMachineLiveness(code);
 			continue;
 		}
 
@@ -2114,25 +2133,14 @@ bool foldConsecutiveZeroStores(InstList & code)
 
 		// 安全检查：链内 addi 定义的寄存器在链外不能被引用
 		bool chainSafe = true;
-		auto afterChain = nextMachineInst(code, chainNodes.back());
 		for (size_t ci = 0; ci < chainNodes.size(); ++ci) {
 			auto * cn = *chainNodes[ci];
 			if (cn->opcode != "addi" || cn->result.empty()) {
 				continue;
 			}
 			std::string defReg = cn->result;
-			for (auto check = afterChain; check != code.end(); check = nextLive(code, check)) {
-				auto * ck = *check;
-				if (isControlBoundary(ck)) {
-					break;
-				}
-				if (definesResultOperand(ck) && ck->result == defReg) {
-					break;
-				}
-				if (instructionMentionsRegister(ck, defReg)) {
-					chainSafe = false;
-					break;
-				}
+			if (registerUsedAfterBeforeRedefOrLiveOut(code, chainNodes.back(), defReg, liveness)) {
+				chainSafe = false;
 			}
 			if (!chainSafe) {
 				break;
@@ -2162,6 +2170,7 @@ bool foldConsecutiveZeroStores(InstList & code)
 		}
 
 		changed = true;
+		liveness = buildMachineLiveness(code);
 	}
 
 	return changed;
