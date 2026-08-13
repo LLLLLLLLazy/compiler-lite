@@ -29,6 +29,7 @@ jobs:
             ninja-build \
             pkg-config \
             python3-venv \
+            ripgrep \
             libglib2.0-dev \
             libpixman-1-dev \
             zlib1g-dev \
@@ -74,6 +75,12 @@ jobs:
 
       - name: Build
         run: cmake --build build --parallel
+
+      - name: Run RVV regression tests
+        run: |
+          MINIC_RVV_TEST_VLENS="128 1024" \
+          QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" \
+          bash ./tools/run-rvv-regression.sh
 
       - name: Run phi regression tests
         run: QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-phi-regression.sh
@@ -134,6 +141,9 @@ jobs:
 
       - name: Run 2026 RISCV64 asm full test suite (O1)
         run: MINIC_RISCV64_TIMEOUT=60 MINIC_FUNC_OPT_LEVEL=1 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh 2026
+
+      - name: Run 2026 RISCV64 asm full test suite (O1, RVV)
+        run: MINIC_RISCV64_TIMEOUT=60 MINIC_FUNC_OPT_LEVEL=1 MINIC_RISCV64_RVV=on QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="rv64,v=true,vlen=128" bash ./tools/run-local-riscv64-tests.sh 2026
 
       - name: Run custom-function RISCV64 asm test suite (O1)
         run: MINIC_RISCV64_TIMEOUT=60 MINIC_FUNC_OPT_LEVEL=1 QEMU_RISCV64_BIN="${QEMU_RISCV64_BIN}" QEMU_RISCV64_CPU="${QEMU_RISCV64_CPU}" bash ./tools/run-local-riscv64-tests.sh custom_function
