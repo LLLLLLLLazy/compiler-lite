@@ -109,9 +109,10 @@ bool Instruction::mayHaveSideEffects() const
     }
 
     switch (op) {
-        // store 型 RVV 指令必须保留，即使结果值没有 use。
+        // vsetvl 修改隐式 vl/vtype，store 型指令修改内存，均不能按纯值删除
         case IRInstOperator::IRINST_OP_STORE:
         case IRInstOperator::IRINST_OP_CALL:
+        case IRInstOperator::IRINST_OP_VSETVL:
         case IRInstOperator::IRINST_OP_VSTORE:
             return true;
 
@@ -162,7 +163,6 @@ bool Instruction::isSpeculatable() const
         case IRInstOperator::IRINST_OP_SELECT:
         case IRInstOperator::IRINST_OP_COPY:
         case IRInstOperator::IRINST_OP_GEP:
-        case IRInstOperator::IRINST_OP_VSETVL:
         case IRInstOperator::IRINST_OP_VSPLAT:
         case IRInstOperator::IRINST_OP_VBINARY:
         case IRInstOperator::IRINST_OP_VREDUCE:

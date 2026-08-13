@@ -26,10 +26,11 @@ public:
         return elementType;
     }
 
-    /// RVV vscale 类型运行期长度未知，栈槽按常见 VLEN 上界保守预留。
+    /// @brief 返回单个 RVV 寄存器在架构允许的最大 VLEN 下所需的 spill 字节数
+    /// @return RVV 1.0 最大 65,536 bit 对应的 8,192 字节
     [[nodiscard]] int32_t getSize() const override
     {
-        return 256;
+        return 8192;
     }
 
     static VectorType * get(Type * elementType);
