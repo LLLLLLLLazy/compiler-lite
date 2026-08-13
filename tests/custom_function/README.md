@@ -70,6 +70,8 @@ MINIC_RISCV64_OPT_LEVEL=1 ./tools/run-local-riscv64-tests.sh custom_function  # 
 | 134 | 浮点综合 | Kahan 补偿求和/浮点排序/浮点二分 |
 | 135 | 确定性随机 | LCG 洗牌/随机快排/蒙特卡洛 |
 | 136 | 寄存器压力 | 14 个跨调用存活局部量 + 长表达式 + 12 参调用(RA 溢出压力) |
+| 137 | 地址折叠回归 | 跨分支零存储地址活跃性 |
+| 138 | 边界立即数回归 | INT_MIN/INT_MAX 的 RV64 常量物化 |
 
 ## 已捕获的缺陷
 
@@ -78,3 +80,7 @@ MINIC_RISCV64_OPT_LEVEL=1 ./tools/run-local-riscv64-tests.sh custom_function  # 
   (custom_110 触发, 已修复)
 - foldConsecutiveZeroStores 链外使用检查在控制边界处截断, 跨块使用被漏掉
   (custom_115 触发, 已修复; 同 pass 的模式 2 一并加固)
+- foldConsecutiveZeroStores 删除后继块仍使用的零存储地址定义
+  (custom_137 触发, 已修复)
+- RV64 常量物化在 INT_MIN 边界发生宿主有符号整数溢出
+  (custom_138 触发, 已修复)
