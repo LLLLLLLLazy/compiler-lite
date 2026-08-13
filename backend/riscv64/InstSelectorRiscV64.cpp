@@ -34,10 +34,12 @@
 #include "CopyInst.h"
 #include "FCmpInst.h"
 #include "FPToSIInst.h"
+#include "DominatorTree.h"
 #include "GetElementPtrInst.h"
 #include "GlobalVariable.h"
 #include "ICmpInst.h"
 #include "LoadInst.h"
+#include "LoopInfo.h"
 #include "ArrayType.h"
 #include "PhiInst.h"
 #include "PlatformRiscV64.h"
@@ -597,7 +599,6 @@ std::vector<BasicBlock *> computeOptimalBlockOrder(Function * func)
 	// 构建前驱-后继关系
 	std::unordered_map<BasicBlock *, std::vector<BasicBlock *>> successors;
 	std::unordered_map<BasicBlock *, std::vector<BasicBlock *>> predecessors;
-	std::unordered_set<BasicBlock *> loopHeaders;
 
 	for (auto * bb : blocks) {
 		auto term = bb->getTerminator();
@@ -614,15 +615,47 @@ std::vector<BasicBlock *> computeOptimalBlockOrder(Function * func)
 		}
 	}
 
-	// 检测循环头：具有前驱在其后的基本块（简单的回边检测）
-	for (auto * bb : blocks) {
-		for (auto * pred : predecessors[bb]) {
-			// 如果前驱在CFG中"晚于"当前块，可能是回边
-			auto it1 = std::find(blocks.begin(), blocks.end(), bb);
-			auto it2 = std::find(blocks.begin(), blocks.end(), pred);
-			if (it1 != blocks.end() && it2 != blocks.end() && it2 > it1) {
-				loopHeaders.insert(bb);
+	// 循环分析：基于支配树的 LoopInfo，给出每个块的循环深度与循环头集合。
+	// 深度代表静态热度的粗略估计：嵌套越深的循环执行次数越多。
+	DominatorTree domTree(func);
+	LoopInfo loopInfo(func, &domTree);
+
+	// 边权重：进入循环/回边到循环头视为热边；一步可达更深层循环头（热路径
+	// 继续深入嵌套循环）同样视为热边；其余（循环退出等）为冷边
+	auto edgeWeight = [&](BasicBlock * from, BasicBlock * to) -> double {
+		if (loopInfo.isLoopHeader(to)) {
+			return 100.0;
+		}
+		for (auto * next : successors[to]) {
+			if (loopInfo.isLoopHeader(next) && loopInfo.getLoopDepth(next) > loopInfo.getLoopDepth(from)) {
+				return 100.0;
 			}
+		}
+		return 1.0;
+	};
+
+	// 加权频度估计：幂迭代求相对执行频率（每轮归一化避免回边权重放大发散），
+	// 用于冷块链的开启顺序
+	std::unordered_map<BasicBlock *, double> freq;
+	for (auto * bb : blocks) {
+		freq[bb] = 1.0;
+	}
+	for (int round = 0; round < 64; ++round) {
+		std::unordered_map<BasicBlock *, double> next;
+		double total = 0.0;
+		for (auto * bb : blocks) {
+			double sum = 0.0;
+			for (auto * succ : successors[bb]) {
+				sum += freq[bb] * edgeWeight(bb, succ);
+			}
+			next[bb] = sum;
+			total += sum;
+		}
+		if (total <= 0.0) {
+			break;
+		}
+		for (auto * bb : blocks) {
+			freq[bb] = next[bb] / total;
 		}
 	}
 
@@ -651,8 +684,16 @@ std::vector<BasicBlock *> computeOptimalBlockOrder(Function * func)
 
 			int score = 0;
 
-			// 回边到循环头：最高优先级（热路径）
-			if (loopHeaders.count(succ)) {
+			// 后继是循环头（进入循环/回边到循环头）：热路径最高优先级
+			if (loopInfo.isLoopHeader(succ)) {
+				score += 100;
+			}
+
+			// 后继一步可达更深层的循环头（典型如守卫块的
+			// 「条件不满足 → 进入内层循环」热路径）：高优先级。
+			// 覆盖 continue 块与工作体块同为单前驱时的区分：
+			// 通往更深循环的那条边才是热路径 fallthrough
+			if (edgeWeight(bb, succ) > 1.0) {
 				score += 100;
 			}
 
@@ -681,11 +722,49 @@ std::vector<BasicBlock *> computeOptimalBlockOrder(Function * func)
 	// 从入口块开始
 	placeBlock(blocks.front());
 
-	// 放置剩余未访问的块
-	for (auto * bb : blocks) {
-		if (!placed.count(bb)) {
-			ordered.push_back(bb);
-			placed.insert(bb);
+	// 放置剩余未访问的块：从「最近放置」的块开始回扫前沿——最近放置块的
+	// 未放置后继优先（典型如循环出口块紧跟循环体，消除每轮退出时的显式
+	// 跳转；纯频度排序会因回边权重互相强化而区分不出出口块与 latch），
+	// 同块多个候选按频度取高者；无前沿可达时冷块按频度开新链
+	while (ordered.size() < blocks.size()) {
+		BasicBlock * pick = nullptr;
+		for (auto it = ordered.rbegin(); it != ordered.rend() && pick == nullptr; ++it) {
+			double pickFreq = -1.0;
+			for (auto * succ : successors[*it]) {
+				if (!placed.count(succ) && freq[succ] > pickFreq) {
+					pickFreq = freq[succ];
+					pick = succ;
+				}
+			}
+		}
+		if (pick == nullptr) {
+			double pickFreq = -1.0;
+			for (auto * bb : blocks) {
+				if (!placed.count(bb) && freq[bb] > pickFreq) {
+					pickFreq = freq[bb];
+					pick = bb;
+				}
+			}
+		}
+		if (pick == nullptr) {
+			break; // 理论不可达，防御
+		}
+		placeBlock(pick);
+	}
+
+	if (std::getenv("MINIC_DUMP_LAYOUT") != nullptr) {
+		std::fprintf(stderr, "[layout] %s:", func->getName().c_str());
+		for (auto * bb : ordered) {
+			std::fprintf(stderr, " %s", bb->getIRName().c_str());
+		}
+		std::fprintf(stderr, "\n");
+		std::fprintf(stderr, "[cfg] %s:\n", func->getName().c_str());
+		for (auto * bb : blocks) {
+			std::fprintf(stderr, "  %s ->", bb->getIRName().c_str());
+			for (auto * succ : successors[bb]) {
+				std::fprintf(stderr, " %s", succ->getIRName().c_str());
+			}
+			std::fprintf(stderr, "\n");
 		}
 	}
 
@@ -714,7 +793,9 @@ void InstSelectorRiscV64::run()
 	}
 
 	// 计算优化的基本块布局顺序，最小化无条件跳转
-	orderedBlocks_ = computeOptimalBlockOrder(func);
+	orderedBlocks_ = std::getenv("MINIC_DISABLE_BLOCK_LAYOUT") != nullptr
+	                     ? func->getBlocks()
+	                     : computeOptimalBlockOrder(func);
 
 	// 遍历所有基本块（按优化顺序），输出标签并翻译指令
 	for (size_t i = 0; i < orderedBlocks_.size(); ++i) {
@@ -1159,6 +1240,18 @@ void InstSelectorRiscV64::translate_gep(Instruction * inst)
 	}
 
 	const int elemSize = stepType->getSize();
+	// 索引已按元素大小缩放为字节偏移（IR 层共享 slli 后置此标志），
+	// 直接 base + idx，不再乘 elemSize、也不做常量折叠（折叠会二次缩放）
+	if (gepInst->isIndexPreScaled()) {
+		auto idxTmp = tempMgr.borrow(inst, dstReg);
+		loadValueToReg(idxTmp.reg(), gepInst->getIndexOperand(), inst);
+		iloc.inst("add", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+		          PlatformRiscV64::regName[idxTmp.reg()]);
+		idxTmp.release();
+		storeResult(inst, dstReg, inst);
+		return;
+	}
+
 	if (auto * constIndex = asConstInteger(gepInst->getIndexOperand())) {
 		const int64_t offset = static_cast<int64_t>(constIndex->getVal()) * elemSize;
 		if (offset != 0) {
@@ -1507,7 +1600,25 @@ void InstSelectorRiscV64::translate_shift(Instruction * inst,
 	// 移位量为常量时使用立即数形式，仅保留低 5 位以匹配硬件语义
 	if (auto * shiftConst = asConstInteger(binary->getRHS())) {
 		int shiftAmount = shiftConst->getVal() & 31;
-		iloc.inst(immOp,
+		// 索引缩放共享（LoopConstantPromotion 的 preScaled GEP）产生的 shl 会被
+		// GEP 地址加法的 64 位路径直接消费。W 后缀移位只保留低 32 位符号扩展，
+		// 当 idx*2^k 超出 i32 范围时地址会截断；此形态的全部使用均为 preScaled
+		// GEP 索引，改用 64 位 slli 保持与后端逐 GEP 缩放（slli+add）完全一致的
+		// 地址语义（sext(idx)<<k 在 64 位域内不会溢出）。
+		const bool allUsesPreScaledIndex = [&]() {
+			const auto & uses = inst->getUseList();
+			if (uses.empty()) {
+				return false;
+			}
+			for (Use * use : uses) {
+				auto * gep = use != nullptr ? dynamic_cast<GetElementPtrInst *>(use->getUser()) : nullptr;
+				if (gep == nullptr || !gep->isIndexPreScaled()) {
+					return false;
+				}
+			}
+			return true;
+		}();
+		iloc.inst(allUsesPreScaledIndex ? "slli" : immOp,
 			PlatformRiscV64::regName[dstReg],
 			PlatformRiscV64::regName[lhs.reg],
 			std::to_string(shiftAmount));
@@ -3749,7 +3860,8 @@ bool InstSelectorRiscV64::tryRematerializeGEP(GetElementPtrInst * gep, int dstRe
 		while (auto * link = dynamic_cast<GetElementPtrInst *>(cursor)) {
 			auto * basePtrType = dynamic_cast<const PointerType *>(link->getBasePointer()->getType());
 			auto * constIndex = asConstInteger(link->getIndexOperand());
-			if (basePtrType == nullptr || constIndex == nullptr) {
+			// preScaled GEP 的索引已含缩放，折叠链会二次缩放，整体走通用路径
+			if (basePtrType == nullptr || constIndex == nullptr || link->isIndexPreScaled()) {
 				root = nullptr;
 				break;
 			}
@@ -3839,7 +3951,8 @@ bool InstSelectorRiscV64::tryRematerializeGEP(GetElementPtrInst * gep, int dstRe
 	} else if (!tryRematerializeValue(index, idxTmp.reg(), inst, depth + 1, childBusy)) {
 		return false;
 	}
-	if (elemSize != 1) {
+	// preScaled GEP 的索引已是字节偏移，跳过 elemSize 缩放
+	if (elemSize != 1 && !gep->isIndexPreScaled()) {
 		if (isPowerOfTwo(static_cast<uint64_t>(elemSize))) {
 			iloc.inst("slli", PlatformRiscV64::regName[idxTmp.reg()], PlatformRiscV64::regName[idxTmp.reg()],
 			          std::to_string(log2PowerOfTwo(static_cast<uint64_t>(elemSize))));
@@ -3905,8 +4018,22 @@ bool InstSelectorRiscV64::tryRematerializeValue(Value * val, int dstReg, Instruc
 		} else if (!tryRematerializeValue(binary->getLHS(), dstReg, inst, depth + 1, busy)) {
 			return false;
 		}
-		iloc.inst(isAddressValue ? "slli" : "slliw", PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
-		          std::to_string(shiftConst->getVal() & (isAddressValue ? 63 : 31)));
+		// preScaled GEP 索引共享的 shl 保持 64 位语义（见 translate_shift 同款判定）
+		bool allUsesPreScaledIndex = false;
+		const auto & uses = binary->getUseList();
+		if (!uses.empty()) {
+			allUsesPreScaledIndex = true;
+			for (Use * use : uses) {
+				auto * gep = use != nullptr ? dynamic_cast<GetElementPtrInst *>(use->getUser()) : nullptr;
+				if (gep == nullptr || !gep->isIndexPreScaled()) {
+					allUsesPreScaledIndex = false;
+					break;
+				}
+			}
+		}
+		iloc.inst((isAddressValue || allUsesPreScaledIndex) ? "slli" : "slliw",
+			PlatformRiscV64::regName[dstReg], PlatformRiscV64::regName[dstReg],
+			std::to_string(shiftConst->getVal() & (isAddressValue ? 63 : 31)));
 		return true;
 	}
 	if (binary->getOp() != IRInstOperator::IRINST_OP_ADD_I) {

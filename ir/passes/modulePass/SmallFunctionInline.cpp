@@ -509,7 +509,8 @@ Instruction * SmallFunctionInline::cloneInstructionShell(Instruction * inst, Fun
                                      gep->getBasePointer(),
                                      gep->getIndexOperand(),
                                      gep->getType(),
-                                     gep->isArrayDecayGEP());
+                                     gep->isArrayDecayGEP(),
+                                     gep->isIndexPreScaled());
     }
 
     if (auto * call = dynamic_cast<CallInst *>(inst)) {
