@@ -924,7 +924,9 @@ latch 执行 pointer += stride
 RVV strip-mining 形式，每轮用剩余迭代数设置 VL，因此自然处理尾部。
 
 当前支持 `i32`/`float` 的连续或固定步长访存、常见二元运算以及加法归约。
-向量化前会检查根对象、读写别名、循环体成本和迭代次数。
+整数归约使用跨 strip 的向量累加器；浮点归约使用有序 reduce 保持标量加法顺序。
+向量化前会检查根对象、读写别名、循环体成本和迭代次数。完整支持边界、专项回归
+与上板清单见 [RVV 支持与上板准备](docs/rvv-readiness.md)。
 
 #### 4.14 SimpleLoopUnroll
 
@@ -1209,6 +1211,7 @@ clobber 的 caller-saved 寄存器；常量和廉价地址计算可以在使用�
 - [参数与 ABI](docs/backend-param-regalloc.md)
 - [栈帧布局](docs/backend-stackframe.md)
 - [指令选择](docs/backend-instselect.md)
+- [RVV 支持与上板准备](docs/rvv-readiness.md)
 
 ---
 

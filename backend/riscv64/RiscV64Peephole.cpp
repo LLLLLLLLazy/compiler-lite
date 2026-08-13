@@ -292,13 +292,14 @@ int log2PowerOfTwo(int value)
 bool isStoreOpcode(const std::string & opcode)
 {
 	return opcode == "sb" || opcode == "sh" || opcode == "sw" || opcode == "sd" || opcode == "fsw" ||
-	       opcode == "fsd";
+	       opcode == "fsd" || opcode == "vse32.v" || opcode == "vsse32.v" || opcode == "vs1r.v";
 }
 
 bool isLoadOpcode(const std::string & opcode)
 {
 	return opcode == "lb" || opcode == "lbu" || opcode == "lh" || opcode == "lhu" || opcode == "lw" ||
-	       opcode == "lwu" || opcode == "ld" || opcode == "flw" || opcode == "fld";
+	       opcode == "lwu" || opcode == "ld" || opcode == "flw" || opcode == "fld" ||
+	       opcode == "vle32.v" || opcode == "vlse32.v" || opcode == "vl1re32.v";
 }
 
 bool isMemoryOpcode(const std::string & opcode)
@@ -689,6 +690,15 @@ bool isEliminableDefRegister(const std::string & reg)
 	return kRemovable.find(reg) != kRemovable.end();
 }
 
+/// @brief 判断机器指令是否会修改未显式列入操作数的架构状态
+/// @param inst 待检查的机器指令
+/// @return 存在隐式架构副作用时返回 true
+bool hasImplicitArchitecturalSideEffects(RiscV64Inst * inst)
+{
+	// vsetvli 的 rd 可死，但 vl/vtype 会被后续所有 RVV 指令隐式读取
+	return isLiveInst(inst) && inst->opcode == "vsetvli";
+}
+
 /// @brief 基于机器级活跃性分析的通用死定义清扫
 ///
 /// 对每个基本块做一次反向扫描，维护活跃寄存器集合；若某条指令定义的物理寄存器
@@ -710,7 +720,7 @@ bool eliminateDeadDefinitions(InstList & code)
 			}
 			const auto defs = instructionDefSet(inst);
 			const auto uses = instructionUseSet(inst);
-			bool removable = !defs.empty();
+			bool removable = !defs.empty() && !hasImplicitArchitecturalSideEffects(inst);
 			for (const auto & def : defs) {
 				if (!isEliminableDefRegister(def) || live.find(def) != live.end()) {
 					removable = false;
