@@ -5,10 +5,12 @@
 
 #include "InstCombine.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -373,12 +375,6 @@ bool InstCombine::simplifyBinary(BinaryInst * inst)
             break;
 
         case IRInstOperator::IRINST_OP_ADD_F:
-            if (isPositiveFloatZero(lhs)) {
-                return replaceInstWithValue(inst, rhs);
-            }
-            if (isPositiveFloatZero(rhs)) {
-                return replaceInstWithValue(inst, lhs);
-            }
             break;
 
         case IRInstOperator::IRINST_OP_SUB_F:
@@ -879,7 +875,15 @@ bool InstCombine::simplifyFPToSI(FPToSIInst * inst)
         return false;
     }
 
-    return replaceInstWithValue(inst, mod->newConstInteger(targetType, static_cast<int32_t>(source->getVal())));
+	const double sourceValue = static_cast<double>(source->getVal());
+	if (!std::isfinite(sourceValue)
+	    || sourceValue < static_cast<double>(std::numeric_limits<int32_t>::min())
+	    || sourceValue > static_cast<double>(std::numeric_limits<int32_t>::max())) {
+		return false;
+	}
+
+	return replaceInstWithValue(inst,
+	                            mod->newConstInteger(targetType, static_cast<int32_t>(sourceValue)));
 }
 
 /// @brief 清扫已标记为 dead 的指令

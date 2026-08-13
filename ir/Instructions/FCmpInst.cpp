@@ -30,7 +30,7 @@ const char * FCmpInst::predToLLVMName(IRInstOperator op)
         case IRInstOperator::IRINST_OP_EQ_F:
             return "oeq";
         case IRInstOperator::IRINST_OP_NE_F:
-            return "one";
+            return "une";
         case IRInstOperator::IRINST_OP_LT_F:
             return "olt";
         case IRInstOperator::IRINST_OP_GT_F:

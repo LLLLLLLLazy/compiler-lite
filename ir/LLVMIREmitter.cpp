@@ -3,7 +3,7 @@
 /// @brief LLVM IR 文本发射器
 ///
 /// 只负责将结构化 IR（Module / Function / BasicBlock / Instruction）
-/// 序列化为 LLVM IR 文本，不承担任何 lowering / 语义补全工作。
+/// 序列化为 LLVM IR 文本，并完成 LLVM ABI 要求的文本适配
 ///
 
 #include "LLVMIREmitter.h"
@@ -19,6 +19,7 @@
 #include "Function.h"
 #include "GlobalVariable.h"
 #include "Instruction.h"
+#include "Instructions/CallInst.h"
 #include "Module.h"
 
 namespace {
@@ -124,6 +125,73 @@ std::string formatGlobalInit(GlobalVariable * global)
     }
 
     return std::to_string(global->getInitIntValue());
+}
+
+/// @brief 发射需要默认浮点提升的 LLVM 可变参数调用
+/// @param call 待发射的调用指令
+/// @param lines 结果文本行数组
+/// @return true 表示已完成特殊发射，false 表示应使用常规指令发射
+bool emitPromotedVariadicCall(CallInst * call, std::vector<std::string> & lines)
+{
+    if (call == nullptr || call->getCallee() == nullptr || !call->getCallee()->isVarArg()) {
+        return false;
+    }
+
+    const auto & params = call->getCallee()->getParams();
+    const std::size_t fixedParamCount = params.size();
+    bool needsPromotion = false;
+    for (int32_t i = static_cast<int32_t>(fixedParamCount); i < call->getArgCount(); ++i) {
+        if (call->getArg(i)->getType()->isFloatType()) {
+            needsPromotion = true;
+            break;
+        }
+    }
+    if (!needsPromotion) {
+        return false;
+    }
+
+    std::vector<std::string> argTypes;
+    std::vector<std::string> argNames;
+    argTypes.reserve(call->getArgCount());
+    argNames.reserve(call->getArgCount());
+    for (int32_t i = 0; i < call->getArgCount(); ++i) {
+        Value * arg = call->getArg(i);
+        if (i >= static_cast<int32_t>(fixedParamCount) && arg->getType()->isFloatType()) {
+            std::string promotedName = "%__minic_vararg_fpext_" +
+                                       std::to_string(call->getCreationId()) + "_" + std::to_string(i);
+            lines.emplace_back("  " + promotedName + " = fpext float " + arg->getIRName() + " to double");
+            argTypes.emplace_back("double");
+            argNames.push_back(std::move(promotedName));
+        } else {
+            argTypes.push_back(arg->getType()->toString());
+            argNames.push_back(arg->getIRName());
+        }
+    }
+
+    std::string callText;
+    if (call->hasResultValue()) {
+        callText = call->getIRName() + " = ";
+    }
+    callText += "call " + call->getType()->toString() + " (";
+    for (std::size_t i = 0; i < params.size(); ++i) {
+        if (i > 0) {
+            callText += ", ";
+        }
+        callText += params[i]->getType()->toString();
+    }
+    if (!params.empty()) {
+        callText += ", ";
+    }
+    callText += "...) " + call->getCallee()->getIRName() + "(";
+    for (int32_t i = 0; i < call->getArgCount(); ++i) {
+        if (i > 0) {
+            callText += ", ";
+        }
+        callText += argTypes[i] + " " + argNames[i];
+    }
+    callText += ")";
+    lines.emplace_back("  " + callText);
+    return true;
 }
 
 } // namespace
@@ -242,6 +310,9 @@ void LLVMIREmitter::emitFunction(Function * function, std::vector<std::string> &
 
 
         for (auto * inst : bb->getInstructions()) {
+            if (auto * call = dynamic_cast<CallInst *>(inst); emitPromotedVariadicCall(call, lines)) {
+                continue;
+            }
             std::string instStr;
             inst->toString(instStr);
             if (!instStr.empty()) {

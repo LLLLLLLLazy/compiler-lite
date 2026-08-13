@@ -283,106 +283,6 @@ bool shouldPreserveForPureCallLoopCache(CallInst * call)
     return true;
 }
 
-/// @brief 剥离 GEP 链获取指针的根对象，仅识别全局变量与 alloca
-/// @param value 待剥离的指针值
-/// @return 根对象（全局变量或 alloca），无法识别时返回 nullptr
-Value * stripWritableRoot(Value * value)
-{
-    std::unordered_set<Value *> visited;
-    while (value && visited.insert(value).second) {
-        if (auto * gep = dynamic_cast<GetElementPtrInst *>(value)) {
-            value = gep->getBasePointer();
-            continue;
-        }
-        break;
-    }
-    if (dynamic_cast<GlobalVariable *>(value) != nullptr || dynamic_cast<AllocaInst *>(value) != nullptr) {
-        return value;
-    }
-    return nullptr;
-}
-
-/// @brief 判断 callee 是否可能通过指针形参写入调用方内存
-///
-/// store 地址的根既不是 callee 自身的 alloca 也不是全局变量时，
-/// 视为可能经形参指针写入调用方内存（mem2reg 前后均成立的保守判定）
-/// @param callee 被调用函数
-/// @return true 表示可能写入调用方传入的内存
-bool calleeMayWriteParamMemory(Function * callee)
-{
-    for (auto * bb : callee->getBlocks()) {
-        for (auto * inst : bb->getInstructions()) {
-            auto * store = dynamic_cast<StoreInst *>(inst);
-            if (store != nullptr && stripWritableRoot(store->getPointerOperand()) == nullptr) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-/// @brief 若调用匹配 LoopTiling 可折叠的重复不变调用循环模式，保留给折叠 pass
-///
-/// LoopTiling 的 collapseRepeatedInvariantCallLoop 依赖循环体内
-/// "覆盖性 store + 唯一用户调用"的形态将常量重复循环折叠为单次执行，
-/// 提前内联该调用会破坏形态使折叠永久失效。这里用保守的充分信号判定：
-/// callee 可能经指针形参写内存，且调用点所在循环体内存在对某个
-/// 指针实参根对象的 store（即每轮先恢复数组再调用的模式）
-/// @param call 待判断的调用点
-/// @return true 表示应跳过内联，把机会留给折叠 pass
-bool shouldPreserveForRepeatedCallLoopFold(CallInst * call)
-{
-    Function * caller = call ? call->getFunction() : nullptr;
-    Function * callee = call ? call->getCallee() : nullptr;
-    if (!caller || !callee || !call->getParentBlock()) {
-        return false;
-    }
-
-    if (!calleeMayWriteParamMemory(callee)) {
-        return false;
-    }
-
-    // 收集调用的指针实参根对象（全局变量或调用方数组 alloca）
-    std::unordered_set<Value *> argRoots;
-    for (int32_t arg = 0; arg < call->getArgCount(); ++arg) {
-        if (Value * root = stripWritableRoot(call->getArg(arg))) {
-            argRoots.insert(root);
-        }
-    }
-    if (argRoots.empty()) {
-        return false;
-    }
-
-    DominatorTree domTree(caller);
-    LoopInfo loopInfo(caller, &domTree);
-    BasicBlock * callBlock = call->getParentBlock();
-
-    // 任一包含调用点的循环体内若存在覆盖实参根对象的 store 则保留
-    for (auto * header : caller->getBlocks()) {
-        if (!loopInfo.isLoopHeader(header)) {
-            continue;
-        }
-        const auto * loopBody = loopInfo.getLoopBody(header);
-        if (!loopBody || loopBody->find(callBlock) == loopBody->end()) {
-            continue;
-        }
-        for (auto * bb : *loopBody) {
-            for (auto * inst : bb->getInstructions()) {
-                auto * store = dynamic_cast<StoreInst *>(inst);
-                if (!store) {
-                    continue;
-                }
-                Value * root = stripWritableRoot(store->getPointerOperand());
-                if (root != nullptr && argRoots.count(root) > 0) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    return false;
-}
-
 /// @brief 判断指令是否属于内联支持的指令类型
 /// @param inst 待检查的指令
 /// @return true 表示该指令可以被安全地克隆和内联
@@ -549,11 +449,6 @@ bool SmallFunctionInline::shouldInlineCallee(Function * caller, CallInst * call)
 
     // 与 PureCallLoopCache 的协作：保留可被缓存的 latch 纯调用
     if (shouldPreserveForPureCallLoopCache(call)) {
-        return false;
-    }
-
-    // 与 LoopTiling 的协作：保留可折叠的重复不变调用循环中的调用
-    if (shouldPreserveForRepeatedCallLoopFold(call)) {
         return false;
     }
 

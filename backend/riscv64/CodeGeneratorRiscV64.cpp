@@ -745,280 +745,6 @@ bool CodeGeneratorRiscV64::run()
 	}
 	return true;
 }
-/// @brief 生成汇编文件头部，输出RISC-V64架构属性
-void CodeGeneratorRiscV64::genHeader()
-{
-	std::fprintf(fp, "%s\n", "# .arch riscv");
-	std::fprintf(fp, "%s\n", "# .option pic0");
-	// RVV 开关只影响目标属性和向量化后端路径，关闭时保持普通 rv64gc 汇编。
-	std::fprintf(fp, ".attribute arch, \"%s\"\n", enableRVV_ ? "rv64gcv" : "rv64gc");
-	std::fprintf(fp, "%s\n", ".option nopic");
-}
-
-/// @brief 生成数据段，输出全局变量定义
-void CodeGeneratorRiscV64::genDataSection()
-{
-	std::fprintf(fp, ".text\n");
-	// 输出全局变量定义
-	bool emittedDataSection = false;
-	for (auto * var: module->getGlobalVariables()) {
-		// BSS段变量使用.comm伪指令
-		if (var->isInBSSSection()) {
-			std::fprintf(fp, ".comm %s, %d, %d\n", var->getName().c_str(), var->getValueType()->getSize(),
-				var->getAlignment());
-			continue;
-		}
-
-		// 已初始化的全局变量输出到.data段
-		std::fprintf(fp, ".global %s\n", var->getName().c_str());
-		std::fprintf(fp, ".data\n");
-		std::fprintf(fp, ".align %d\n", var->getAlignment());
-		std::fprintf(fp, ".type %s, %%object\n", var->getName().c_str());
-		std::fprintf(fp, ".size %s, %d\n", var->getName().c_str(), var->getValueType()->getSize());
-		std::fprintf(fp, "%s:\n", var->getName().c_str());
-		if (var->getInitKind() == GlobalVariable::InitKind::Float) {
-			// 在整数寄存器中存储浮点数的IEEE 754位模式
-			float fval = var->getInitFloatValue();
-			std::uint32_t bits = 0;
-			std::memcpy(&bits, &fval, sizeof(bits));
-			std::fprintf(fp, ".word %u\n", bits);
-		} else if (var->getInitKind() == GlobalVariable::InitKind::Int) {
-			std::fprintf(fp, ".word %d\n", var->getInitIntValue());
-		} else if (var->getInitKind() == GlobalVariable::InitKind::IntArray) {
-			for (int32_t v : var->getInitIntArray()) {
-				std::fprintf(fp, ".word %d\n", v);
-			}
-		} else if (var->getInitKind() == GlobalVariable::InitKind::FloatArray) {
-			for (float v : var->getInitFloatArray()) {
-				std::uint32_t bits = 0;
-				std::memcpy(&bits, &v, sizeof(bits));
-				std::fprintf(fp, ".word %u\n", bits);
-			}
-		}
-		emittedDataSection = true;
-	}
-
-	// 数据段结束后回到代码段
-	if (emittedDataSection) {
-		std::fprintf(fp, ".text\n");
-	}
-}
-
-/// @brief 生成函数的代码段
-/// @param func 待生成的函数
-///
-/// 流程：寄存器分配 -> 指令选择(含scratch vreg创建) -> scratch分配 -> patchup -> 输出汇编
-void CodeGeneratorRiscV64::genCodeSection(Function * func)
-{
-	// 执行寄存器分配
-	registerAllocation(func);
-	if (std::getenv("MINIC_RA_STATS") != nullptr) {
-		const auto & s = greedyAllocator.getStats();
-		std::fprintf(stderr,
-		             "[ra-stats] %s assigned=%d(gpr=%d,fpr=%d,vr=%d) spilledIntervals=%d spilledValues=%d "
-		             "reloads~=%d stores~=%d copies=%d splits=%d\n",
-		             func->getName().c_str(),
-		             s.assignedRegIntervals,
-		             s.assignedGprIntervals,
-		             s.assignedFprIntervals,
-		             s.assignedVrIntervals,
-		             s.spilledIntervals,
-		             s.spilledValues,
-		             s.estimatedReloads,
-		             s.estimatedSpillStores,
-		             s.eliminatedCopies,
-		             s.splitCount);
-	}
-	// 创建底层汇编序列，设置寄存器分配信息和栈帧大小
-	ILocRiscV64 iloc(module);
-	iloc.setRegAllocMap(greedyAllocator.getAllocationMap());
-	// 设置当前函数需要保存的callee-saved寄存器列表
-	iloc.setSavedRegs(currentSavedRegs);
-	iloc.setSavedFPRs(currentSavedFPRs);
-	iloc.setFrameSize(greedyAllocator.getFrameSize());
-	iloc.setShrinkWrapRA(currentShrinkWrapRA);  // 设置 shrink-wrapping 标志
-
-	// 执行指令选择，将IR翻译为RISC-V64汇编指令
-	// 指令选择过程中创建ScratchValue（虚拟寄存器）
-	InstSelectorRiscV64 instSelector(func, iloc, greedyAllocator);
-	instSelector.setShowLinearIR(showLinearIR);
-	instSelector.setEliminatedCopies(greedyAllocator.getEliminatedCopies());
-	instSelector.setShrinkWrapEntry(currentShrinkWrapEntry);
-	instSelector.setShrinkWrapRetTargets(currentShrinkWrapRetTargets);
-	instSelector.setShrinkWrapPrologueBlocks(currentShrinkWrapPrologueBlocks);
-	instSelector.setShrinkWrapBlocks(currentShrinkWrapBlocks);
-	instSelector.run();
-
-	// Scratch寄存器分配：为ScratchValue分配物理寄存器
-	auto & scratchValues = instSelector.getScratchValues();
-	if (!scratchValues.empty()) {
-		ScratchAllocator scratchAlloc;
-		scratchAlloc.allocate(
-			scratchValues,
-			greedyAllocator.getAllocationMap(),
-			greedyAllocator.getValueLiveRanges(),
-			greedyAllocator.getAllocatedGprLiveRanges(),
-			greedyAllocator.getInstNumbering(),
-			iloc.getInstToMIRange(),
-			greedyAllocator.getAvailableRegs());
-
-		// 将scratch分配结果写入allocationMap，并为spilled scratch分配栈槽
-		auto & allocMap = greedyAllocator.getAllocationMap();
-		for (auto & sv : scratchValues) {
-			if (!sv.released) {
-				continue;
-			}
-			auto * key = reinterpret_cast<Value *>(sv.identity);
-			if (sv.spilled) {
-				const int slotSize = 8;
-				const int slotEnd = greedyAllocator.getFrameSize() + slotSize;
-				const int newFrameSize = alignTo(slotEnd, 16);
-				greedyAllocator.setFrameSize(newFrameSize);
-				sv.spillSlot = -slotEnd;
-				RegAllocInfo info;
-				info.setStack(RISCV64_SP_REG_NO, greedyAllocator.getFrameSize() + sv.spillSlot);
-				allocMap[key] = info;
-			} else if (sv.physicalReg >= 0) {
-				RegAllocInfo info;
-				info.setReg(sv.physicalReg);
-				allocMap[key] = info;
-			}
-		}
-
-		// 更新栈帧大小后需要重新设置
-		iloc.setFrameSize(greedyAllocator.getFrameSize());
-
-		// Patchup：替换机器指令中的scratch寄存器编号
-		iloc.patchScratchRegs(scratchValues);
-	}
-
-	RiscV64Peephole peephole;
-	peephole.run(iloc, module->getOptLevel(), enableCoalesce_);
-
-	// 删除未被引用的基本块标签
-	iloc.deleteUnusedLabel();
-
-	// 收集当前函数的RA统计报告（仅在JSON输出启用时）
-	if (!raStatsJsonPath_.empty()) {
-		FunctionRAReport report;
-		report.functionName = func->getName();
-		report.regAllocStats = greedyAllocator.getStats();
-		report.frameSize = iloc.getFrameSize();
-		report.usedCalleeSavedGPRs = collectUsedCalleeSavedGPRs(currentSavedRegs);
-		report.usedCalleeSavedFPRs = currentSavedFPRs;
-		// 收集peephole优化后的最终汇编级指标（指令数、栈访问数、move数）
-		report.codegenStats = iloc.collectFinalStats();
-		raReports_.push_back(std::move(report));
-	}
-
-	// 输出函数头部信息
-	std::fprintf(fp, ".align %d\n", func->getAlignment());
-	std::fprintf(fp, ".global %s\n", func->getName().c_str());
-	std::fprintf(fp, ".type %s, %%function\n", func->getName().c_str());
-	std::fprintf(fp, "%s:\n", func->getName().c_str());
-
-	// 调试模式下输出每个IR值的寄存器/栈位置映射
-	if (showLinearIR) {
-		const auto & s = greedyAllocator.getStats();
-		std::fprintf(fp,
-		             "\t# RA stats: assigned=%d(gpr=%d,fpr=%d,vr=%d) spilledIntervals=%d spilledValues=%d "
-		             "reloads~=%d stores~=%d copies=%d splits=%d\n",
-		             s.assignedRegIntervals,
-		             s.assignedGprIntervals,
-		             s.assignedFprIntervals,
-		             s.assignedVrIntervals,
-		             s.spilledIntervals,
-		             s.spilledValues,
-		             s.estimatedReloads,
-		             s.estimatedSpillStores,
-		             s.eliminatedCopies,
-		             s.splitCount);
-		std::unordered_set<Value *> scratchKeys;
-		for (auto & sv: scratchValues) {
-			scratchKeys.insert(reinterpret_cast<Value *>(sv.identity));
-		}
-		for (auto & [val, info]: greedyAllocator.getAllocationMap()) {
-			(void) info;
-			if (scratchKeys.find(val) != scratchKeys.end()) {
-				continue;
-			}
-			std::string str;
-			getIRValueStr(val, str);
-			if (!str.empty()) {
-				std::fprintf(fp, "%s\n", str.c_str());
-			}
-		}
-	}
-
-	// 输出汇编指令序列
-	iloc.outPut(fp);
-	std::fprintf(fp, ".size %s, .-%s\n", func->getName().c_str(), func->getName().c_str());
-}
-
-/// @brief 将本模块的寄存器分配评测指标写为JSON
-/// @return 写入是否成功；若未配置输出路径则直接返回true
-/// @note JSON结构包含schema版本、目标架构、RA配置（callee-saved FPR/coalesce/split）
-///       以及每个函数的RA统计（分配区间数、溢出数、消除copy数、栈帧大小等）
-///       和代码生成统计（机器指令数、栈load/store数、move指令数）
-bool CodeGeneratorRiscV64::writeRAStatsJson() const
-{
-	if (raStatsJsonPath_.empty()) {
-		return true;
-	}
-
-	std::ofstream out(raStatsJsonPath_, std::ios::out | std::ios::trunc);
-	if (!out.is_open()) {
-		return false;
-	}
-
-	out << "{\n";
-	out << "  \"schema_version\": 1,\n";
-	out << "  \"target\": \"RISCV64\",\n";
-	out << "  \"config\": {\n";
-	out << "    \"callee_saved_fpr\": " << (enableCalleeSavedFPR_ ? "true" : "false") << ",\n";
-	out << "    \"coalesce\": " << (enableCoalesce_ ? "true" : "false") << ",\n";
-	out << "    \"split\": " << (enableSplit_ ? "true" : "false") << "\n";
-	out << "  },\n";
-	out << "  \"functions\": [\n";
-
-	for (size_t i = 0; i < raReports_.size(); ++i) {
-		const auto & report = raReports_[i];
-		const auto & stats = report.regAllocStats;
-		const auto & codegen = report.codegenStats;
-		out << "    {\n";
-		out << "      \"name\": \"" << jsonEscape(report.functionName) << "\",\n";
-		out << "      \"assigned_reg_intervals\": " << stats.assignedRegIntervals << ",\n";
-		out << "      \"assigned_gpr_intervals\": " << stats.assignedGprIntervals << ",\n";
-		out << "      \"assigned_fpr_intervals\": " << stats.assignedFprIntervals << ",\n";
-		out << "      \"assigned_vr_intervals\": " << stats.assignedVrIntervals << ",\n";
-		out << "      \"spilled_intervals\": " << stats.spilledIntervals << ",\n";
-		out << "      \"spilled_values\": " << stats.spilledValues << ",\n";
-		out << "      \"estimated_reloads\": " << stats.estimatedReloads << ",\n";
-		out << "      \"estimated_spill_stores\": " << stats.estimatedSpillStores << ",\n";
-		out << "      \"eliminated_copies\": " << stats.eliminatedCopies << ",\n";
-		out << "      \"split_count\": " << stats.splitCount << ",\n";
-		out << "      \"frame_size\": " << report.frameSize << ",\n";
-		out << "      \"used_callee_saved_gpr\": ";
-		writeJsonIntArray(out, report.usedCalleeSavedGPRs);
-		out << ",\n";
-		out << "      \"used_callee_saved_fpr\": ";
-		writeJsonIntArray(out, report.usedCalleeSavedFPRs);
-		out << ",\n";
-		out << "      \"machine_instruction_count\": " << codegen.machineInstructionCount << ",\n";
-		out << "      \"stack_load_count\": " << codegen.stackLoadCount << ",\n";
-		out << "      \"stack_store_count\": " << codegen.stackStoreCount << ",\n";
-		out << "      \"move_instruction_count\": " << codegen.moveInstructionCount << "\n";
-		out << "    }";
-		if (i + 1 != raReports_.size()) {
-			out << ",";
-		}
-		out << "\n";
-	}
-
-	out << "  ]\n";
-	out << "}\n";
-	return out.good();
-}
 
 /// @brief 判断当前模块是否使用了内置循环并行运行时函数
 /// @return 若模块中存在对 __mtstart/__mtend/__mtstart4 等函数的调用则返回true
@@ -1362,6 +1088,280 @@ void CodeGeneratorRiscV64::emitMtRuntime()
 	std::fprintf(fp, ".size __mtend4, .-__mtend4\n");
 }
 
+/// @brief 生成汇编文件头部，输出RISC-V64架构属性
+void CodeGeneratorRiscV64::genHeader()
+{
+	std::fprintf(fp, "%s\n", "# .arch riscv");
+	std::fprintf(fp, "%s\n", "# .option pic0");
+	// RVV 开关只影响目标属性和向量化后端路径，关闭时保持普通 rv64gc 汇编。
+	std::fprintf(fp, ".attribute arch, \"%s\"\n", enableRVV_ ? "rv64gcv" : "rv64gc");
+	std::fprintf(fp, "%s\n", ".option nopic");
+}
+
+/// @brief 生成数据段，输出全局变量定义
+void CodeGeneratorRiscV64::genDataSection()
+{
+	std::fprintf(fp, ".text\n");
+	// 输出全局变量定义
+	bool emittedDataSection = false;
+	for (auto * var: module->getGlobalVariables()) {
+		// BSS段变量使用.comm伪指令
+		if (var->isInBSSSection()) {
+			std::fprintf(fp, ".comm %s, %d, %d\n", var->getName().c_str(), var->getValueType()->getSize(),
+				var->getAlignment());
+			continue;
+		}
+
+		// 已初始化的全局变量输出到.data段
+		std::fprintf(fp, ".global %s\n", var->getName().c_str());
+		std::fprintf(fp, ".data\n");
+		std::fprintf(fp, ".align %d\n", var->getAlignment());
+		std::fprintf(fp, ".type %s, %%object\n", var->getName().c_str());
+		std::fprintf(fp, ".size %s, %d\n", var->getName().c_str(), var->getValueType()->getSize());
+		std::fprintf(fp, "%s:\n", var->getName().c_str());
+		if (var->getInitKind() == GlobalVariable::InitKind::Float) {
+			// 在整数寄存器中存储浮点数的IEEE 754位模式
+			float fval = var->getInitFloatValue();
+			std::uint32_t bits = 0;
+			std::memcpy(&bits, &fval, sizeof(bits));
+			std::fprintf(fp, ".word %u\n", bits);
+		} else if (var->getInitKind() == GlobalVariable::InitKind::Int) {
+			std::fprintf(fp, ".word %d\n", var->getInitIntValue());
+		} else if (var->getInitKind() == GlobalVariable::InitKind::IntArray) {
+			for (int32_t v : var->getInitIntArray()) {
+				std::fprintf(fp, ".word %d\n", v);
+			}
+		} else if (var->getInitKind() == GlobalVariable::InitKind::FloatArray) {
+			for (float v : var->getInitFloatArray()) {
+				std::uint32_t bits = 0;
+				std::memcpy(&bits, &v, sizeof(bits));
+				std::fprintf(fp, ".word %u\n", bits);
+			}
+		}
+		emittedDataSection = true;
+	}
+
+	// 数据段结束后回到代码段
+	if (emittedDataSection) {
+		std::fprintf(fp, ".text\n");
+	}
+}
+
+/// @brief 生成函数的代码段
+/// @param func 待生成的函数
+///
+/// 流程：寄存器分配 -> 指令选择(含scratch vreg创建) -> scratch分配 -> patchup -> 输出汇编
+void CodeGeneratorRiscV64::genCodeSection(Function * func)
+{
+	// 执行寄存器分配
+	registerAllocation(func);
+	if (std::getenv("MINIC_RA_STATS") != nullptr) {
+		const auto & s = greedyAllocator.getStats();
+		std::fprintf(stderr,
+		             "[ra-stats] %s assigned=%d(gpr=%d,fpr=%d,vr=%d) spilledIntervals=%d spilledValues=%d "
+		             "reloads~=%d stores~=%d copies=%d splits=%d\n",
+		             func->getName().c_str(),
+		             s.assignedRegIntervals,
+		             s.assignedGprIntervals,
+		             s.assignedFprIntervals,
+		             s.assignedVrIntervals,
+		             s.spilledIntervals,
+		             s.spilledValues,
+		             s.estimatedReloads,
+		             s.estimatedSpillStores,
+		             s.eliminatedCopies,
+		             s.splitCount);
+	}
+	// 创建底层汇编序列，设置寄存器分配信息和栈帧大小
+	ILocRiscV64 iloc(module);
+	iloc.setRegAllocMap(greedyAllocator.getAllocationMap());
+	// 设置当前函数需要保存的callee-saved寄存器列表
+	iloc.setSavedRegs(currentSavedRegs);
+	iloc.setSavedFPRs(currentSavedFPRs);
+	iloc.setFrameSize(greedyAllocator.getFrameSize());
+	iloc.setShrinkWrapRA(currentShrinkWrapRA);  // 设置 shrink-wrapping 标志
+
+	// 执行指令选择，将IR翻译为RISC-V64汇编指令
+	// 指令选择过程中创建ScratchValue（虚拟寄存器）
+	InstSelectorRiscV64 instSelector(func, iloc, greedyAllocator);
+	instSelector.setShowLinearIR(showLinearIR);
+	instSelector.setEliminatedCopies(greedyAllocator.getEliminatedCopies());
+	instSelector.setShrinkWrapEntry(currentShrinkWrapEntry);
+	instSelector.setShrinkWrapRetTargets(currentShrinkWrapRetTargets);
+	instSelector.setShrinkWrapPrologueBlocks(currentShrinkWrapPrologueBlocks);
+	instSelector.setShrinkWrapBlocks(currentShrinkWrapBlocks);
+	instSelector.run();
+
+	// Scratch寄存器分配：为ScratchValue分配物理寄存器
+	auto & scratchValues = instSelector.getScratchValues();
+	if (!scratchValues.empty()) {
+		ScratchAllocator scratchAlloc;
+		scratchAlloc.allocate(
+			scratchValues,
+			greedyAllocator.getAllocationMap(),
+			greedyAllocator.getValueLiveRanges(),
+			greedyAllocator.getAllocatedGprLiveRanges(),
+			greedyAllocator.getInstNumbering(),
+			iloc.getInstToMIRange(),
+			greedyAllocator.getAvailableRegs());
+
+		// 将scratch分配结果写入allocationMap，并为spilled scratch分配栈槽
+		auto & allocMap = greedyAllocator.getAllocationMap();
+		for (auto & sv : scratchValues) {
+			if (!sv.released) {
+				continue;
+			}
+			auto * key = reinterpret_cast<Value *>(sv.identity);
+			if (sv.spilled) {
+				const int slotSize = 8;
+				const int slotEnd = greedyAllocator.getFrameSize() + slotSize;
+				const int newFrameSize = alignTo(slotEnd, 16);
+				greedyAllocator.setFrameSize(newFrameSize);
+				sv.spillSlot = -slotEnd;
+				RegAllocInfo info;
+				info.setStack(RISCV64_SP_REG_NO, greedyAllocator.getFrameSize() + sv.spillSlot);
+				allocMap[key] = info;
+			} else if (sv.physicalReg >= 0) {
+				RegAllocInfo info;
+				info.setReg(sv.physicalReg);
+				allocMap[key] = info;
+			}
+		}
+
+		// 更新栈帧大小后需要重新设置
+		iloc.setFrameSize(greedyAllocator.getFrameSize());
+
+		// Patchup：替换机器指令中的scratch寄存器编号
+		iloc.patchScratchRegs(scratchValues);
+	}
+
+	RiscV64Peephole peephole;
+	peephole.run(iloc, module->getOptLevel(), enableCoalesce_);
+
+	// 删除未被引用的基本块标签
+	iloc.deleteUnusedLabel();
+
+	// 收集当前函数的RA统计报告（仅在JSON输出启用时）
+	if (!raStatsJsonPath_.empty()) {
+		FunctionRAReport report;
+		report.functionName = func->getName();
+		report.regAllocStats = greedyAllocator.getStats();
+		report.frameSize = iloc.getFrameSize();
+		report.usedCalleeSavedGPRs = collectUsedCalleeSavedGPRs(currentSavedRegs);
+		report.usedCalleeSavedFPRs = currentSavedFPRs;
+		// 收集peephole优化后的最终汇编级指标（指令数、栈访问数、move数）
+		report.codegenStats = iloc.collectFinalStats();
+		raReports_.push_back(std::move(report));
+	}
+
+	// 输出函数头部信息
+	std::fprintf(fp, ".align %d\n", func->getAlignment());
+	std::fprintf(fp, ".global %s\n", func->getName().c_str());
+	std::fprintf(fp, ".type %s, %%function\n", func->getName().c_str());
+	std::fprintf(fp, "%s:\n", func->getName().c_str());
+
+	// 调试模式下输出每个IR值的寄存器/栈位置映射
+	if (showLinearIR) {
+		const auto & s = greedyAllocator.getStats();
+		std::fprintf(fp,
+		             "\t# RA stats: assigned=%d(gpr=%d,fpr=%d,vr=%d) spilledIntervals=%d spilledValues=%d "
+		             "reloads~=%d stores~=%d copies=%d splits=%d\n",
+		             s.assignedRegIntervals,
+		             s.assignedGprIntervals,
+		             s.assignedFprIntervals,
+		             s.assignedVrIntervals,
+		             s.spilledIntervals,
+		             s.spilledValues,
+		             s.estimatedReloads,
+		             s.estimatedSpillStores,
+		             s.eliminatedCopies,
+		             s.splitCount);
+		std::unordered_set<Value *> scratchKeys;
+		for (auto & sv: scratchValues) {
+			scratchKeys.insert(reinterpret_cast<Value *>(sv.identity));
+		}
+		for (auto & [val, info]: greedyAllocator.getAllocationMap()) {
+			(void) info;
+			if (scratchKeys.find(val) != scratchKeys.end()) {
+				continue;
+			}
+			std::string str;
+			getIRValueStr(val, str);
+			if (!str.empty()) {
+				std::fprintf(fp, "%s\n", str.c_str());
+			}
+		}
+	}
+
+	// 输出汇编指令序列
+	iloc.outPut(fp);
+	std::fprintf(fp, ".size %s, .-%s\n", func->getName().c_str(), func->getName().c_str());
+}
+
+/// @brief 将本模块的寄存器分配评测指标写为JSON
+/// @return 写入是否成功；若未配置输出路径则直接返回true
+/// @note JSON结构包含schema版本、目标架构、RA配置（callee-saved FPR/coalesce/split）
+///       以及每个函数的RA统计（分配区间数、溢出数、消除copy数、栈帧大小等）
+///       和代码生成统计（机器指令数、栈load/store数、move指令数）
+bool CodeGeneratorRiscV64::writeRAStatsJson() const
+{
+	if (raStatsJsonPath_.empty()) {
+		return true;
+	}
+
+	std::ofstream out(raStatsJsonPath_, std::ios::out | std::ios::trunc);
+	if (!out.is_open()) {
+		return false;
+	}
+
+	out << "{\n";
+	out << "  \"schema_version\": 1,\n";
+	out << "  \"target\": \"RISCV64\",\n";
+	out << "  \"config\": {\n";
+	out << "    \"callee_saved_fpr\": " << (enableCalleeSavedFPR_ ? "true" : "false") << ",\n";
+	out << "    \"coalesce\": " << (enableCoalesce_ ? "true" : "false") << ",\n";
+	out << "    \"split\": " << (enableSplit_ ? "true" : "false") << "\n";
+	out << "  },\n";
+	out << "  \"functions\": [\n";
+
+	for (size_t i = 0; i < raReports_.size(); ++i) {
+		const auto & report = raReports_[i];
+		const auto & stats = report.regAllocStats;
+		const auto & codegen = report.codegenStats;
+		out << "    {\n";
+		out << "      \"name\": \"" << jsonEscape(report.functionName) << "\",\n";
+		out << "      \"assigned_reg_intervals\": " << stats.assignedRegIntervals << ",\n";
+		out << "      \"assigned_gpr_intervals\": " << stats.assignedGprIntervals << ",\n";
+		out << "      \"assigned_fpr_intervals\": " << stats.assignedFprIntervals << ",\n";
+		out << "      \"assigned_vr_intervals\": " << stats.assignedVrIntervals << ",\n";
+		out << "      \"spilled_intervals\": " << stats.spilledIntervals << ",\n";
+		out << "      \"spilled_values\": " << stats.spilledValues << ",\n";
+		out << "      \"estimated_reloads\": " << stats.estimatedReloads << ",\n";
+		out << "      \"estimated_spill_stores\": " << stats.estimatedSpillStores << ",\n";
+		out << "      \"eliminated_copies\": " << stats.eliminatedCopies << ",\n";
+		out << "      \"split_count\": " << stats.splitCount << ",\n";
+		out << "      \"frame_size\": " << report.frameSize << ",\n";
+		out << "      \"used_callee_saved_gpr\": ";
+		writeJsonIntArray(out, report.usedCalleeSavedGPRs);
+		out << ",\n";
+		out << "      \"used_callee_saved_fpr\": ";
+		writeJsonIntArray(out, report.usedCalleeSavedFPRs);
+		out << ",\n";
+		out << "      \"machine_instruction_count\": " << codegen.machineInstructionCount << ",\n";
+		out << "      \"stack_load_count\": " << codegen.stackLoadCount << ",\n";
+		out << "      \"stack_store_count\": " << codegen.stackStoreCount << ",\n";
+		out << "      \"move_instruction_count\": " << codegen.moveInstructionCount << "\n";
+		out << "    }";
+		if (i + 1 != raReports_.size()) {
+			out << ",";
+		}
+		out << "\n";
+	}
+
+	out << "  ]\n";
+	out << "}\n";
+	return out.good();
+}
 /// @brief 执行寄存器分配，包括Greedy分配和栈空间分配
 /// @param func 待分配寄存器的函数
 void CodeGeneratorRiscV64::registerAllocation(Function * func)

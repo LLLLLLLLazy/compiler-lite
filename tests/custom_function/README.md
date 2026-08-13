@@ -8,6 +8,7 @@ IR 与 RISC-V64 后端的正确性。O0 与 O1 均须通过：
 ```bash
 ./tools/run-local-riscv64-tests.sh custom_function                       # O0
 MINIC_RISCV64_OPT_LEVEL=1 ./tools/run-local-riscv64-tests.sh custom_function  # O1
+bash ./tools/run-rvv-regression.sh                                      # RVV, VLEN=128/1024
 ```
 
 ## 编写约束(默认文法, 无 -e)
@@ -70,6 +71,10 @@ MINIC_RISCV64_OPT_LEVEL=1 ./tools/run-local-riscv64-tests.sh custom_function  # 
 | 134 | 浮点综合 | Kahan 补偿求和/浮点排序/浮点二分 |
 | 135 | 确定性随机 | LCG 洗牌/随机快排/蒙特卡洛 |
 | 136 | 寄存器压力 | 14 个跨调用存活局部量 + 长表达式 + 12 参调用(RA 溢出压力) |
+| 137 | 地址折叠回归 | 跨分支零存储地址活跃性 |
+| 138 | 边界立即数回归 | INT_MIN/INT_MAX 的 RV64 常量物化 |
+| 139 | RVV 归约 | 整数尾部归约、严格顺序浮点归约、隐式 vl/vtype 状态 |
+| 140 | RVV spill | 31 路右结合归约强制 VR/累加器溢出、整寄存器 spill/reload、可变 VLEN |
 
 ## 已捕获的缺陷
 
@@ -78,3 +83,13 @@ MINIC_RISCV64_OPT_LEVEL=1 ./tools/run-local-riscv64-tests.sh custom_function  # 
   (custom_110 触发, 已修复)
 - foldConsecutiveZeroStores 链外使用检查在控制边界处截断, 跨块使用被漏掉
   (custom_115 触发, 已修复; 同 pass 的模式 2 一并加固)
+- foldConsecutiveZeroStores 删除后继块仍使用的零存储地址定义
+  (custom_137 触发, 已修复)
+- RV64 常量物化在 INT_MIN 边界发生宿主有符号整数溢出
+  (custom_138 触发, 已修复)
+- 通用机器死定义清扫误删 rd 已死但会更新 vl/vtype 的 vsetvli
+  (custom_139 触发, 已修复)
+- 浮点归约跨 lane 重排加法顺序，严格浮点结果与标量循环不一致
+  (custom_139 触发, 已修复)
+- 向量 spill 槽固定 256 字节且使用当前 VL 访存，不能覆盖 RVV 1.0 的全部 VLEN/tail 状态
+  (custom_140 触发, 已修复)

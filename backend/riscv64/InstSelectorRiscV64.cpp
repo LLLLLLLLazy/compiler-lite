@@ -931,13 +931,13 @@ void InstSelectorRiscV64::emitSplitTransfer(
 		if (to.hasVectorReg()) {
 			if (from.hasVectorReg()) {
 				if (from.regId != to.regId) {
-					iloc.inst("vmv.v.v", PlatformRiscV64::vectorRegName[to.regId],
+					iloc.inst("vmv1r.v", PlatformRiscV64::vectorRegName[to.regId],
 					          PlatformRiscV64::vectorRegName[from.regId]);
 				}
 			} else if (from.hasStackSlot) {
 				auto addr = tempMgr.borrow(inst);
 				iloc.leaStack(addr.reg(), from.baseRegId, static_cast<int>(from.offset));
-				iloc.inst("vle32.v", PlatformRiscV64::vectorRegName[to.regId],
+				iloc.inst("vl1re32.v", PlatformRiscV64::vectorRegName[to.regId],
 				          "(" + PlatformRiscV64::regName[addr.reg()] + ")");
 			}
 			return;
@@ -947,15 +947,15 @@ void InstSelectorRiscV64::emitSplitTransfer(
 			if (from.hasVectorReg()) {
 				auto addr = tempMgr.borrow(inst);
 				iloc.leaStack(addr.reg(), to.baseRegId, static_cast<int>(to.offset));
-				iloc.inst("vse32.v", PlatformRiscV64::vectorRegName[from.regId],
+				iloc.inst("vs1r.v", PlatformRiscV64::vectorRegName[from.regId],
 				          "(" + PlatformRiscV64::regName[addr.reg()] + ")");
 			} else if (from.hasStackSlot) {
 				auto addr = tempMgr.borrow(inst);
 				iloc.leaStack(addr.reg(), from.baseRegId, static_cast<int>(from.offset));
-				iloc.inst("vle32.v", PlatformRiscV64::vectorRegName[31],
+				iloc.inst("vl1re32.v", PlatformRiscV64::vectorRegName[31],
 				          "(" + PlatformRiscV64::regName[addr.reg()] + ")");
 				iloc.leaStack(addr.reg(), to.baseRegId, static_cast<int>(to.offset));
-				iloc.inst("vse32.v", PlatformRiscV64::vectorRegName[31],
+				iloc.inst("vs1r.v", PlatformRiscV64::vectorRegName[31],
 				          "(" + PlatformRiscV64::regName[addr.reg()] + ")");
 			}
 		}
@@ -1440,7 +1440,7 @@ void InstSelectorRiscV64::translate_vbinary(Instruction * inst)
 	if (binary->shouldPreserveLhsTail() && dstReg != lhsReg && rhsReg == dstReg) {
 		// 归约累加器需要先复制 lhs 的旧 tail；若 rhs 占了目标寄存器，先挪到 scratch。
 		const int rhsScratch = lhsReg != 30 && dstReg != 30 ? 30 : 31;
-		iloc.inst("vmv.v.v",
+		iloc.inst("vmv1r.v",
 		          PlatformRiscV64::vectorRegName[rhsScratch],
 		          PlatformRiscV64::vectorRegName[rhsReg]);
 		rhsReg = rhsScratch;
@@ -1448,7 +1448,7 @@ void InstSelectorRiscV64::translate_vbinary(Instruction * inst)
 
 	if (binary->shouldPreserveLhsTail() && dstReg != lhsReg) {
 		// vsetvli 使用 tu 策略，先把旧累加器拷到目标寄存器即可保留未激活 lane。
-		iloc.inst("vmv.v.v", PlatformRiscV64::vectorRegName[dstReg], PlatformRiscV64::vectorRegName[lhsReg]);
+		iloc.inst("vmv1r.v", PlatformRiscV64::vectorRegName[dstReg], PlatformRiscV64::vectorRegName[lhsReg]);
 	}
 
 	iloc.inst(op,
@@ -1472,8 +1472,9 @@ void InstSelectorRiscV64::translate_vreduce(Instruction * inst)
 	int valueReg = loadVectorOperand(reduce->getValueOperand(), inst, 31);
 	int initReg = loadVectorOperand(reduce->getInitOperand(), inst, 30);
 	const bool isFloatReduce = reduce->getScalarOp() == IRInstOperator::IRINST_OP_ADD_F;
-	// reduce 的结果落在目标向量寄存器 lane0，随后由 vextract 转成标量。
-	iloc.inst(isFloatReduce ? "vfredusum.vs" : "vredsum.vs",
+	// 浮点归约必须保持标量迭代顺序，vfredosum 从 init[0] 起按 lane 顺序累加
+	// 整数加法按模 2^SEW 结合，使用普通 vredsum 即可
+	iloc.inst(isFloatReduce ? "vfredosum.vs" : "vredsum.vs",
 	          PlatformRiscV64::vectorRegName[dstReg],
 	          PlatformRiscV64::vectorRegName[valueReg],
 	          PlatformRiscV64::vectorRegName[initReg]);
@@ -1748,12 +1749,12 @@ void InstSelectorRiscV64::translate_fadd(Instruction * inst)
 /// @brief 翻译浮点减法
 void InstSelectorRiscV64::translate_fsub(Instruction * inst)
 {
-	// 一元取负 -x 在前端被降为 SUB_F(+0.0, x)。在 RISC-V 上 fsgnjn.s rd,x,x 即为浮点取负(fneg)，
-	// 一条指令完成且无需材料化 0.0 常量，与 GCC/Clang 对一元 minus 的降级一致。
-	// 仅匹配 +0.0(位模式全 0) 作为左操作数，避免影响 (-0.0)-x 之类的语义。
+	// 一元取负 -x 在前端被降为 SUB_F(-0.0, x)，以保留零值的符号
+	// RISC-V 的 fsgnjn.s rd,x,x 可直接完成浮点取负，无需物化 -0.0
+	// 仅匹配 -0.0 的位模式，避免影响普通浮点减法
 	if (auto * binary = dynamic_cast<BinaryInst *>(inst)) {
 		auto * lhsZero = dynamic_cast<ConstFloat *>(binary->getLHS());
-		if (lhsZero != nullptr && lhsZero->getBitPattern() == 0) {
+		if (lhsZero != nullptr && lhsZero->getBitPattern() == 0x80000000U) {
 			int dstReg = getFloatResultReg(inst);
 			bool dstTemp = false;
 			if (dstReg < 0) {
@@ -4107,15 +4108,15 @@ void InstSelectorRiscV64::loadVectorValueToReg(int reg, Value * val, Instruction
 	RegAllocInfo info = getAllocInfo(val, inst);
 	if (info.hasVectorReg()) {
 		if (info.regId != reg) {
-			iloc.inst("vmv.v.v", PlatformRiscV64::vectorRegName[reg], PlatformRiscV64::vectorRegName[info.regId]);
+			iloc.inst("vmv1r.v", PlatformRiscV64::vectorRegName[reg], PlatformRiscV64::vectorRegName[info.regId]);
 		}
 		return;
 	}
 	if (info.hasStackSlot) {
-		// 向量栈槽偏移可能超出立即数字段，统一先计算地址再 vle32.v。
+		// 整寄存器 reload 不依赖当前 vl/vtype，可完整恢复 tail lane
 		auto addr = tempMgr.borrow(inst);
 		iloc.leaStack(addr.reg(), info.baseRegId, static_cast<int>(info.offset));
-		iloc.inst("vle32.v", PlatformRiscV64::vectorRegName[reg],
+		iloc.inst("vl1re32.v", PlatformRiscV64::vectorRegName[reg],
 		          "(" + PlatformRiscV64::regName[addr.reg()] + ")");
 	}
 }
@@ -4135,15 +4136,15 @@ void InstSelectorRiscV64::storeVectorValueFromReg(Value * val, int srcReg, Instr
 	RegAllocInfo info = getAllocInfo(val, inst);
 	if (info.hasVectorReg()) {
 		if (info.regId != srcReg) {
-			iloc.inst("vmv.v.v", PlatformRiscV64::vectorRegName[info.regId], PlatformRiscV64::vectorRegName[srcReg]);
+			iloc.inst("vmv1r.v", PlatformRiscV64::vectorRegName[info.regId], PlatformRiscV64::vectorRegName[srcReg]);
 		}
 		return;
 	}
 	if (info.hasStackSlot) {
-		// 向量 store 没有 base+large-offset 封装，先 materialize 地址再写回。
+		// 整寄存器 spill 不依赖当前 vl/vtype，可完整保存 tail lane
 		auto addr = tempMgr.borrow(inst);
 		iloc.leaStack(addr.reg(), info.baseRegId, static_cast<int>(info.offset));
-		iloc.inst("vse32.v", PlatformRiscV64::vectorRegName[srcReg],
+		iloc.inst("vs1r.v", PlatformRiscV64::vectorRegName[srcReg],
 		          "(" + PlatformRiscV64::regName[addr.reg()] + ")");
 	}
 }
@@ -4302,15 +4303,15 @@ void InstSelectorRiscV64::storeVectorResult(Value * val, int srcReg, Instruction
 	}
 	if (info.hasVectorReg()) {
 		if (srcReg != info.regId) {
-			iloc.inst("vmv.v.v", PlatformRiscV64::vectorRegName[info.regId], PlatformRiscV64::vectorRegName[srcReg]);
+			iloc.inst("vmv1r.v", PlatformRiscV64::vectorRegName[info.regId], PlatformRiscV64::vectorRegName[srcReg]);
 		}
 		return;
 	}
 	if (info.hasStackSlot) {
-		// 结果值可能在所有 uses 之后才需要借用地址寄存器，避免覆盖当前指令操作数。
+		// 结果值可能在所有 uses 之后才需要借用地址寄存器，避免覆盖当前指令操作数
 		auto addr = tempMgr.borrowAfterUses(inst);
 		iloc.leaStack(addr.reg(), info.baseRegId, static_cast<int>(info.offset));
-		iloc.inst("vse32.v", PlatformRiscV64::vectorRegName[srcReg],
+		iloc.inst("vs1r.v", PlatformRiscV64::vectorRegName[srcReg],
 		          "(" + PlatformRiscV64::regName[addr.reg()] + ")");
 	}
 }

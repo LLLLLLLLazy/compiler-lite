@@ -9,6 +9,8 @@
 #include "IndVarSimplify.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <unordered_set>
 #include <vector>
 
@@ -25,6 +27,7 @@
 #include "Module.h"
 #include "PhiInst.h"
 #include "ScalarEvolution.h"
+#include "SelectInst.h"
 #include "AnalysisCache.h"
 
 namespace {
@@ -237,16 +240,20 @@ bool IndVarSimplify::trySimplifyHeader(BasicBlock * header, ScalarEvolution & sc
     // endPtr 的索引偏移 = tripCount * candidateIndexStep
     int32_t endIndex = 0;
     if (loop.hasConstTripCount) {
-        endIndex = loop.tripCount * candidateIndexStep;
+        const std::int64_t wideEndIndex =
+            static_cast<std::int64_t>(loop.tripCount) * candidateIndexStep;
+        if (wideEndIndex > std::numeric_limits<int32_t>::max()) {
+            return false;
+        }
+        endIndex = static_cast<int32_t>(wideEndIndex);
     } else {
-        // 非常量上界：仅处理 start=0、step=1 的递增循环，且比较谓词为 < 或 <=
-        // 此时 tripCount = bound（<）或 bound+1（<=），见下方 endPtr 构造
+        // 非常量上界：仅处理 start=0、step=1、比较谓词为 < 的递增循环
+        // 真实 tripCount 为 max(bound, 0)，见下方 endPtr 构造
         if (!loop.recurrence || loop.recurrence->getStep() != 1 || !loop.hasConstInitialValue
             || loop.initialIntValue != 0 || !loop.boundValue) {
             return false;
         }
-        if (loop.compareKind != ScalarEvolution::CompareKind::LessThan
-            && loop.compareKind != ScalarEvolution::CompareKind::LessEqual) {
+        if (loop.compareKind != ScalarEvolution::CompareKind::LessThan) {
             return false; // 其他比较谓词暂不处理
         }
     }
@@ -265,17 +272,21 @@ bool IndVarSimplify::trySimplifyHeader(BasicBlock * header, ScalarEvolution & sc
                                         latchGEPType->getType(), false);
     } else {
         // boundValue 是循环上界，start=0, step=1
-        // tripCount = boundValue（<）或 boundValue+1（<=）
+        // tripCount = max(boundValue, 0)，保留负上界时的零次迭代语义
         // endPtr = GEP(start, tripCount * candidateIndexStep)
-        Value * tripCountVal = loop.boundValue;
-        if (loop.compareKind == ScalarEvolution::CompareKind::LessEqual) {
-            auto * oneConst = mod->newConstInteger(loop.boundValue->getType(), 1);
-            auto * addOne = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I,
-                                           loop.boundValue, oneConst,
-                                           loop.boundValue->getType());
-            insertBeforeTerminator(loop.preheader, addOne);
-            tripCountVal = addOne;
-        }
+        auto * zero = mod->newConstInteger(loop.boundValue->getType(), 0);
+        auto * isPositive = new ICmpInst(func,
+                                         IRInstOperator::IRINST_OP_GT_I,
+                                         loop.boundValue,
+                                         zero,
+                                         exitICmp->getType());
+        insertBeforeTerminator(loop.preheader, isPositive);
+        auto * tripCountVal = new SelectInst(func,
+                                             isPositive,
+                                             loop.boundValue,
+                                             zero,
+                                             loop.boundValue->getType());
+        insertBeforeTerminator(loop.preheader, tripCountVal);
         Value * endIdx = tripCountVal;
         if (candidateIndexStep != 1) {
             auto * stepConst = mod->newConstInteger(

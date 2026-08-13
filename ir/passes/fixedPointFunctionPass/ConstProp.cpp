@@ -162,6 +162,16 @@ void markInstDead(Instruction * inst)
     inst->setDead(true);
 }
 
+/// @brief 按 i32 补码语义把无符号位模式还原为有符号常量
+/// @param bits 待还原的 32 位位模式
+/// @return 具有相同位模式的有符号整数
+int32_t integerFromBits(std::uint32_t bits)
+{
+	int32_t value = 0;
+	std::memcpy(&value, &bits, sizeof(value));
+	return value;
+}
+
 /// @brief 从基本块中删除指定前驱块的 incoming 对
 void removePhiIncomingFromPred(BasicBlock * bb, BasicBlock * pred)
 {
@@ -426,23 +436,29 @@ private:
         auto rhs = getValueState(inst->getRHS());
 
         if (lhs.isIntegerConstant() && rhs.isIntegerConstant()) {
+			const auto lhsBits = static_cast<std::uint32_t>(lhs.intConstant);
+			const auto rhsBits = static_cast<std::uint32_t>(rhs.intConstant);
             switch (inst->getOp()) {
                 case IRInstOperator::IRINST_OP_ADD_I:
-                    return LatticeValue::getIntegerConstant(lhs.intConstant + rhs.intConstant);
+					return LatticeValue::getIntegerConstant(integerFromBits(lhsBits + rhsBits));
 
                 case IRInstOperator::IRINST_OP_SUB_I:
-                    return LatticeValue::getIntegerConstant(lhs.intConstant - rhs.intConstant);
+					return LatticeValue::getIntegerConstant(integerFromBits(lhsBits - rhsBits));
 
                 case IRInstOperator::IRINST_OP_MUL_I:
-                    return LatticeValue::getIntegerConstant(lhs.intConstant * rhs.intConstant);
+					return LatticeValue::getIntegerConstant(integerFromBits(lhsBits * rhsBits));
 
                 case IRInstOperator::IRINST_OP_DIV_I:
-                    return rhs.intConstant == 0 ? LatticeValue::getOverdefined()
-                                                : LatticeValue::getIntegerConstant(lhs.intConstant / rhs.intConstant);
+					return rhs.intConstant == 0 || (lhs.intConstant == std::numeric_limits<int32_t>::min()
+					                                 && rhs.intConstant == -1)
+					           ? LatticeValue::getOverdefined()
+					           : LatticeValue::getIntegerConstant(lhs.intConstant / rhs.intConstant);
 
                 case IRInstOperator::IRINST_OP_MOD_I:
-                    return rhs.intConstant == 0 ? LatticeValue::getOverdefined()
-                                                : LatticeValue::getIntegerConstant(lhs.intConstant % rhs.intConstant);
+					return rhs.intConstant == 0 || (lhs.intConstant == std::numeric_limits<int32_t>::min()
+					                                 && rhs.intConstant == -1)
+					           ? LatticeValue::getOverdefined()
+					           : LatticeValue::getIntegerConstant(lhs.intConstant % rhs.intConstant);
 
                 case IRInstOperator::IRINST_OP_AND_I:
                     return LatticeValue::getIntegerConstant(lhs.intConstant & rhs.intConstant);
@@ -585,7 +601,7 @@ private:
                     break;
 
                 case IRInstOperator::IRINST_OP_NE_F:
-                    result = lhsOrdered && rhsOrdered && lhsValue != rhsValue;
+                    result = !lhsOrdered || !rhsOrdered || lhsValue != rhsValue;
                     break;
 
                 default:
@@ -730,15 +746,15 @@ private:
 
         LatticeValue source = getValueState(inst->getSource());
         if (source.isFloatConstant()) {
-            float sourceValue = source.getFloatValue();
-            float maxInt = static_cast<float>(std::numeric_limits<int32_t>::max());
-            float minInt = static_cast<float>(std::numeric_limits<int32_t>::min());
+			const double sourceValue = static_cast<double>(source.getFloatValue());
+			const double maxInt = static_cast<double>(std::numeric_limits<int32_t>::max());
+			const double minInt = static_cast<double>(std::numeric_limits<int32_t>::min());
 
             if (std::isnan(sourceValue) || !std::isfinite(sourceValue) || sourceValue > maxInt || sourceValue < minInt) {
                 return LatticeValue::getOverdefined();
             }
 
-            return LatticeValue::getIntegerConstant(static_cast<int32_t>(sourceValue));
+			return LatticeValue::getIntegerConstant(static_cast<int32_t>(sourceValue));
         }
 
         if (source.isOverdefined()) {

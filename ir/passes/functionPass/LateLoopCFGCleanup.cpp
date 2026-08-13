@@ -127,46 +127,75 @@ bool tryRemoveSyntheticLatch(Function * func, BasicBlock * latch)
         return false;
     }
 
-    bool sawHeaderIncomingFromLatch = false;
+    /// @brief 延迟到全部前置条件验证完成后执行的一项 header phi 改写
+    struct HeaderPhiRewrite {
+        PhiInst * headerPhi = nullptr;
+        Value * incomingValue = nullptr;
+        PhiInst * latchPhi = nullptr;
+    };
+
+    std::vector<BasicBlock *> preds = latch->getPredecessors();
+    std::vector<HeaderPhiRewrite> rewrites;
     for (auto * inst : header->getInstructions()) {
         auto * headerPhi = dynamic_cast<PhiInst *>(inst);
         if (!headerPhi) {
             break;
         }
 
-        PhiInst * latchPhi = nullptr;
+        Value * incomingValue = nullptr;
         for (int32_t index = 0; index < headerPhi->getIncomingCount(); ++index) {
             if (headerPhi->getIncomingBlock(index) != latch) {
                 continue;
             }
 
-            latchPhi = dynamic_cast<PhiInst *>(headerPhi->getIncomingValue(index));
-            if (!latchPhi || latchPhiSet.find(latchPhi) == latchPhiSet.end()) {
+            if (incomingValue != nullptr) {
                 return false;
             }
-            break;
+            incomingValue = headerPhi->getIncomingValue(index);
         }
 
-        if (!latchPhi) {
-            continue;
+        if (!incomingValue) {
+            return false;
         }
 
-        sawHeaderIncomingFromLatch = true;
-        headerPhi->removeIncomingBlock(latch);
-        for (int32_t index = 0; index < latchPhi->getIncomingCount(); ++index) {
-            headerPhi->addIncoming(latchPhi->getIncomingValue(index), latchPhi->getIncomingBlock(index));
+        auto * latchPhi = dynamic_cast<PhiInst *>(incomingValue);
+        if (latchPhi && latchPhiSet.find(latchPhi) == latchPhiSet.end()) {
+            latchPhi = nullptr;
         }
+        rewrites.push_back({headerPhi, incomingValue, latchPhi});
     }
 
-    if (!sawHeaderIncomingFromLatch) {
+    if (rewrites.empty()) {
         return false;
     }
 
-    std::vector<BasicBlock *> preds = latch->getPredecessors();
     for (auto * pred : preds) {
         auto * predBranch = dynamic_cast<BranchInst *>(pred ? pred->getTerminator() : nullptr);
         if (!predBranch || predBranch->getTarget() != latch) {
             return false;
+        }
+    }
+
+    auto & blocks = func->getBlocks();
+    auto blockPos = std::find(blocks.begin(), blocks.end(), latch);
+    if (blockPos == blocks.end()) {
+        return false;
+    }
+
+    // 所有可失败检查完成后再统一改写，避免中途退出留下不完整的 header phi
+    for (const auto & rewrite : rewrites) {
+        rewrite.headerPhi->removeIncomingBlock(latch);
+        if (rewrite.latchPhi) {
+            for (int32_t index = 0; index < rewrite.latchPhi->getIncomingCount(); ++index) {
+                rewrite.headerPhi->addIncoming(rewrite.latchPhi->getIncomingValue(index),
+                                               rewrite.latchPhi->getIncomingBlock(index));
+            }
+            continue;
+        }
+
+        // SCCP 可能把 latch phi 折叠成支配该 latch 的普通值；旁路时每条新边继承该值
+        for (auto * pred : preds) {
+            rewrite.headerPhi->addIncoming(rewrite.incomingValue, pred);
         }
     }
 
@@ -180,12 +209,6 @@ bool tryRemoveSyntheticLatch(Function * func, BasicBlock * latch)
 
     header->removePredecessor(latch);
     latch->removeSuccessor(header);
-
-    auto & blocks = func->getBlocks();
-    auto blockPos = std::find(blocks.begin(), blocks.end(), latch);
-    if (blockPos == blocks.end()) {
-        return false;
-    }
 
     blocks.erase(blockPos);
     delete latch;

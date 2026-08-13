@@ -440,14 +440,14 @@ void ILocRiscV64::load_imm(int rs_reg_no, int constant)
 	} else {
 		// 超出12位范围，使用lui+addiw。
 		// RV64 的 lui 会生成符号扩展后的 64 位值；addiw 可把结果收敛回 i32 语义。
-		const int32_t v32 = static_cast<int32_t>(constant);
-		int32_t lo = v32 & 0xFFF;
-		int32_t hi = v32 - lo;
+		const int64_t v32 = static_cast<int32_t>(constant);
+		int64_t lo = static_cast<uint32_t>(constant) & 0xFFFU;
+		int64_t hi = v32 - lo;
 		if (lo >= 2048) {
 			lo -= 4096;
 			hi += 4096;
 		}
-		const uint32_t luiImm = (static_cast<uint32_t>(hi >> 12)) & 0xFFFFF;
+		const uint32_t luiImm = static_cast<uint32_t>(hi / 4096) & 0xFFFFFU;
 
 		emit("lui", PlatformRiscV64::regName[rs_reg_no], std::to_string(luiImm));
 		// 当低 12 位为 0 时，lui 本身已得到正确的 32 位值（其低 32 位被符号扩展到 64 位，

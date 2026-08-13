@@ -68,17 +68,16 @@ struct RecurrenceShape {
     enum class Kind {
         None,
         Affine,     ///< p_{k+1} = p_k + c
-        ModularAdd, ///< p_{k+1} = (p_k + c) % M
         DivPow2,    ///< p_{k+1} = p_k / 2^shiftPerStep（每步除以同一个 2 的幂常量）
-        Quadratic,  ///< p_{k+1} = p_k + a*i + b，其中 i 是另一个 {0,+,1} IV
+        Quadratic,  ///< p_{k+1} = p_k + a*i + b，其中 i 是另一个仿射 IV
     };
 
     Kind kind = Kind::None;
     Value * start = nullptr;   ///< 来自 preheader 的初值
     Value * step = nullptr;    ///< 每次迭代增量 c（循环不变量）
-    Value * modulus = nullptr; ///< 模数 M（仅 ModularAdd）
     int32_t shiftPerStep = 0;  ///< 每步除数对应的右移位数 log2(divisor)（仅 DivPow2）
-    Value * quadBase = nullptr; ///< 二次递推中 a 系数乘以的基 IV（仅 Quadratic）
+    Value * quadIVStart = nullptr; ///< 二次递推中辅助 IV 的初值（仅 Quadratic）
+    Value * quadIVStep = nullptr; ///< 二次递推中辅助 IV 的步长（仅 Quadratic）
     Value * quadCoeffA = nullptr; ///< 二次递推的一次项系数 a（仅 Quadratic）
     Value * quadCoeffB = nullptr; ///< 二次递推的常数项系数 b（仅 Quadratic）
 };
@@ -108,7 +107,7 @@ bool isPositivePowerOfTwo(int32_t value, int32_t & shift)
 /// 而 RISC-V 的 W 后缀移位仅取移位量低 5 位，故用 select 处理这两种边界：
 ///   - s == 0      ：q = n
 ///   - 0 < s < 32  ：q = (n + bias) ashr s
-///   - s >= 32     ：q = n ashr 31（结果为 0 或 -1，即符号位铺满）
+///   - s >= 32     ：反复向零取整后的结果恒为 0
 ///
 /// @param func 所在函数
 /// @param mod 所属模块
@@ -129,9 +128,18 @@ Value * emitSignedDivByPow2(Function * func,
                             const std::function<void(Instruction *)> & appendInst)
 {
     auto * shiftPerStepConst = mod->newConstInteger(intType, shiftPerStep);
-    // totalShift = shiftPerStep * trip
+    auto * zero = mod->newConstInteger(intType, 0);
+    const int32_t wideTripThreshold = (32 + shiftPerStep - 1) / shiftPerStep;
+    auto * wideTripConst = mod->newConstInteger(intType, wideTripThreshold);
+    auto * isWideShift =
+        new ICmpInst(func, IRInstOperator::IRINST_OP_GE_I, trip, wideTripConst, boolType);
+    appendInst(isWideShift);
+
+    // 宽移位时先把 trip 钳制为零，避免 shiftPerStep * trip 自身回绕
+    auto * safeTrip = new SelectInst(func, isWideShift, zero, trip, intType);
+    appendInst(safeTrip);
     auto * totalShift =
-        new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, shiftPerStepConst, trip, intType);
+        new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, shiftPerStepConst, safeTrip, intType);
     appendInst(totalShift);
 
     // sign = start ashr 31（非负为 0，负数为 -1）
@@ -139,33 +147,34 @@ Value * emitSignedDivByPow2(Function * func,
     auto * sign = new BinaryInst(func, IRInstOperator::IRINST_OP_ASHR_I, start, c31, intType);
     appendInst(sign);
 
-    // bias = sign lshr (32 - totalShift)，仅在 0 < totalShift < 32 时有效
+    // totalShift 为零时用 1 完成无效的辅助计算，最终仍选择原始 start
+    auto * isZeroShift =
+        new ICmpInst(func, IRInstOperator::IRINST_OP_EQ_I, totalShift, zero, boolType);
+    appendInst(isZeroShift);
+    auto * one = mod->newConstInteger(intType, 1);
+    auto * safeShift = new SelectInst(func, isZeroShift, one, totalShift, intType);
+    appendInst(safeShift);
+
+    // bias = sign lshr (32 - safeShift)，仅在 0 < totalShift < 32 时参与结果
     auto * c32 = mod->newConstInteger(intType, 32);
-    auto * shiftBack = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, c32, totalShift, intType);
+    auto * shiftBack = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, c32, safeShift, intType);
     appendInst(shiftBack);
     auto * bias = new BinaryInst(func, IRInstOperator::IRINST_OP_LSHR_I, sign, shiftBack, intType);
     appendInst(bias);
 
-    // biased = start + bias；qNormal = biased ashr totalShift
+    // biased = start + bias；qNormal = biased ashr safeShift
     auto * biased = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, start, bias, intType);
     appendInst(biased);
     auto * qNormal =
-        new BinaryInst(func, IRInstOperator::IRINST_OP_ASHR_I, biased, totalShift, intType);
+        new BinaryInst(func, IRInstOperator::IRINST_OP_ASHR_I, biased, safeShift, intType);
     appendInst(qNormal);
 
     // totalShift == 0 时结果应为 start（移位偏置序列在 s==0 时不成立）
-    auto * zero = mod->newConstInteger(intType, 0);
-    auto * isZeroShift =
-        new ICmpInst(func, IRInstOperator::IRINST_OP_EQ_I, totalShift, zero, boolType);
-    appendInst(isZeroShift);
     auto * qNonNeg = new SelectInst(func, isZeroShift, start, qNormal, intType);
     appendInst(qNonNeg);
 
-    // totalShift >= 32 时结果为 sign（符号位铺满，即 0 或 -1）
-    auto * isWideShift =
-        new ICmpInst(func, IRInstOperator::IRINST_OP_GE_I, totalShift, c32, boolType);
-    appendInst(isWideShift);
-    auto * result = new SelectInst(func, isWideShift, sign, qNonNeg, intType);
+    // 反复有符号除法向零取整，累计移位达到 32 位时结果恒为 0
+    auto * result = new SelectInst(func, isWideShift, zero, qNonNeg, intType);
     appendInst(result);
 
     return result;
@@ -225,42 +234,7 @@ RecurrenceShape analyzeRecurrence(PhiInst * phi,
         }
     }
 
-    // 形态二：p_next = (p + c) % M
-    if (latchInst->getOp() == IRInstOperator::IRINST_OP_MOD_I) {
-        Value * modDividend = latchInst->getLHS();
-        Value * modulus = latchInst->getRHS();
-        auto * addInst = dynamic_cast<BinaryInst *>(modDividend);
-        if (addInst && isDefinedInLoop(addInst, loopBody) &&
-            addInst->getOp() == IRInstOperator::IRINST_OP_ADD_I &&
-            isLoopInvariant(modulus, loopBody)) {
-            // 取模中间值只能被该取模使用，避免改变其它语义
-            bool addUsedOnlyByMod = true;
-            for (auto * use : addInst->getUseList()) {
-                if (use->getUser() != static_cast<Value *>(latchInst)) {
-                    addUsedOnlyByMod = false;
-                    break;
-                }
-            }
-
-            Value * lhs = addInst->getLHS();
-            Value * rhs = addInst->getRHS();
-            Value * step = nullptr;
-            if (lhs == phi && isLoopInvariant(rhs, loopBody)) {
-                step = rhs;
-            } else if (rhs == phi && isLoopInvariant(lhs, loopBody)) {
-                step = lhs;
-            }
-            if (addUsedOnlyByMod && step) {
-                shape.kind = RecurrenceShape::Kind::ModularAdd;
-                shape.start = startValue;
-                shape.step = step;
-                shape.modulus = modulus;
-                return shape;
-            }
-        }
-    }
-
-    // 形态三：p_next = p / D，其中 D 为大于 1 的 2 的幂常量
+    // 形态二：p_next = p / D，其中 D 为大于 1 的 2 的幂常量
     // 经过 trip 次迭代后 p_exit = start / D^trip = start / 2^(log2(D)*trip)
     if (latchInst->getOp() == IRInstOperator::IRINST_OP_DIV_I && latchInst->getLHS() == phi) {
         auto * divisorConst = dynamic_cast<ConstInteger *>(latchInst->getRHS());
@@ -273,7 +247,7 @@ RecurrenceShape analyzeRecurrence(PhiInst * phi,
         }
     }
 
-    // 形态四：p_next = p + incr，其中 incr 包含另一个 IV 的引用（二次递推）
+    // 形态三：p_next = p + incr，其中 incr 包含另一个 IV 的引用（二次递推）
     //   例如：sum = phi(start, sum + i)    其中 i = {0,+,1}
     //         sum = phi(start, sum + 2*i + 3)
     //   incr = a * iv + b，a 和 b 为循环不变量，iv 是另一个头部 phi
@@ -376,9 +350,10 @@ RecurrenceShape analyzeRecurrence(PhiInst * phi,
 
                 // 验证 innerIV 是简单仿射递推：latch 值 = add(innerPhi, const)
                 bool innerIsSimple = false;
-                if (innerPhiInHeader) {
+                Value * innerStart = nullptr;
+                Value * innerStep = nullptr;
+                if (innerPhiInHeader && innerPhi->getIncomingCount() == 2) {
                     Value * innerLatch = nullptr;
-                    Value * innerStart = nullptr;
                     for (int32_t i = 0; i < innerPhi->getIncomingCount(); ++i) {
                         if (innerPhi->getIncomingBlock(i) == latch) {
                             innerLatch = innerPhi->getIncomingValue(i);
@@ -391,8 +366,11 @@ RecurrenceShape analyzeRecurrence(PhiInst * phi,
                         if (innerLatchInst && innerLatchInst->getOp() == IRInstOperator::IRINST_OP_ADD_I) {
                             Value * l = innerLatchInst->getLHS();
                             Value * r = innerLatchInst->getRHS();
-                            if ((l == innerPhi && isLoopInvariant(r, loopBody)) ||
-                                (r == innerPhi && isLoopInvariant(l, loopBody))) {
+                            if (l == innerPhi && isLoopInvariant(r, loopBody)) {
+                                innerStep = r;
+                                innerIsSimple = true;
+                            } else if (r == innerPhi && isLoopInvariant(l, loopBody)) {
+                                innerStep = l;
                                 innerIsSimple = true;
                             }
                         }
@@ -403,7 +381,8 @@ RecurrenceShape analyzeRecurrence(PhiInst * phi,
                     isLoopInvariant(coeffA, loopBody) && isLoopInvariant(coeffB, loopBody)) {
                     shape.kind = RecurrenceShape::Kind::Quadratic;
                     shape.start = startValue;
-                    shape.quadBase = innerPhi;
+                    shape.quadIVStart = innerStart;
+                    shape.quadIVStep = innerStep;
                     shape.quadCoeffA = coeffA;
                     shape.quadCoeffB = coeffB;
                     return shape;
@@ -471,14 +450,13 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
         return false;
     }
 
-    // 处理形如 for (i = init; i < N; i += step) 的规范计数循环：
-    // 起始 init 可为循环不变量、步长 step 为正整数常量、判定为 <
-    if (!loop.recurrence || loop.recurrence->getStep() <= 0 ||
-        loop.compareKind != ScalarEvolution::CompareKind::LessThan) {
+    // 仅处理非负常量初值、步长为 1、判定为 < 的循环
+    // 此时 bound > init 可同时证明循环终止且 bound - init 不会溢出
+    if (!loop.recurrence || loop.recurrence->getStep() != 1 ||
+        loop.compareKind != ScalarEvolution::CompareKind::LessThan ||
+        !loop.hasConstInitialValue || loop.initialIntValue < 0) {
         return false;
     }
-
-    const int32_t inductionStep = loop.recurrence->getStep();
 
     BasicBlock * preheader = loop.preheader;
     BasicBlock * latch = loop.latch;
@@ -564,37 +542,18 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
         insertPos = std::next(exitInsts.insert(insertPos, inst));
     };
 
-    // 计算循环执行次数 trip = (N > init) ? ceilDiv(N - init, step) : 0
+    // 计算循环执行次数 trip = (N > init) ? N - init : 0
     //   diff       = N - init
-    // 当 step 为正整数时 ceilDiv(diff, step) = (diff + step - 1) / step
-    //   tripRaw    = (diff + step - 1) / step
-    //   tripPos    = diff > 0
-    //   trip       = tripPos ? tripRaw : 0
-    // tripPos 同时用于 ModularAdd：循环未执行时出口值应为 start
+    //   tripPos    = N > init
+    //   trip       = tripPos ? diff : 0
     auto * zero = mod->newConstInteger(intType, 0);
     auto * diff = new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, bound, inductionStart, intType);
-    auto * tripPos = new ICmpInst(func, IRInstOperator::IRINST_OP_GT_I, diff, zero, boolType);
+    auto * tripPos = new ICmpInst(func, IRInstOperator::IRINST_OP_GT_I, bound, inductionStart, boolType);
     appendInst(diff);
     appendInst(tripPos);
 
-    Value * trip = nullptr;
-    if (inductionStep == 1) {
-        // 步长为 1 时 ceilDiv(diff, 1) = diff，省去多余的加法和除法
-        trip = new SelectInst(func, tripPos, diff, zero, intType);
-        appendInst(static_cast<Instruction *>(trip));
-    } else {
-        auto * stepConst = mod->newConstInteger(intType, inductionStep);
-        auto * stepMinusOne = mod->newConstInteger(intType, inductionStep - 1);
-        auto * numerator =
-            new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, diff, stepMinusOne, intType);
-        auto * tripRaw =
-            new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, numerator, stepConst, intType);
-        auto * tripSelect = new SelectInst(func, tripPos, tripRaw, zero, intType);
-        appendInst(numerator);
-        appendInst(tripRaw);
-        appendInst(tripSelect);
-        trip = tripSelect;
-    }
+    Value * trip = new SelectInst(func, tripPos, diff, zero, intType);
+    appendInst(static_cast<Instruction *>(trip));
 
     bool changed = false;
     for (auto & entry : candidates) {
@@ -609,39 +568,60 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
                                              boolType, appendInst);
         } else if (shape.kind == RecurrenceShape::Kind::Quadratic) {
             // 二次递推：p_{k+1} = p_k + a * iv + b
-            // 其中 iv 是另一个 IV，对于规范计数循环 iv = {0, +, step_iv}
-            // p_exit = start + b * N + a * step_iv * N * (N-1) / 2
-            //     （这里假设 iv_start = 0，以 trip 而非 bound 为实际迭代次数）
+            // 其中 iv 是另一个仿射 IV：iv_k = iv_start + k * iv_step
+            // p_exit = start + (a * iv_start + b) * N
+            //          + a * iv_step * N * (N-1) / 2
             //
-            // 计算 N*(N-1)/2：triangular = ((trip - 1) * trip) / 2   (若 trip > 0)
+            // 先除偶数因子再相乘，避免 N*(N-1) 在除以 2 前丢失最高位
             auto * one = mod->newConstInteger(intType, 1);
             auto * tripMinusOne =
                 new BinaryInst(func, IRInstOperator::IRINST_OP_SUB_I, trip, one, intType);
             appendInst(tripMinusOne);
-            auto * triangular =
-                new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, trip, tripMinusOne, intType);
-            appendInst(triangular);
             auto * two = mod->newConstInteger(intType, 2);
-            auto * triangularDiv2 =
-                new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, triangular, two, intType);
-            appendInst(triangularDiv2);
+            auto * tripHalf = new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, trip, two, intType);
+            auto * tripMinusOneHalf =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_DIV_I, tripMinusOne, two, intType);
+            appendInst(tripHalf);
+            appendInst(tripMinusOneHalf);
+            auto * tripLowBit =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_AND_I, trip, one, intType);
+            appendInst(tripLowBit);
+            auto * tripIsEven =
+                new ICmpInst(func, IRInstOperator::IRINST_OP_EQ_I, tripLowBit, zero, boolType);
+            appendInst(tripIsEven);
+            auto * halfFactor = new SelectInst(func, tripIsEven, tripHalf, tripMinusOneHalf, intType);
+            auto * otherFactor = new SelectInst(func, tripIsEven, tripMinusOne, trip, intType);
+            appendInst(halfFactor);
+            appendInst(otherFactor);
+            auto * triangular =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, halfFactor, otherFactor, intType);
+            appendInst(triangular);
 
-            // termA = a * triangularDiv2（二次项）
-            auto * termA = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I,
-                                          shape.quadCoeffA, triangularDiv2, intType);
-            appendInst(termA);
+            // quadraticTerm = a * iv_step * N*(N-1)/2
+            auto * scaledStep = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I,
+                                               shape.quadCoeffA, shape.quadIVStep, intType);
+            appendInst(scaledStep);
+            auto * quadraticTerm =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, scaledStep, triangular, intType);
+            appendInst(quadraticTerm);
 
-            // termB = b * trip（一次项）
-            auto * termB = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I,
-                                          shape.quadCoeffB, trip, intType);
-            appendInst(termB);
+            // linearTerm = (a * iv_start + b) * N
+            auto * scaledStart = new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I,
+                                                shape.quadCoeffA, shape.quadIVStart, intType);
+            appendInst(scaledStart);
+            auto * linearCoeff = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I,
+                                                scaledStart, shape.quadCoeffB, intType);
+            appendInst(linearCoeff);
+            auto * linearTerm =
+                new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, linearCoeff, trip, intType);
+            appendInst(linearTerm);
 
-            // base = start + termA + termB
+            // base = start + quadraticTerm + linearTerm
             auto * base1 = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I,
-                                           shape.start, termA, intType);
+                                           shape.start, quadraticTerm, intType);
             appendInst(base1);
             auto * base2 = new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I,
-                                           base1, termB, intType);
+                                           base1, linearTerm, intType);
             appendInst(base2);
 
             // trip 为 0 时循环未执行，出口值应为 start
@@ -649,25 +629,14 @@ bool LoopExitValueRewrite::tryRewriteHeader(BasicBlock * header, ScalarEvolution
             appendInst(select);
             finalValue = select;
         } else {
-            // Affine / ModularAdd：delta = step * trip，base = start + delta
+            // Affine：delta = step * trip，base = start + delta
             auto * delta =
                 new BinaryInst(func, IRInstOperator::IRINST_OP_MUL_I, shape.step, trip, intType);
             appendInst(delta);
             auto * base =
                 new BinaryInst(func, IRInstOperator::IRINST_OP_ADD_I, shape.start, delta, intType);
             appendInst(base);
-
             finalValue = base;
-            if (shape.kind == RecurrenceShape::Kind::ModularAdd) {
-                // modVal = (start + step * trip) % M
-                auto * modVal =
-                    new BinaryInst(func, IRInstOperator::IRINST_OP_MOD_I, base, shape.modulus, intType);
-                appendInst(modVal);
-                // trip 为 0 时循环未执行，出口值应为 start，故按 trip>0 选择
-                auto * select = new SelectInst(func, tripPos, modVal, shape.start, intType);
-                appendInst(select);
-                finalValue = select;
-            }
         }
 
         // 仅替换循环体外对 phi 的使用

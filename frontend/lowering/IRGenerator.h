@@ -7,6 +7,7 @@
 
 #include <list>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "AST.h"
@@ -114,6 +115,12 @@ private:
 
     /// @brief 计算数值型常量表达式（int/float 混合）
     bool evaluateConstNumberExpr(ast_node * node, double & result);
+
+    /// @brief 按词法作用域查找整型常量绑定
+    bool lookupConstIntBinding(const std::string & name, int32_t & result) const;
+
+    /// @brief 按词法作用域查找数值常量绑定
+    bool lookupConstNumberBinding(const std::string & name, double & result, bool & isFloat) const;
 
     /// @brief 获取变量对象的地址（全局变量或局部栈槽）
     Value * getAddressOfVariable(Value * var);
@@ -267,6 +274,7 @@ private:
 
     std::vector<std::unordered_map<std::string, int32_t>> constBindings;
     std::vector<std::unordered_map<std::string, double>> floatConstBindings;
+    std::vector<std::unordered_set<std::string>> declaredBindings;
     std::unordered_map<std::string, GlobalVariable *> stringLiteralGlobals;
     std::size_t nextStringLiteralId = 0;
 };

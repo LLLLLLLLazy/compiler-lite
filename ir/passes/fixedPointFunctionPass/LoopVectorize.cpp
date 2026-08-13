@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -69,6 +70,9 @@ struct ReductionInfo {
 // 归约采用 LLVM 常见的 vector accumulator 形态：循环内只逐 lane 累加，
 // 退出后再做一次横向 reduce，避免每个 strip 都执行昂贵的 reduction。
 constexpr bool kEnableReductionVectorization = true;
+
+/// @brief RVV 1.0 在 e32,m1 下允许的架构级最大 VLMAX
+constexpr int32_t kMaxE32M1VL = 2048;
 
 bool isSupportedElementType(Type * type)
 {
@@ -189,7 +193,12 @@ Value * stripConstantGEP(Value * value, int32_t & offset)
         if (!tryConstInt(gep->getIndexOperand(), delta)) {
             break;
         }
-        offset += delta;
+        const int64_t combined = static_cast<int64_t>(offset) + delta;
+        if (combined < std::numeric_limits<int32_t>::min() ||
+            combined > std::numeric_limits<int32_t>::max()) {
+            break;
+        }
+        offset = static_cast<int32_t>(combined);
         value = gep->getBasePointer();
     }
     return value;
@@ -287,9 +296,11 @@ bool matchPointerPhi(PhiInst * phi, BasicBlock * preheader, BasicBlock * latch, 
     Value * next = getPhiIncomingFrom(phi, latch);
     auto * nextGEP = dynamic_cast<GetElementPtrInst *>(next);
     int32_t step = 0;
-    // 目前只接受正向线性指针递推，负步长和数组 decay GEP 暂不转换。
+    // 目前只接受正向线性指针递推，负步长和数组 decay GEP 暂不转换
+    // 步长上界保证 step * 架构最大 VL 仍能由 i32 GEP 索引精确表示
     if (!init || !nextGEP || nextGEP->isArrayDecayGEP() || nextGEP->getBasePointer() != phi ||
-        !tryConstInt(nextGEP->getIndexOperand(), step) || step <= 0) {
+        !tryConstInt(nextGEP->getIndexOperand(), step) || step <= 0 ||
+        step > std::numeric_limits<int32_t>::max() / kMaxE32M1VL) {
         return false;
     }
 
@@ -620,32 +631,40 @@ bool LoopVectorize::run()
 
     bool changed = false;
     auto & cache = func->getAnalysisCache();
-    auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
-    auto & loopInfo =
-        cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
-    auto & scev = cache.getOrCompute<ScalarEvolution>(
-        [this, &domTree, &loopInfo] { return ScalarEvolution(func, &domTree, &loopInfo); });
 
-    std::vector<BasicBlock *> headers;
-    for (auto * bb : func->getBlocks()) {
-        if (loopInfo.isLoopHeader(bb)) {
-            headers.push_back(bb);
+    while (true) {
+        bool transformed = false;
+        {
+            auto & domTree = cache.getOrCompute<DominatorTree>([this] { return DominatorTree(func); });
+            auto & loopInfo =
+                cache.getOrCompute<LoopInfo>([this, &domTree] { return LoopInfo(func, &domTree); });
+            auto & scev = cache.getOrCompute<ScalarEvolution>(
+                [this, &domTree, &loopInfo] { return ScalarEvolution(func, &domTree, &loopInfo); });
+
+            std::vector<BasicBlock *> headers;
+            for (auto * bb : func->getBlocks()) {
+                if (loopInfo.isLoopHeader(bb)) {
+                    headers.push_back(bb);
+                }
+            }
+            // 从内层循环开始尝试，避免外层先改写后破坏内层 canonical 形态
+            std::stable_sort(headers.begin(), headers.end(), [&loopInfo](BasicBlock * lhs, BasicBlock * rhs) {
+                return loopInfo.getLoopDepth(lhs) > loopInfo.getLoopDepth(rhs);
+            });
+
+            for (auto * header : headers) {
+                if (tryVectorizeHeader(header, scev)) {
+                    transformed = true;
+                    changed = true;
+                    break;
+                }
+            }
         }
-    }
-    // 从内层循环开始尝试，避免外层先改写后破坏内层 canonical 形态。
-    std::stable_sort(headers.begin(), headers.end(), [&loopInfo](BasicBlock * lhs, BasicBlock * rhs) {
-        return loopInfo.getLoopDepth(lhs) > loopInfo.getLoopDepth(rhs);
-    });
 
-    for (auto * header : headers) {
-        if (tryVectorizeHeader(header, scev)) {
-            changed = true;
+        if (!transformed) {
             break;
         }
-    }
-
-    if (changed) {
-        // 向量化改写了循环体/剩余控制流，CFG 派生分析整体失效
+        // 每次成功后立即重建分析，继续处理同一函数中的其余合法循环
         cache.invalidateCFGAnalyses();
     }
 
@@ -793,38 +812,51 @@ bool LoopVectorize::tryVectorizeHeader(BasicBlock * header, ScalarEvolution & sc
             return false;
         }
 
-        auto * fullAvl = mod->newConstInteger(loop.induction->getType(), -1);
-        auto * initFullVl = new VSetVLInst(func, fullAvl);
-        insertBeforeTerminator(preheader, initFullVl);
-        auto * zeroAccumulator = new VectorSplatInst(func, zero, initFullVl, elemType);
-        insertBeforeTerminator(preheader, zeroAccumulator);
+        if (elemType->isFloatType()) {
+            // vfredosum 以当前标量累加值为 init[0]，按 lane 顺序完成每个 strip
+            // strip 之间继续由标量 phi 串联，保持与原循环完全相同的浮点加法顺序
+            auto * initialVector = new VectorSplatInst(func, reduction.phi, vl, elemType);
+            auto * reduced = new VectorReduceInst(
+                func, reduction.op, vectorTerm, initialVector, VectorType::get(elemType), vl);
+            auto * extracted = new VectorExtractInst(func, reduced, elemType);
+            insertBeforeTerminator(body, initialVector);
+            insertBeforeTerminator(body, reduced);
+            insertBeforeTerminator(body, extracted);
+            replaceIncomingFrom(reduction.phi, latch, extracted);
+        } else {
+            auto * fullAvl = mod->newConstInteger(loop.induction->getType(), -1);
+            auto * initFullVl = new VSetVLInst(func, fullAvl);
+            insertBeforeTerminator(preheader, initFullVl);
+            auto * zeroAccumulator = new VectorSplatInst(func, zero, initFullVl, elemType);
+            insertBeforeTerminator(preheader, zeroAccumulator);
 
-        // 用全 VL 零向量初始化累加器，循环中 preserve_lhs_tail 保留尾部未激活 lane。
-        auto * vectorAccumulator = new PhiInst(func, VectorType::get(elemType));
-        insertAfterPhis(header, vectorAccumulator);
-        vectorAccumulator->addIncoming(zeroAccumulator, preheader);
+            // 用全 VL 零向量初始化累加器，循环中 preserve_lhs_tail 保留尾部未激活 lane
+            auto * vectorAccumulator = new PhiInst(func, VectorType::get(elemType));
+            insertAfterPhis(header, vectorAccumulator);
+            vectorAccumulator->addIncoming(zeroAccumulator, preheader);
 
-        auto * nextAccumulator = new VectorBinaryInst(func,
-                                                      reduction.op,
-                                                      vectorAccumulator,
-                                                      vectorTerm,
-                                                      VectorType::get(elemType),
-                                                      vl,
-                                                      true);
-        insertBeforeTerminator(body, nextAccumulator);
-        vectorAccumulator->addIncoming(nextAccumulator, latch);
+            auto * nextAccumulator = new VectorBinaryInst(func,
+                                                          reduction.op,
+                                                          vectorAccumulator,
+                                                          vectorTerm,
+                                                          VectorType::get(elemType),
+                                                          vl,
+                                                          true);
+            insertBeforeTerminator(body, nextAccumulator);
+            vectorAccumulator->addIncoming(nextAccumulator, latch);
 
-        auto * exitFullVl = new VSetVLInst(func, fullAvl);
-        auto * exitZero = new VectorSplatInst(func, zero, exitFullVl, elemType);
-        auto * reduced = new VectorReduceInst(
-            func, reduction.op, vectorAccumulator, exitZero, VectorType::get(elemType), exitFullVl);
-        auto * extracted = new VectorExtractInst(func, reduced, elemType);
-        auto * finalReduction =
-            new BinaryInst(func, reduction.op, reductionInitial, extracted, reduction.phi->getType());
-        insertAfterPhis(loop.exit,
-                        std::vector<Instruction *>{exitFullVl, exitZero, reduced, extracted, finalReduction});
-        // 原标量 phi 的循环外 uses 改接最终归约值，循环内旧链随后标死。
-        replaceUsesOutsideLoop(reduction.phi, finalReduction, *loopBodyPtr);
+            auto * exitFullVl = new VSetVLInst(func, fullAvl);
+            auto * exitZero = new VectorSplatInst(func, zero, exitFullVl, elemType);
+            auto * reduced = new VectorReduceInst(
+                func, reduction.op, vectorAccumulator, exitZero, VectorType::get(elemType), exitFullVl);
+            auto * extracted = new VectorExtractInst(func, reduced, elemType);
+            auto * finalReduction =
+                new BinaryInst(func, reduction.op, reductionInitial, extracted, reduction.phi->getType());
+            insertAfterPhis(loop.exit,
+                            std::vector<Instruction *>{exitFullVl, exitZero, reduced, extracted, finalReduction});
+            // 原标量 phi 的循环外 uses 改接最终归约值，循环内旧链随后标死
+            replaceUsesOutsideLoop(reduction.phi, finalReduction, *loopBodyPtr);
+        }
     } else {
         if (scalarStores.empty()) {
             removeInsertedInstructions(body, originalInsts);
@@ -875,7 +907,7 @@ bool LoopVectorize::tryVectorizeHeader(BasicBlock * header, ScalarEvolution & sc
     }
 
     killOldBodyInstructions(oldBodyInsts);
-    if (hasReduction) {
+    if (hasReduction && !reduction.phi->getType()->isFloatType()) {
         eraseInstructionFromBlock(header, reduction.phi);
     }
     return true;

@@ -52,7 +52,7 @@ constexpr int32_t kLargeImmThreshold = 2047;
 /// @brief 判断常量是否值得提升到循环外
 ///
 /// 对整数常量仅提升超出 12 位有符号立即数范围的（需要 lui+addiw）；
-/// 对浮点常量提升非零值（+0.0f 可直接从 x0 加载，无需物化）。
+/// 对浮点常量提升非零值（正负零均需保留原始符号，不参与提升）
 /// @param value 待判断的值
 /// @return true 表示该常量值得提升
 bool shouldPromoteConstant(Value * value)
@@ -63,8 +63,8 @@ bool shouldPromoteConstant(Value * value)
     }
 
     if (auto * constFloat = dynamic_cast<ConstFloat *>(value)) {
-        // +0.0f 可通过 fmv.w.x rd, x0 直接获取，不值得提升
-        return constFloat->getBitPattern() != 0U;
+        // fadd 物化会改变 -0.0f 的符号，因此正负零均不提升
+        return (constFloat->getBitPattern() & 0x7FFFFFFFU) != 0U;
     }
 
     return false;

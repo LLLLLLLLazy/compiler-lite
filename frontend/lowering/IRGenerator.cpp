@@ -9,8 +9,9 @@
 
 #include "IRGenerator.h"
 
-#include <cstdint>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -41,6 +42,16 @@
 #include "FloatType.h"
 
 namespace {
+
+/// @brief 按 i32 补码语义把无符号位模式还原为有符号常量
+/// @param bits 待还原的 32 位位模式
+/// @return 具有相同位模式的有符号整数
+int32_t integerFromBits(std::uint32_t bits)
+{
+	int32_t value = 0;
+	std::memcpy(&value, &bits, sizeof(value));
+	return value;
+}
 
 ast_node * getDeclDimsNode(ast_node * declNode)
 {
@@ -95,7 +106,9 @@ std::vector<int32_t> packStringLiteralWords(const std::string & text)
     std::size_t wordCount = (bytes.size() + 3) / 4;
     std::vector<int32_t> words(wordCount, 0);
     for (std::size_t i = 0; i < bytes.size(); ++i) {
-        words[i / 4] |= static_cast<int32_t>(bytes[i]) << ((i % 4) * 8);
+		const auto byteBits = static_cast<std::uint32_t>(bytes[i]);
+		const auto wordBits = static_cast<std::uint32_t>(words[i / 4]);
+		words[i / 4] = integerFromBits(wordBits | (byteBits << ((i % 4) * 8)));
     }
 
     return words;
@@ -146,6 +159,8 @@ bool IRGenerator::run()
     constBindings.emplace_back();
     floatConstBindings.clear();
     floatConstBindings.emplace_back();
+    declaredBindings.clear();
+    declaredBindings.emplace_back();
 
     prePopulateGlobalConstBindings(root);
 
@@ -190,6 +205,7 @@ void IRGenerator::prePopulateGlobalConstBindings(ast_node * node)
 			}
 
 			std::string varName = child->sons[1]->name;
+			declaredBindings.front().insert(varName);
 
 			if (declType->isInt32Type()) {
 				int32_t constValue = 0;
@@ -369,6 +385,7 @@ bool IRGenerator::visitFuncDef(ast_node * node)
     module->enterScope();
     constBindings.emplace_back();
     floatConstBindings.emplace_back();
+    declaredBindings.emplace_back();
 
     // 重置当前函数的块级 IR 生成状态
     varAllocaMap.clear();
@@ -391,10 +408,12 @@ bool IRGenerator::visitFuncDef(ast_node * node)
         if (!paramLocal) {
             constBindings.pop_back();
             floatConstBindings.pop_back();
+            declaredBindings.pop_back();
             module->leaveScope();
             module->setCurrentFunction(nullptr);
             return false;
         }
+        declaredBindings.back().insert(param->getName());
 
         AllocaInst * slot = emitAlloca(param->getType());
         varAllocaMap[paramLocal] = slot;
@@ -407,6 +426,8 @@ bool IRGenerator::visitFuncDef(ast_node * node)
     blockNode->needScope = false;
     if (!visitBlock(blockNode)) {
         constBindings.pop_back();
+        floatConstBindings.pop_back();
+        declaredBindings.pop_back();
         module->leaveScope();
         module->setCurrentFunction(nullptr);
         return false;
@@ -426,6 +447,7 @@ bool IRGenerator::visitFuncDef(ast_node * node)
 
     constBindings.pop_back();
     floatConstBindings.pop_back();
+    declaredBindings.pop_back();
     module->leaveScope();
     module->setCurrentFunction(nullptr);
     return true;
@@ -440,6 +462,7 @@ bool IRGenerator::visitBlock(ast_node * node)
         module->enterScope();
         constBindings.emplace_back();
         floatConstBindings.emplace_back();
+        declaredBindings.emplace_back();
     }
 
     for (auto son : node->sons) {
@@ -447,6 +470,7 @@ bool IRGenerator::visitBlock(ast_node * node)
             if (node->needScope) {
                 constBindings.pop_back();
                 floatConstBindings.pop_back();
+                declaredBindings.pop_back();
                 module->leaveScope();
             }
             return false;
@@ -456,6 +480,7 @@ bool IRGenerator::visitBlock(ast_node * node)
     if (node->needScope) {
         constBindings.pop_back();
         floatConstBindings.pop_back();
+        declaredBindings.pop_back();
         module->leaveScope();
     }
 
@@ -627,10 +652,12 @@ bool IRGenerator::visitFor(ast_node * node)
     module->enterScope();
     constBindings.emplace_back();
     floatConstBindings.emplace_back();
+    declaredBindings.emplace_back();
 
     auto leaveForScope = [&]() {
         constBindings.pop_back();
         floatConstBindings.pop_back();
+        declaredBindings.pop_back();
         module->leaveScope();
     };
 
@@ -808,6 +835,7 @@ bool IRGenerator::visitVarDecl(ast_node * node)
         if (!varValue) {
             return false;
         }
+        declaredBindings.back().insert(varName);
 
         AllocaInst * slot = emitAlloca(declType);
         varAllocaMap[varValue] = slot;
@@ -925,6 +953,7 @@ bool IRGenerator::visitStaticLocalVarDecl(ast_node * node)
     if (!localAlias) {
         return false;
     }
+    declaredBindings.back().insert(varName);
 
     if (node->isConst && !initNode) {
         minic_log(LOG_ERROR, "static const 变量(%s)必须初始化", varName.c_str());
@@ -1352,16 +1381,26 @@ bool IRGenerator::collectGlobalArrayInitScalars(
     Type * type, const std::vector<ast_node *> & items, std::size_t begin, std::size_t end,
     std::vector<int32_t> & intValues, std::vector<float> & floatValues)
 {
+    /// @brief 按聚合对象的标量类型追加一个隐式零值
+    auto appendZero = [&intValues, &floatValues](Type * valueType) {
+        Type * scalarType = getArrayScalarType(valueType);
+        if (scalarType != nullptr && scalarType->isFloatType()) {
+            floatValues.push_back(0.0f);
+        } else {
+            intValues.push_back(0);
+        }
+    };
+
     auto * arrayType = dynamic_cast<ArrayType *>(type);
     if (arrayType == nullptr) {
         if (begin >= end) {
-            intValues.push_back(0);
+            appendZero(type);
             return true;
         }
         ast_node * item = items[begin];
         if (item->node_type == ast_operator_type::AST_OP_INIT_LIST) {
             if (item->sons.empty()) {
-                intValues.push_back(0);
+                appendZero(type);
                 return true;
             }
             item = item->sons[0];
@@ -1389,7 +1428,7 @@ bool IRGenerator::collectGlobalArrayInitScalars(
     for (int32_t i = 0; i < arrayType->getNumElements(); ++i) {
         if (cursor >= end) {
             for (std::size_t k = 0; k < subScalarCount; ++k) {
-                intValues.push_back(0);
+                appendZero(elemType);
             }
             continue;
         }
@@ -1555,6 +1594,54 @@ bool IRGenerator::collectGlobalArrayInitializer(
     return true;
 }
 
+/// @brief 按词法作用域查找整型常量绑定
+/// @param name 待查找的标识符
+/// @param result 输出整型常量值
+/// @return true 表示最近声明是可替换的整型常量
+bool IRGenerator::lookupConstIntBinding(const std::string & name, int32_t & result) const
+{
+    for (std::size_t depth = declaredBindings.size(); depth > 0; --depth) {
+        const std::size_t index = depth - 1;
+        auto found = constBindings[index].find(name);
+        if (found != constBindings[index].end()) {
+            result = found->second;
+            return true;
+        }
+        if (declaredBindings[index].find(name) != declaredBindings[index].end()) {
+            return false;
+        }
+    }
+    return false;
+}
+
+/// @brief 按词法作用域查找数值常量绑定
+/// @param name 待查找的标识符
+/// @param result 输出数值常量值
+/// @param isFloat 输出最近常量是否为浮点类型
+/// @return true 表示最近声明是可替换的数值常量
+bool IRGenerator::lookupConstNumberBinding(const std::string & name, double & result, bool & isFloat) const
+{
+    for (std::size_t depth = declaredBindings.size(); depth > 0; --depth) {
+        const std::size_t index = depth - 1;
+        auto intFound = constBindings[index].find(name);
+        if (intFound != constBindings[index].end()) {
+            result = static_cast<double>(intFound->second);
+            isFloat = false;
+            return true;
+        }
+        auto floatFound = floatConstBindings[index].find(name);
+        if (floatFound != floatConstBindings[index].end()) {
+            result = floatFound->second;
+            isFloat = true;
+            return true;
+        }
+        if (declaredBindings[index].find(name) != declaredBindings[index].end()) {
+            return false;
+        }
+    }
+    return false;
+}
+
 /// @brief 计算整型常量表达式的值
 /// @param node 常量表达式节点
 /// @param result 输出的计算结果
@@ -1571,14 +1658,7 @@ bool IRGenerator::evaluateConstIntExpr(ast_node * node, int32_t & result)
             return true;
 
         case ast_operator_type::AST_OP_LEAF_VAR_ID: {
-            for (auto it = constBindings.rbegin(); it != constBindings.rend(); ++it) {
-                auto found = it->find(node->name);
-                if (found != it->end()) {
-                    result = found->second;
-                    return true;
-                }
-            }
-            return false;
+            return lookupConstIntBinding(node->name, result);
         }
 
         case ast_operator_type::AST_OP_NEG: {
@@ -1586,7 +1666,7 @@ bool IRGenerator::evaluateConstIntExpr(ast_node * node, int32_t & result)
             if (!evaluateConstIntExpr(node->sons[0], operand)) {
                 return false;
             }
-            result = -operand;
+			result = integerFromBits(0U - static_cast<std::uint32_t>(operand));
             return true;
         }
 
@@ -1602,24 +1682,26 @@ bool IRGenerator::evaluateConstIntExpr(ast_node * node, int32_t & result)
                 return false;
             }
 
+			const auto lhsBits = static_cast<std::uint32_t>(lhs);
+			const auto rhsBits = static_cast<std::uint32_t>(rhs);
             switch (node->node_type) {
                 case ast_operator_type::AST_OP_ADD:
-                    result = lhs + rhs;
+					result = integerFromBits(lhsBits + rhsBits);
                     return true;
                 case ast_operator_type::AST_OP_SUB:
-                    result = lhs - rhs;
+					result = integerFromBits(lhsBits - rhsBits);
                     return true;
                 case ast_operator_type::AST_OP_MUL:
-                    result = lhs * rhs;
+					result = integerFromBits(lhsBits * rhsBits);
                     return true;
                 case ast_operator_type::AST_OP_DIV:
-                    if (rhs == 0) {
+					if (rhs == 0 || (lhs == std::numeric_limits<int32_t>::min() && rhs == -1)) {
                         return false;
                     }
                     result = lhs / rhs;
                     return true;
                 case ast_operator_type::AST_OP_MOD:
-                    if (rhs == 0) {
+					if (rhs == 0 || (lhs == std::numeric_limits<int32_t>::min() && rhs == -1)) {
                         return false;
                     }
                     result = lhs % rhs;
@@ -1679,22 +1761,10 @@ bool IRGenerator::evaluateConstNumberExpr(ast_node * node, double & result)
             result = static_cast<double>(node->float_val);
             return true;
 
-        case ast_operator_type::AST_OP_LEAF_VAR_ID:
-            for (auto it = constBindings.rbegin(); it != constBindings.rend(); ++it) {
-                auto found = it->find(node->name);
-                if (found != it->end()) {
-                    result = static_cast<double>(found->second);
-                    return true;
-                }
-            }
-            for (auto it = floatConstBindings.rbegin(); it != floatConstBindings.rend(); ++it) {
-                auto found = it->find(node->name);
-                if (found != it->end()) {
-                    result = found->second;
-                    return true;
-                }
-            }
-            return false;
+        case ast_operator_type::AST_OP_LEAF_VAR_ID: {
+            bool isFloat = false;
+            return lookupConstNumberBinding(node->name, result, isFloat);
+        }
 
         case ast_operator_type::AST_OP_NEG: {
             double operand = 0.0;
@@ -2016,18 +2086,13 @@ Value * IRGenerator::materializeStringLiteral(ast_node * node)
 /// @return 变量加载后的值，失败时返回空指针
 Value * IRGenerator::visitLeafVarId(ast_node * node)
 {
-    for (auto it = constBindings.rbegin(); it != constBindings.rend(); ++it) {
-        auto found = it->find(node->name);
-        if (found != it->end()) {
-            return module->newConstInt32(found->second);
+    double constValue = 0.0;
+    bool isFloatConst = false;
+    if (lookupConstNumberBinding(node->name, constValue, isFloatConst)) {
+        if (isFloatConst) {
+            return module->newConstFloat(static_cast<float>(constValue));
         }
-    }
-
-    for (auto it = floatConstBindings.rbegin(); it != floatConstBindings.rend(); ++it) {
-        auto found = it->find(node->name);
-        if (found != it->end()) {
-            return module->newConstFloat(static_cast<float>(found->second));
-        }
+        return module->newConstInt32(static_cast<int32_t>(constValue));
     }
 
     Value * var = module->findVarValue(node->name);
@@ -2210,7 +2275,7 @@ Value * IRGenerator::emitNeg(ast_node * node)
 
     if (operand->getType()->isFloatType()) {
         auto * inst = new BinaryInst(currentFunction(), IRInstOperator::IRINST_OP_SUB_F,
-                                     module->newConstFloat(0.0f), operand, FloatType::getTypeFloat());
+                                     module->newConstFloat(-0.0f), operand, FloatType::getTypeFloat());
         emitToBlock(inst);
         return inst;
     }

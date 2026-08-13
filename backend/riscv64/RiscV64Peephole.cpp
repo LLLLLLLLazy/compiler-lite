@@ -292,13 +292,14 @@ int log2PowerOfTwo(int value)
 bool isStoreOpcode(const std::string & opcode)
 {
 	return opcode == "sb" || opcode == "sh" || opcode == "sw" || opcode == "sd" || opcode == "fsw" ||
-	       opcode == "fsd";
+	       opcode == "fsd" || opcode == "vse32.v" || opcode == "vsse32.v" || opcode == "vs1r.v";
 }
 
 bool isLoadOpcode(const std::string & opcode)
 {
 	return opcode == "lb" || opcode == "lbu" || opcode == "lh" || opcode == "lhu" || opcode == "lw" ||
-	       opcode == "lwu" || opcode == "ld" || opcode == "flw" || opcode == "fld";
+	       opcode == "lwu" || opcode == "ld" || opcode == "flw" || opcode == "fld" ||
+	       opcode == "vle32.v" || opcode == "vlse32.v" || opcode == "vl1re32.v";
 }
 
 bool isMemoryOpcode(const std::string & opcode)
@@ -646,6 +647,32 @@ bool registerLiveOutOfBlock(const MachineLiveness & info, RiscV64Inst * inst, co
 	return info.blocks[it->second].liveOut.find(reg) != info.blocks[it->second].liveOut.end();
 }
 
+/// @brief 检查寄存器是否在重定义前被使用或活跃越过当前块
+/// @param code 机器指令序列
+/// @param start 扫描起点指令
+/// @param reg 待检查的寄存器
+/// @param liveness 机器 CFG 活跃性信息
+/// @return true 表示删除该寄存器的定义不安全
+bool registerUsedAfterBeforeRedefOrLiveOut(InstList & code,
+	                                      InstIt start,
+	                                      const std::string & reg,
+	                                      const MachineLiveness & liveness)
+{
+	for (auto it = nextLive(code, start); it != code.end(); it = nextLive(code, it)) {
+		auto * inst = *it;
+		if (usesRegister(inst, reg) || instructionImplicitlyUsesRegister(inst, reg)) {
+			return true;
+		}
+		if (definesResultOperand(inst) && inst->result == reg) {
+			return false;
+		}
+		if (isControlBoundary(inst)) {
+			return registerLiveOutOfBlock(liveness, inst, reg);
+		}
+	}
+	return false;
+}
+
 /// @brief 判断寄存器是否可作为死定义清扫的候选
 ///
 /// 仅对调用者保存的临时/参数寄存器（t0-t6、a0-a7、ft0-ft11、fa0-fa7）做死定义消除。
@@ -661,6 +688,15 @@ bool isEliminableDefRegister(const std::string & reg)
 		"fa6", "fa7",
 	};
 	return kRemovable.find(reg) != kRemovable.end();
+}
+
+/// @brief 判断机器指令是否会修改未显式列入操作数的架构状态
+/// @param inst 待检查的机器指令
+/// @return 存在隐式架构副作用时返回 true
+bool hasImplicitArchitecturalSideEffects(RiscV64Inst * inst)
+{
+	// vsetvli 的 rd 可死，但 vl/vtype 会被后续所有 RVV 指令隐式读取
+	return isLiveInst(inst) && inst->opcode == "vsetvli";
 }
 
 /// @brief 基于机器级活跃性分析的通用死定义清扫
@@ -684,7 +720,7 @@ bool eliminateDeadDefinitions(InstList & code)
 			}
 			const auto defs = instructionDefSet(inst);
 			const auto uses = instructionUseSet(inst);
-			bool removable = !defs.empty();
+			bool removable = !defs.empty() && !hasImplicitArchitecturalSideEffects(inst);
 			for (const auto & def : defs) {
 				if (!isEliminableDefRegister(def) || live.find(def) != live.end()) {
 					removable = false;
@@ -1913,6 +1949,7 @@ bool foldMaterializationMoves(InstList & code)
 bool foldConsecutiveZeroStores(InstList & code)
 {
 	bool changed = false;
+	MachineLiveness liveness = buildMachineLiveness(code);
 
 	for (auto it = code.begin(); it != code.end(); ++it) {
 		auto * inst = *it;
@@ -1982,13 +2019,16 @@ bool foldConsecutiveZeroStores(InstList & code)
 					}
 				}
 			}
-			// rB 在链外(含跨控制边界)直到被重定义前仍有使用时不可删除 addi：
-			// 与 foldUnitStepIncrements 的修复同理，跨边界停止扫描会把
-			// 后续块中的地址基址使用漏掉，导致 s 寄存器在后续块被当作
-			// 已物化地址使用。fixup addi(rX,rB,imm) 自身从 afterSw2 之后
-			// 才开始扫描，天然被跳过。
-			if (rB_safe && registerUsedAfterIgnoringBoundary(code, afterSw2, rB)) {
-				rB_safe = false;
+			// 通过 CFG 活跃性覆盖控制边界后的引用，避免删除仍被后继块使用的地址定义
+			if (rB_safe) {
+				const bool hasFixup = afterSw2 != code.end() && !isControlBoundary(*afterSw2) &&
+				                      (*afterSw2)->opcode == "addi" && (*afterSw2)->arg1 == rB;
+				const bool fixupRedefinesRB = hasFixup && (*afterSw2)->result == rB;
+				InstIt scanStart = hasFixup ? afterSw2 : next2;
+				if (!fixupRedefinesRB &&
+				    registerUsedAfterBeforeRedefOrLiveOut(code, scanStart, rB, liveness)) {
+					rB_safe = false;
+				}
 			}
 			if (!rB_safe) {
 				continue;
@@ -2011,6 +2051,7 @@ bool foldConsecutiveZeroStores(InstList & code)
 					}
 				}
 			}
+			liveness = buildMachineLiveness(code);
 			continue;
 		}
 
@@ -2101,18 +2142,19 @@ bool foldConsecutiveZeroStores(InstList & code)
 			continue;
 		}
 
-		// 安全检查：链内 addi 定义的寄存器在链外(含跨控制边界，直到被重定义)
-		// 不能被引用；跨边界停止扫描会漏掉后续块中的地址基址使用。
-		// registerUsedAfterIgnoringBoundary 从 start 的下一条开始扫描，
-		// 因此以链尾节点为起点，恰好覆盖链后第一条指令(旧实现同样检查它)。
+		// 安全检查：链内 addi 定义的寄存器在链外不能被引用
+		// 通过 CFG 活跃性覆盖控制边界后的引用，避免漏掉后继块中的地址基址使用
 		bool chainSafe = true;
 		for (size_t ci = 0; ci < chainNodes.size(); ++ci) {
 			auto * cn = *chainNodes[ci];
 			if (cn->opcode != "addi" || cn->result.empty()) {
 				continue;
 			}
-			if (registerUsedAfterIgnoringBoundary(code, chainNodes.back(), cn->result)) {
+			std::string defReg = cn->result;
+			if (registerUsedAfterBeforeRedefOrLiveOut(code, chainNodes.back(), defReg, liveness)) {
 				chainSafe = false;
+			}
+			if (!chainSafe) {
 				break;
 			}
 		}
@@ -2140,6 +2182,7 @@ bool foldConsecutiveZeroStores(InstList & code)
 		}
 
 		changed = true;
+		liveness = buildMachineLiveness(code);
 	}
 
 	return changed;
@@ -3562,7 +3605,7 @@ bool reduceAffineAddressRecurrences(InstList & code)
 			if (matchAffineAddressChain(code, it, latchIt, indexReg, chain)) {
 				// baseReg 必须循环不变量：若在循环体内被定义，指针初值插入循环头时
 				// 该寄存器持有的是前导块残留的旧值（如另一个 GEP 的结果），
-				// 首轮迭代会用错误基址访存。
+				// 首轮迭代会用错误基址访存
 				if (registerDefinedInRange(bodyBegin, latchIt, chain.baseReg)) {
 					continue;
 				}
