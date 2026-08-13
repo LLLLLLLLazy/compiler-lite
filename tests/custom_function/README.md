@@ -75,6 +75,9 @@ bash ./tools/run-rvv-regression.sh                                      # RVV, V
 | 138 | 边界立即数回归 | INT_MIN/INT_MAX 的 RV64 常量物化 |
 | 139 | RVV 归约 | 整数尾部归约、严格顺序浮点归约、隐式 vl/vtype 状态 |
 | 140 | RVV spill | 31 路右结合归约强制 VR/累加器溢出、整寄存器 spill/reload、可变 VLEN |
+| 141 | 模式差分扫描 | select 形状1: 条件=参数 flag(mode==0 守卫),两侧均为循环内差分计算(LoopVersionInvariantSelect) |
+| 142 | 自适应平滑 | select 形状2: 条件=不变 icmp(参数 wnd<=8),两侧为不同访存组合的平滑公式 |
+| 143 | 双守卫分桶 | select 形状3: 同一循环两个不同不变条件(bit==0 与 sat>=8),触发多轮版本化(4 份循环体) |
 
 ## 已捕获的缺陷
 

@@ -26,6 +26,7 @@
 #include "fixedPointFunctionPass/LoopExitValueRewrite.h"
 #include "fixedPointFunctionPass/LoopFusion.h"
 #include "fixedPointFunctionPass/LoopStrengthReduce.h"
+#include "fixedPointFunctionPass/LoopVersionInvariantSelect.h"
 #include "fixedPointFunctionPass/IndVarSimplify.h"
 #include "fixedPointFunctionPass/LoopTiling.h"
 #include "fixedPointFunctionPass/LoopVectorize.h"
@@ -349,6 +350,11 @@ void PassManager::registerDefaultOptimizationPipeline(int32_t optLevel,
     // 有界位迭代循环求解：依赖 PhiToSelect 把累加分支规范成 select 形态
     registerFixedPointFunctionPass("BoundedBitLoopSolver", [this](Function * func) {
         BoundedBitLoopSolver pass(func, module);
+        return pass.run();
+    });
+    // 循环不变 select 条件版本化：把「每次迭代都选同一侧」的 select 剥出循环
+    registerFixedPointFunctionPass("LoopVersionInvariantSelect", [this](Function * func) {
+        LoopVersionInvariantSelect pass(func, module);
         return pass.run();
     });
     registerFixedPointFunctionPass("InstCombine", [this](Function * func) {
