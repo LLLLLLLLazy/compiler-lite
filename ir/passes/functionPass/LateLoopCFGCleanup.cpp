@@ -15,6 +15,7 @@
 #include "Instruction.h"
 #include "PhiInst.h"
 #include "Value.h"
+#include "AnalysisCache.h"
 #include "toolPass/CFGStateCleanup.h"
 
 namespace {
@@ -249,6 +250,10 @@ bool LateLoopCFGCleanup::run()
 
         if (localChanged) {
             changed = sanitizeCFGState(func) || changed;
+            // 删除 synthetic latch 后块集已变，缓存的 LoopInfo/DominatorTree
+            // 仍引用被释放的块指针；不失效会让后续 CanonicalizeLoop 等
+            // 复用陈旧 CFG 分析时读已释放内存（use-after-free）
+            func->getAnalysisCache().invalidateCFGAnalyses();
         }
     } while (localChanged);
 
