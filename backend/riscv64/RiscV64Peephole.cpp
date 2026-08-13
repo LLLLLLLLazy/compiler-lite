@@ -1933,6 +1933,158 @@ bool foldMaterializationMoves(InstList & code)
 	return changed;
 }
 
+/// @brief 折叠常量物化后的寄存器算术为立即数形式
+///
+///   li r, imm
+///   addw x, y, r       →  addiw x, y, imm
+///   subw x, y, r       →  addiw x, y, -imm
+///
+/// 64 位形式（add/sub）同样折叠为 addi。要求：
+/// - imm（及 -imm）可由 12 位有符号立即数编码；
+/// - r 在消费者之前没有其他使用（含隐式使用，如跨 call 的参数寄存器）。
+/// 加法的 r 在 rs1 位置时利用交换律改写；减法只折叠 r 位于 rs2 的情形。
+bool foldMaterializedArithImmediates(InstList & code)
+{
+	bool changed = false;
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * materialize = *it;
+		if (!isLiveInst(materialize) || materialize->opcode != "li" || materialize->result.empty() ||
+		    materialize->result == "zero") {
+			continue;
+		}
+
+		int imm;
+		if (!parseIntImmediate(materialize->arg1, imm) || !isSigned12BitImmediate(imm)) {
+			continue;
+		}
+
+		const std::string src = materialize->result;
+		for (auto scan = nextLive(code, it); scan != code.end(); scan = nextLive(code, scan)) {
+			auto * inst = *scan;
+			if (isControlBoundary(inst) || instructionImplicitlyUsesRegister(inst, src)) {
+				break;
+			}
+			if (!usesRegister(inst, src)) {
+				// 未使用 src 的指令若重定义 src，则 li 的值已死，停止扫描；
+				// 消费者自身重定义 src（如 addw r,y,r）属于可折叠形态，在上方 use 判断
+				// 中先行处理，不会走到这里。
+				if (definesResultOperand(inst) && inst->result == src) {
+					break;
+				}
+				continue;
+			}
+
+			// 找到第一个使用 src 的指令：仅处理可改写为立即数形式的算术
+			const std::string & op = inst->opcode;
+			bool is32 = false;
+			bool isSub = false;
+			if (op == "addw") {
+				is32 = true;
+			} else if (op == "add") {
+				is32 = false;
+			} else if (op == "subw") {
+				is32 = true;
+				isSub = true;
+			} else if (op == "sub") {
+				isSub = true;
+			} else {
+				break;
+			}
+
+			if (inst->result.empty() || inst->result == "zero") {
+				break;
+			}
+			const std::string & o1 = inst->arg1;
+			const std::string & o2 = inst->arg2;
+			int folded;
+			std::string other;
+			if (isSub) {
+				// subw/sub x, y, r → addi(w) x, y, -imm；r 在 rs1 位置无法折叠
+				if (o2 != src || o1 == src || !isSigned12BitImmediate(-imm)) {
+					break;
+				}
+				folded = -imm;
+				other = o1;
+			} else {
+				if (o2 == src && o1 != src) {
+					other = o1;
+				} else if (o1 == src && o2 != src) {
+					other = o2;
+				} else {
+					break;    // x = r op r 或 r 未作为操作数，保守放弃
+				}
+				folded = imm;
+			}
+
+			inst->opcode = is32 ? "addiw" : "addi";
+			inst->arg1 = other;
+			inst->arg2 = std::to_string(folded);
+			materialize->setDead();
+			changed = true;
+			break;
+		}
+	}
+	return changed;
+}
+
+/// @brief 折叠链式基址 addi 为单条立即数 addi
+///
+///   addi x, base, A
+///   addi x, x, B       →  addi x, base, A+B
+///   addi y, x, B       →  addi y, base, A+B   （要求 x 链外无其他使用）
+///
+/// 仅当 A+B 可由 12 位有符号立即数编码；两条 addi 相邻（其间无标签/控制边界），
+/// 保证不会把跨跳转目标中间状态折叠掉。
+bool foldChainedAddressAddi(InstList & code)
+{
+	bool changed = false;
+	MachineLiveness liveness = buildMachineLiveness(code);
+
+	for (auto it = code.begin(); it != code.end(); ++it) {
+		auto * first = *it;
+		if (!isLiveInst(first) || first->opcode != "addi" || first->result.empty() ||
+		    first->result == "zero" || first->arg1.empty()) {
+			continue;
+		}
+
+		int a;
+		if (!parseIntImmediate(first->arg2, a)) {
+			continue;
+		}
+
+		auto secondIt = nextLive(code, it);
+		if (secondIt == code.end() || isControlBoundary(*secondIt)) {
+			continue;
+		}
+		auto * second = *secondIt;
+		if (second->opcode != "addi" || second->arg1 != first->result || second->result.empty() ||
+		    second->result == "zero") {
+			continue;
+		}
+
+		int b;
+		if (!parseIntImmediate(second->arg2, b)) {
+			continue;
+		}
+		const long long sum = static_cast<long long>(a) + b;
+		if (sum < -2048 || sum > 2047) {
+			continue;
+		}
+
+		if (second->result != first->result &&
+		    registerUsedAfterBeforeRedefOrLiveOut(code, secondIt, first->result, liveness)) {
+			// 第一 addi 的结果在链外仍有使用：删除它会破坏活跃值，放弃
+			continue;
+		}
+
+		second->arg1 = first->arg1;
+		second->arg2 = std::to_string(static_cast<int>(sum));
+		first->setDead();
+		changed = true;
+	}
+	return changed;
+}
+
 /// @brief 合并连续零值 sw 为 sd，减少栈数组清零的指令数
 ///
 /// 匹配两种模式：
@@ -3998,6 +4150,10 @@ bool RiscV64Peephole::run(ILocRiscV64 & iloc, int optLevel, bool enableCoalesceR
 		localChanged = foldRedundantSnezAfterAndi(code) || localChanged;
 		// 折叠立即数/地址材料化后的冗余move：li x,imm; mv y,x -> li y,imm
 		localChanged = foldMaterializationMoves(code) || localChanged;
+		// 折叠常量物化后的寄存器算术为立即数形式：li r,imm; addw x,y,r -> addiw x,y,imm
+		localChanged = foldMaterializedArithImmediates(code) || localChanged;
+		// 合并链式基址 addi：addi x,sp,A; addi x,x,B -> addi x,sp,A+B
+		localChanged = foldChainedAddressAddi(code) || localChanged;
 		// 折叠零值 store，减少局部数组清零中的 li 0 序列
 		localChanged = foldZeroStores(code) || localChanged;
 		// 合并连续零值 sw 为 sd：将链式 addi+sw 替换为 sd 双字零存储
