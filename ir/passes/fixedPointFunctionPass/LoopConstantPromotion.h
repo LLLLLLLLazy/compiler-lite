@@ -9,8 +9,12 @@
 
 #pragma once
 
+class BasicBlock;
+class DominatorTree;
 class Function;
+class LoopInfo;
 class Module;
+class Value;
 
 class LoopConstantPromotion {
 
@@ -25,6 +29,18 @@ public:
     bool run();
 
 private:
+    /// @brief 热循环（深度>=2）内重复物化的小常量提升到公共支配点
+    /// @param loopInfo 循环信息
+    /// @param domTree 支配树
+    /// @return 若 IR 被修改则返回 true
+    bool promoteHotLoopMaterializedConstants(LoopInfo & loopInfo, DominatorTree & domTree);
+
+    /// @brief 热循环内同索引 GEP 的缩放共享（slli 合并为一条共享值）
+    /// @param loopInfo 循环信息
+    /// @param domTree 支配树
+    /// @return 若 IR 被修改则返回 true
+    bool shareHotLoopScaledGEPIndices(LoopInfo & loopInfo, DominatorTree & domTree);
+
     Function * func = nullptr;
     Module * mod = nullptr;
 };

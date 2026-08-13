@@ -201,7 +201,7 @@ Instruction * cloneVersionInstructionShell(Instruction * inst, Function * func)
     }
     if (auto * gep = dynamic_cast<GetElementPtrInst *>(inst)) {
         return new GetElementPtrInst(func, gep->getBasePointer(), gep->getIndexOperand(), gep->getType(),
-                                     gep->isArrayDecayGEP());
+                                     gep->isArrayDecayGEP(), gep->isIndexPreScaled());
     }
     if (auto * zext = dynamic_cast<ZExtInst *>(inst)) {
         return new ZExtInst(func, zext->getSource(), zext->getType());

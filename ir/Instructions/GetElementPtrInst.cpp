@@ -9,8 +9,15 @@
 #include "Function.h"
 #include "Types/PointerType.h"
 
-GetElementPtrInst::GetElementPtrInst(Function * func, Value * basePtr, Value * index, Type * resultType, bool decayArray)
-    : Instruction(func, IRInstOperator::IRINST_OP_GEP, resultType), decayArray(decayArray)
+GetElementPtrInst::GetElementPtrInst(Function * func,
+                                     Value * basePtr,
+                                     Value * index,
+                                     Type * resultType,
+                                     bool decayArray,
+                                     bool preScaled)
+    : Instruction(func, IRInstOperator::IRINST_OP_GEP, resultType),
+      decayArray(decayArray),
+      preScaled(preScaled)
 {
     addOperand(basePtr);
     addOperand(index);
@@ -43,4 +50,7 @@ void GetElementPtrInst::toString(std::string & str)
     }
 
     str += ", i32 " + getIndexOperand()->getIRName();
+    if (preScaled) {
+        str += "  ; pre-scaled byte offset";
+    }
 }

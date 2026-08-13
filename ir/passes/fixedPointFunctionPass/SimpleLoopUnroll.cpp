@@ -306,7 +306,8 @@ Instruction * SimpleLoopUnroll::cloneInstruction(Instruction * inst)
                                      gep->getBasePointer(),
                                      gep->getIndexOperand(),
                                      gep->getType(),
-                                     gep->isArrayDecayGEP());
+                                     gep->isArrayDecayGEP(),
+                                     gep->isIndexPreScaled());
     }
     if (auto * load = dynamic_cast<LoadInst *>(inst)) {
         return new LoadInst(func, load->getPointerOperand(), load->getType());
